@@ -12,7 +12,7 @@ jobs:
             run:
                 working-directory: census
         steps:
-            - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+            - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
               with:
                   path: census
                   persist-credentials: false
@@ -21,7 +21,7 @@ jobs:
                   CONTRACT_SHA: ${{ vars.DASHBUDDY_CONTRACT_SHA }}
               run: '[[ "$CONTRACT_SHA" =~ ^[0-9a-fA-F]{40}$ ]] || { echo "Set DASHBUDDY_CONTRACT_SHA to a full commit SHA"; exit 1; }'
             # Pin, bump deliberately. Sibling checkouts live under GITHUB_WORKSPACE.
-            - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+            - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
               with:
                   repository: sjtrotter/DashBuddy
                   ref: ${{ vars.DASHBUDDY_CONTRACT_SHA }}
@@ -43,7 +43,7 @@ jobs:
             id-token: write
         runs-on: ubuntu-latest
         steps:
-            - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+            - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
               with:
                   path: census
                   persist-credentials: false
@@ -52,7 +52,7 @@ jobs:
                   CONTRACT_SHA: ${{ vars.DASHBUDDY_CONTRACT_SHA }}
               run: '[[ "$CONTRACT_SHA" =~ ^[0-9a-fA-F]{40}$ ]] || { echo "Set DASHBUDDY_CONTRACT_SHA to a full commit SHA"; exit 1; }'
             # Pin, bump deliberately; the image uses exactly this contract revision.
-            - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+            - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
               with:
                   repository: sjtrotter/DashBuddy
                   ref: ${{ vars.DASHBUDDY_CONTRACT_SHA }}
@@ -60,7 +60,7 @@ jobs:
                   persist-credentials: false
             - name: Bootstrap wrapper JAR
               run: cp DashBuddy/gradle/wrapper/gradle-wrapper.jar census/gradle/wrapper/
-            - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+            - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
             - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
             - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
               with:
@@ -85,7 +85,7 @@ jobs:
                   provenance: true
                   sbom: true
             - name: Fail on CRITICAL or HIGH vulnerabilities (amd64)
-              uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+              uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
               env:
                   TRIVY_PLATFORM: linux/amd64
               with:
@@ -94,7 +94,7 @@ jobs:
                   exit-code: '1'
                   format: table
             - name: Fail on CRITICAL or HIGH vulnerabilities (arm64)
-              uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+              uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
               env:
                   TRIVY_PLATFORM: linux/arm64
               with:
@@ -102,7 +102,7 @@ jobs:
                   severity: CRITICAL,HIGH
                   exit-code: '1'
                   format: table
-            - uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+            - uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
               with:
                   image: ghcr.io/sjtrotter/dashbuddy-census@${{ steps.build.outputs.digest }}
                   format: spdx-json
@@ -120,7 +120,7 @@ jobs:
                       "$IMAGE@$DIGEST"
                   published_digest=$(docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{.Manifest.Digest}}')
                   test "$published_digest" = "$DIGEST"
-            - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+            - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
             - name: Sign the promoted immutable image digest (keyless)
               env:
                   IMAGE: ghcr.io/sjtrotter/dashbuddy-census@${{ steps.build.outputs.digest }}

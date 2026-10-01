@@ -8,6 +8,10 @@ updates:
       directory: /
       schedule:
           interval: weekly
+      ignore:
+          # JDK major stays at 21 (toolchain + app parity); bump deliberately, not by bot.
+          - dependency-name: "eclipse-temurin"
+            update-types: ["version-update:semver-major"]
     - package-ecosystem: github-actions
       directory: /
       schedule:
