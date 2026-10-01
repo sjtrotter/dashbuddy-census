@@ -36,10 +36,10 @@ During editing, set `PUBLIC_HOST`, a real `ACME_EMAIL`, matching strong database
 
 ## Build
 
-Check out the app at the agreed pinned revision as `../DashBuddy`; its `census-contract/` must provide `cloud.trotter.census:contract:0.0.0-local`. The wrapper JAR is deliberately omitted from this bootstrap. Copy it from the app, or run an installed Gradle's `gradle wrapper --gradle-version 9.3.0` once:
+Check out the app at the agreed pinned revision as `../DashBuddy`; its `census-contract/` must provide `cloud.trotter.census:contract:0.0.0-local`. The Gradle wrapper (script + jar) is committed, so `./gradlew` works out of the box:
 
 ```sh
-cp ../DashBuddy/gradle/wrapper/gradle-wrapper.jar gradle/wrapper/
+# (the Gradle wrapper jar is committed — `./gradlew` works out of the box)
 ./gradlew build
 ./gradlew :server:installDist
 ```

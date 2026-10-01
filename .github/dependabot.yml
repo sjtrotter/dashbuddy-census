@@ -4,6 +4,10 @@ updates:
       directory: /
       schedule:
           interval: weekly
+      ignore:
+          # Kotlin follows the app repo (the census-contract included build compiles in the same invocation).
+          - dependency-name: "org.jetbrains.kotlin*"
+          - dependency-name: "kotlin"
     - package-ecosystem: docker
       directory: /
       schedule:
