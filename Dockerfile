@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # TODO(S6): pin by digest via Dependabot
-FROM eclipse-temurin:21-jdk AS build
+FROM eclipse-temurin:25-jdk AS build
 WORKDIR /workspace
 # The contract's settings.gradle.kts reads the APP repo's version catalog at ../gradle/libs.versions.toml,
 # so the contract must sit beside a `gradle/` dir holding that catalog — two build contexts supply them:
@@ -12,7 +12,7 @@ COPY . .
 RUN ./gradlew :server:installDist --no-daemon -PcensusContractPath=${CENSUS_CONTRACT_PATH}
 
 # TODO(S6): pin by digest via Dependabot
-FROM eclipse-temurin:21-jre-alpine AS runtime
+FROM eclipse-temurin:25-jre-alpine AS runtime
 RUN addgroup -g 10001 census && adduser -D -u 10001 -G census census
 WORKDIR /app
 COPY --from=build /workspace/server/build/install/server /app
