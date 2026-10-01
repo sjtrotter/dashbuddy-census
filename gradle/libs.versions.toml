@@ -1,6 +1,6 @@
 # versions were pinned offline on 2026-10-01 — the first `./gradlew build` may need bumps; bump, do not loosen
 [versions]
-kotlin = "2.3.20"
+kotlin = "2.4.20"
 ktor = "3.6.0"
 kotlinxSerialization = "1.10.0"
 kotlinxCoroutines = "1.10.2"
