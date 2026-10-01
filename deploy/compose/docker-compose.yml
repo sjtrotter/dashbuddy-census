@@ -1,0 +1,59 @@
+services:
+    census:
+        # production pins @sha256:<digest>; replace the tag expression when promoting.
+        image: ghcr.io/sjtrotter/dashbuddy-census:${CENSUS_IMAGE_TAG:-latest}
+        env_file: .env
+        read_only: true
+        tmpfs:
+            - /tmp
+        cap_drop: [ALL]
+        security_opt: [no-new-privileges:true]
+        restart: unless-stopped
+        depends_on:
+            postgres:
+                condition: service_healthy
+        networks: [edge, db]
+    postgres:
+        image: postgres:16-alpine
+        environment:
+            POSTGRES_DB: census
+            POSTGRES_USER: census
+            POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+        volumes:
+            - pgdata:/var/lib/postgresql/data
+        healthcheck:
+            test: [CMD-SHELL, "pg_isready -U census -d census"]
+            interval: 10s
+            timeout: 5s
+            retries: 5
+        restart: unless-stopped
+        networks: [db]
+    caddy:
+        image: caddy:2-alpine
+        environment:
+            PUBLIC_HOST: ${PUBLIC_HOST:?Set PUBLIC_HOST in .env}
+            ACME_EMAIL: ${ACME_EMAIL:-}
+        ports:
+            - "80:80"
+            - "443:443"
+        volumes:
+            - caddy_data:/data
+            - caddy_config:/config
+            - ./Caddyfile:/etc/caddy/Caddyfile:ro
+        restart: unless-stopped
+        depends_on:
+            - census
+        networks: [edge]
+
+networks:
+    edge:
+        # Caddy needs egress for ACME certificate issuance and renewal.
+        driver: bridge
+    db:
+        driver: bridge
+        internal: true
+
+volumes:
+    pgdata:
+    caddy_data:
+    caddy_config:

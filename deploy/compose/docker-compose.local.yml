@@ -1,0 +1,9 @@
+# Compose >= 2.24.4 for !override. The profile leaves Caddy out of a normal local up.
+services:
+    census:
+        ports:
+            # Never expose the un-proxied HTTP port on all interfaces.
+            - "127.0.0.1:8080:8080"
+    caddy:
+        profiles: [public-edge]
+        ports: !override []

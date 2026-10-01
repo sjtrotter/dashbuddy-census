@@ -1,0 +1,13 @@
+.git
+.agents
+.codex
+.gradle
+.kotlin
+**/build
+**/.gradle
+**/.kotlin
+.idea
+*.iml
+deploy/compose/.env
+**/backups
+DashBuddy

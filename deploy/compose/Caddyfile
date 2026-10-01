@@ -1,0 +1,29 @@
+{
+    email {$ACME_EMAIL}
+    # ADR-0011: NO client IP is ever retained — runtime errors included; liveness is observed through /healthz probes, not proxy logs
+    log {
+        output discard
+    }
+}
+
+{$PUBLIC_HOST} {
+    encode zstd gzip
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options nosniff
+        Referrer-Policy no-referrer
+        -Server
+    }
+    reverse_proxy census:8080 {
+        header_up -X-Forwarded-For
+        header_up -Forwarded
+        header_up -X-Real-IP
+        header_up -CF-Connecting-IP
+        header_up -True-Client-IP
+    }
+    # Access log is DISCARDED on purpose: no IP retention (ADR-0011).
+    log {
+        output discard
+    }
+    # S3: per-IP rate limiting via caddy-ratelimit requires a custom Caddy build.
+}

@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ $# -ne 1 || ! -f "$1" ]]; then
+    printf 'Usage: %s /path/to/census-YYYY-MM-DD.sql.gz\n' "$0" >&2
+    exit 1
+fi
+dump="$(cd -- "$(dirname -- "$1")" && pwd)/$(basename -- "$1")"
+cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
+gzip -t -- "$dump"
+printf 'Restore %s into a FRESH census database? Type RESTORE: ' "$dump"
+read -r confirmation
+[[ "$confirmation" == RESTORE ]] || { printf 'Cancelled.\n'; exit 1; }
+# Prevent startup migrations/writes racing the emptiness check and restore.
+docker compose stop census
+objects="$(docker compose exec -T postgres psql -X -U census -d census -At -v ON_ERROR_STOP=1 \
+    -c "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg_toast%' AND c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f');")"
+if [[ "$objects" != 0 ]]; then
+    printf 'Refusing restore: census must be a fresh database with no user relations. Census remains stopped.\n' >&2
+    exit 1
+fi
+gzip -dc -- "$dump" | docker compose exec -T postgres psql -X -U census -d census \
+    --single-transaction -v ON_ERROR_STOP=1
+printf 'Restore complete. Review the data, then run docker compose up -d census.\n'

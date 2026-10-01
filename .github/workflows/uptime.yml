@@ -1,0 +1,16 @@
+name: Public uptime
+on:
+    schedule:
+        - cron: '*/30 * * * *'
+    workflow_dispatch:
+permissions:
+    contents: read
+jobs:
+    health:
+        if: ${{ vars.PUBLIC_HOST != '' }}
+        runs-on: ubuntu-latest
+        steps:
+            - name: Probe liveness
+              env:
+                  PUBLIC_HOST: ${{ vars.PUBLIC_HOST }}
+              run: curl -fsS --max-time 30 "https://${PUBLIC_HOST}/healthz"

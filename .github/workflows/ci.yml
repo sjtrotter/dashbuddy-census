@@ -1,0 +1,37 @@
+name: CI
+on:
+    pull_request:
+    push:
+        branches: [main]
+permissions:
+    contents: read
+jobs:
+    build:
+        runs-on: ubuntu-latest
+        defaults:
+            run:
+                working-directory: census
+        steps:
+            - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+              with:
+                  path: census
+                  persist-credentials: false
+            - name: Require a full contract commit pin
+              env:
+                  CONTRACT_SHA: ${{ vars.DASHBUDDY_CONTRACT_SHA }}
+              run: '[[ "$CONTRACT_SHA" =~ ^[0-9a-fA-F]{40}$ ]] || { echo "Set DASHBUDDY_CONTRACT_SHA to a full commit SHA"; exit 1; }'
+            # Pin, bump deliberately. Sibling checkouts live under GITHUB_WORKSPACE.
+            - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+              with:
+                  repository: sjtrotter/DashBuddy
+                  ref: ${{ vars.DASHBUDDY_CONTRACT_SHA }}
+                  path: DashBuddy
+                  persist-credentials: false
+            - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+              with:
+                  distribution: temurin
+                  java-version: '21'
+            - name: Bootstrap wrapper JAR from the pinned app checkout
+              run: cp "$GITHUB_WORKSPACE/DashBuddy/gradle/wrapper/gradle-wrapper.jar" gradle/wrapper/
+            - name: Build and test (runner Docker enables MigrationTest)
+              run: ./gradlew build --no-daemon -PcensusContractPath="$GITHUB_WORKSPACE/DashBuddy/census-contract"
