@@ -16,5 +16,17 @@ jobs:
               with:
                   path: census
                   persist-credentials: false
+            # The wire contract is an included build of the app repo, pinned to a reviewed SHA
+            # (repository variable DASHBUDDY_CONTRACT_SHA — bump deliberately).
+            - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+              with:
+                  repository: sjtrotter/DashBuddy
+                  ref: ${{ vars.DASHBUDDY_CONTRACT_SHA }}
+                  path: DashBuddy
+                  persist-credentials: false
+            - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+              with:
+                  distribution: temurin
+                  java-version: "21"
             - name: Build and test (runner Docker enables MigrationTest)
               run: ./gradlew build --no-daemon -PcensusContractPath="$GITHUB_WORKSPACE/DashBuddy/census-contract"
