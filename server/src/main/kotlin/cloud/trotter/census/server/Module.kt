@@ -4,12 +4,16 @@ import cloud.trotter.census.server.auth.AuthenticatedInstallKey
 import cloud.trotter.census.server.db.EnvelopeStore
 import cloud.trotter.census.server.db.HealthStore
 import cloud.trotter.census.server.db.InstallStore
+import cloud.trotter.census.server.db.OpsStore
 import cloud.trotter.census.server.db.SkeletonStore
 import cloud.trotter.census.server.jobs.HealthAlarms
+import cloud.trotter.census.server.ops.OpsLogging
+import cloud.trotter.census.server.ops.isOpsPath
 import cloud.trotter.census.server.routes.envelopeRoutes
 import cloud.trotter.census.server.routes.healthReportRoutes
 import cloud.trotter.census.server.routes.healthRoutes
 import cloud.trotter.census.server.routes.identityRoutes
+import cloud.trotter.census.server.routes.opsRoutes
 import cloud.trotter.census.server.routes.policyRoutes
 import cloud.trotter.census.server.routes.skeletonRoutes
 import io.ktor.http.HttpStatusCode
@@ -50,7 +54,9 @@ fun Application.module(config: Config, db: Database?, clock: Clock = SystemClock
     install(DefaultHeaders) {
         header("Server", "")
     }
+    install(OpsLogging)
     install(CallLogging) {
+        filter { call -> !isOpsPath(call.request.path()) }
         level = Level.INFO
         format { call ->
             // Only known paths: unknown paths can contain user-supplied secrets.
@@ -72,6 +78,10 @@ fun Application.module(config: Config, db: Database?, clock: Clock = SystemClock
         }
     }
     install(RateLimit) {
+        register(RateLimitName("ops")) {
+            rateLimiter(limit = 60, refillPeriod = 1.minutes)
+            requestKey { "ops" }
+        }
         register(RateLimitName("enrol")) {
             rateLimiter(limit = 120, refillPeriod = 1.hours)
             requestKey { "global" }
@@ -110,6 +120,7 @@ fun Application.module(config: Config, db: Database?, clock: Clock = SystemClock
         val envelopes = db?.let { EnvelopeStore(it, clock) }
         val health = db?.let { HealthStore(it, clock) }
         val alarms = alarmEvaluator ?: health?.let { HealthAlarms(it, clock) }
+        opsRoutes(config, db?.let { OpsStore(it, clock, policy) }, alarms, clock, policy)
         identityRoutes(store, clock, policy) {
             if (store != null && skeletons != null) skeletonRoutes(store, skeletons, clock, policy)
             if (envelopes != null) envelopeRoutes(envelopes, clock, policy)
@@ -120,7 +131,7 @@ fun Application.module(config: Config, db: Database?, clock: Clock = SystemClock
 
 private val LOGGABLE_PATHS = setOf(
     "/healthz", "/readyz", "/v1/policy", "/v1/enroll", "/v1/rotate", "/v1/nonce", "/v1/installs/me", "/v1/me", "/v1/skeletons",
-    "/v1/envelopes", "/v1/health",
+    "/v1/envelopes", "/v1/health", "/ops",
 )
 
 @Serializable

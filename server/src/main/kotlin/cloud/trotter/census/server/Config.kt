@@ -16,7 +16,14 @@ data class Config(
     val operatorTokenSha256: String,
     val serverVersion: String = "dev",
     val imageDigest: String? = null,
+    val operatorTotpSecret: String? = null,
 ) {
+    init {
+        require(operatorTotpSecret == null || cloud.trotter.census.server.ops.Totp.validSecret(operatorTotpSecret)) {
+            "Invalid variable: OPERATOR_TOTP_SECRET"
+        }
+    }
+
     // Fixed: the Compose healthcheck and Caddy upstream assume this port.
     val port: Int = 8080
 
@@ -45,6 +52,7 @@ data class Config(
                 publicHost = publicHost,
                 operatorTokenSha256 = operatorTokenSha256.lowercase(),
                 serverVersion = env["SERVER_VERSION"]?.takeIf { it.isNotBlank() } ?: "dev",
+                operatorTotpSecret = env["OPERATOR_TOTP_SECRET"],
                 imageDigest = env["IMAGE_DIGEST"]?.takeIf { it.isNotBlank() },
             )
         }

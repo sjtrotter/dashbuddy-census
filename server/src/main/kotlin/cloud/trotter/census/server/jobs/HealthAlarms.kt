@@ -141,6 +141,22 @@ class HealthAlarms(
     private val startedAt: Instant by lazy { startedAt ?: clock.now() }
     private var dedupeDay: LocalDate? = null
     private val raised = mutableSetOf<AlarmKey>()
+    private val delivered = mutableListOf<Alarm>()
+
+    @Synchronized
+    fun raisedToday(): List<Alarm> {
+        resetDay()
+        return delivered.map { it.copy(ruleIds = it.ruleIds.toList()) }
+    }
+
+    private fun resetDay() {
+        val today = clock.today()
+        if (dedupeDay != today) {
+            raised.clear()
+            delivered.clear()
+            dedupeDay = today
+        }
+    }
 
     suspend fun evaluate(installId: UUID, reports: List<HealthReport>, keyHash: String) {
         val now = clock.now()
@@ -187,17 +203,15 @@ class HealthAlarms(
     private fun emit(alarm: Alarm, installId: UUID?) {
         // Use delivery time under this lock; an evaluation paused across midnight cannot reset
         // the next day's set back to its old input day and allow duplicate deliveries.
-        val today = clock.today()
-        if (dedupeDay != today) {
-            raised.clear()
-            dedupeDay = today
-        }
+        resetDay()
         val keys = if (alarm.ruleIds.isEmpty()) {
             listOf(AlarmKey(alarm.kind, installId, alarm.platform, alarm.version, null))
         } else {
             alarm.ruleIds.map { AlarmKey(alarm.kind, installId, alarm.platform, alarm.version, it) }
         }.filter { it !in raised }.ifEmpty { return }
-        sink.raise(alarm.copy(ruleIds = keys.mapNotNull { it.rule }))
+        val delivery = alarm.copy(ruleIds = keys.mapNotNull { it.rule })
+        sink.raise(delivery)
+        delivered += delivery.copy(ruleIds = delivery.ruleIds.toList())
         raised.addAll(keys)
         stats.record(alarm.kind)
     }

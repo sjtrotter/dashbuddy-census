@@ -10,7 +10,7 @@ Follow the [AWS deployment runbook](../deploy/aws/README.md) for the S2 Graviton
 
 ## Rotate the operator token
 
-Operator authentication is planned; S1 validates configuration but has no operator routes. Generate and retain a high-entropy token in the operator's password manager. Put only its 64-digit SHA-256 hex digest in `OPERATOR_TOKEN_SHA256`. Never put the original token in `.env`, tickets, or request logs. Replace the digest and recreate census with `docker compose up -d --force-recreate census`; future authenticated clients must switch to the new token. No overlapping-token window is implemented.
+All `/ops` requests require the operator bearer token. Generate and retain a high-entropy token in the operator's password manager. Put only its 64-digit SHA-256 hex digest in `OPERATOR_TOKEN_SHA256`. Never put the original token in `.env`, tickets, or request logs. Replace the digest and recreate census with `docker compose up -d --force-recreate census`; authenticated clients must switch to the new token. No overlapping-token window is implemented.
 
 ## Backup and restore
 
@@ -18,9 +18,9 @@ Run `./backup.sh` from `deploy/compose` using a daily scheduler. It writes a res
 
 For recovery, use a fresh PostgreSQL volume/database, start only `postgres`, and run `./restore.sh /absolute/path/to/backup.sql.gz`. Type `RESTORE` at the prompt. The script stops census, refuses a database with user relations, and restores in one transaction with SQL errors fatal. It never drops an existing database. Review the restored data, reapply later withdrawals when that feature exists, then start census and check readiness. Schedule a restore drill; copying a dump alone does not prove recovery.
 
-## Revoke an install — planned
+## Revoke or withdraw an install
 
-`DELETE /v1/installs/me` will let an install withdraw. Operator revocation, cascade deletion rules, and a durable procedure to reapply withdrawals after restore are future work. Foreign keys currently do not cascade. Do not pretend a manual `DELETE FROM installs` is a complete withdrawal procedure.
+`DELETE /v1/installs/me` lets an authenticated install withdraw. The operator can revoke credentials using the endpoint below. Revocation retains stored observations; withdrawal deletes install-keyed rows in one transaction. Reapply subsequent withdrawals after restoring an older backup. Foreign keys currently do not cascade. Do not pretend a manual `DELETE FROM installs` is a complete withdrawal procedure.
 
 ## Incident: what we can and cannot see
 
@@ -30,7 +30,7 @@ These choices limit attribution and request reconstruction. Preserve only the mi
 
 ## S5 trust and capture handling
 
-Enrollment leaves `installs.trusted` false. An operator may set that flag through controlled SQL; no `/ops/*` routes are supplied in this slice. Trust unlocks `POST /v1/envelopes` and the trusted-install silence alarm. Every install may submit skeletons and health reports. Trust does not bypass authentication, sensitive scanning, validation, quality limits, or shared budgets. Play Integrity decoding and attestation changes are outside this slice; the existing attestation column is untouched.
+Enrollment leaves `installs.trusted` false. An operator sets that flag through the TOTP-protected `/ops/installs/{uuid}/trust` endpoint below. Trust unlocks `POST /v1/envelopes` and the trusted-install silence alarm. Every install may submit skeletons and health reports. Trust does not bypass authentication, sensitive scanning, validation, quality limits, or shared budgets. Play Integrity decoding and attestation changes are outside this slice; the existing attestation column is untouched.
 
 A trusted envelope contains an **already-redacted `uinode.v1` capture**, including UI chrome and its capture metadata. It is not a skeleton and may contain plaintext UI strings and the capture's timestamp. The server repeats the public contract's sensitive-marker scan, rejects hits, and removes `metadata.deviceFingerprint` and `metadata.rulesetSignature` before re-serializing and storing. This scan is a backstop, not a general redactor. The envelope's database fingerprint remains NULL; app-side pairing uses `captureId`. Logs never contain captures, payload strings, fingerprints, hashes, bodies, or secrets. A sensitive rejection WARN contains only the public contract marker name.
 
@@ -49,8 +49,103 @@ The six-hourly purge deletes envelopes whose `purge_after` is before the current
 | `new_clusters` | At least five distinct clusters first seen today for a platform/version, joined through today's cluster sightings. |
 | `silence` | A trusted, active install has gone at least 48 elapsed hours since its last accepted health batch (or evaluator startup if none has been received), AND its stored last health day is at least two UTC days old. A missing stored day does not fire. A fresh backfill resets the elapsed clock regardless of the report's day. |
 
-Each delivered alarm is counted by kind in process-local `AlarmStats`. The `AlarmSink` seam currently writes WARN lines under logger `Alarm` containing only kind, platform, version, optional eight-character install prefix, and rule IDs. Platform, version, and rule IDs are rendered only when they match their token grammars; other values become `[redacted]`. SNS delivery is S6 work. No payload or credentials are included. Alarm evaluation failures after a committed health batch log one WARN `alarm_evaluation_failed class=<simple name>` under `Alarm`, without the exception message; the accepted response remains HTTP 200. Cancellation propagates. Dedupe keys are recorded only after successful sink delivery, so a throwing sink can be retried on the next evaluation.
+Each delivered alarm is counted by kind in process-local `AlarmStats`. The `AlarmSink` seam currently writes WARN lines under logger `Alarm` containing only kind, platform, version, optional eight-character install prefix, and rule IDs. Platform, version, and rule IDs are rendered only when they match their token grammars; other values become `[redacted]`. SNS delivery is S6b work. No payload or credentials are included. Alarm evaluation failures after a committed health batch log one WARN `alarm_evaluation_failed class=<simple name>` under `Alarm`, without the exception message; the accepted response remains HTTP 200. Cancellation propagates. Dedupe keys are recorded only after successful sink delivery, so a throwing sink can be retried on the next evaluation.
 
 Deduplication is in memory by `(kind, full install identity when applicable, platform, version, rule)` for the current UTC day; the full identity is never logged. For rule-list alarms only newly firing rules are delivered. The set resets on a UTC-day change. A process restart may repeat that day's alarms, which is acceptable for this delivery seam. Counters also reset on restart. A trusted install may report a failed pipeline without needing any envelope upload.
 
 The silence clock uses a process-local map of install IDs to server receipt instants, updated on every accepted health batch, and an evaluator startup instant for installs without an entry. After a process restart the silence clock restarts: it fails toward NO alarm for the first 48 hours; the stored-day check still bounds it. No receipt timestamp is added to the database.
+
+
+## S6a operator surface
+
+`GET /ops/` is a read-only, server-rendered dashboard: server version, `Policy.k`, UTC day,
+delivered alarms, ranked clusters and rendered samples, seven days of fleet health, install
+prefixes, today's ledger, and vocabulary queue count. It has no forms, JavaScript, or embedded
+operator credential. Its CSP is `default-src 'none'; style-src 'unsafe-inline'`. Supply the bearer
+header with your HTTP client (for example, curl); a plain browser link cannot supply that header.
+
+All `/ops/*` endpoints require `Authorization: Bearer <operator token>`. Missing or incorrect
+credentials return only `401 {"error":"unauthorized"}`. The shared `ops` rate bucket allows
+60 requests per minute. Each request logs one INFO line under `Ops`, with method, a known
+`/ops/<first segment>` path (no parameters or query), and status. Unknown segments reduce to
+`/ops`. No body, token, hash, payload, or full install ID is logged.
+
+Mutations additionally require `X-Census-Totp`, a six-digit RFC 6238 HMAC-SHA1 code. Configure
+`OPERATOR_TOTP_SECRET` with a canonical uppercase, unpadded RFC 4648 base32 secret of 16–64
+characters. Invalid configuration aborts startup without echoing the value. Codes use 30-second
+steps with a one-step tolerance in either direction. Accepted codes cannot be reused for 90
+seconds in the current process; use a fresh code for each mutation. Missing/wrong codes return
+`401 totp_required`, reuse returns `401 totp_replayed`, and an unset secret returns
+`503 totp_unconfigured`. Bearer-authenticated reads remain available with no TOTP secret.
+SNS delivery and TOTP provisioning are S6b; this slice does not generate or distribute secrets.
+
+### Display gate (#1175)
+
+The #1175 ruling excludes trusted
+installs from the k count. At least `Policy.k` distinct non-trusted installs in the last 28 UTC
+days, **or any trusted sighting**, unblinds a cluster's class/id labels. The trusted-device
+exception is k = 1 for the operator's own device. Below the gate, every class/id is replaced
+by `~` and the first eight hex characters of its SHA-256 digest. Text slots show only kind
+badges at every gate level; their token hashes are never rendered in a sample or dashboard.
+Install, sighting, version, and day counts remain visible. Raw sample JSON is never returned.
+Vocabulary hashes are available only on the dedicated JSON vocabulary surface.
+
+### JSON reads
+
+| Endpoint | Result |
+| --- | --- |
+| `GET /ops/clusters?version=&status=&limit=` | Array of `{platformAppVersion, clusters}` groups, numeric versions newest first; optional filters must be valid when supplied. Default 50 rows, maximum 200 across groups. Rows include dates, counts, trust/gate flags, versions, `newWithVersion`, status, resolved rule, and notes. |
+| `GET /ops/clusters/{fingerprint}` | Cluster row and `{platformAppVersion, receivedDay, skeleton}` samples; `newWithVersion` refers to its newest observed version. |
+| `GET /ops/installs?limit=` | Prefixes, dates, trust/revocation flags, last app version, and whether an attestation verdict exists. Default 50, maximum 200. |
+| `GET /ops/health?days=7` | `fleet` rows and per-install prefix/day/platform/version counters; maximum 90 days. |
+| `GET /ops/alarms` | Today's successfully delivered alarms and process-local `AlarmStats` counts. |
+| `GET /ops/ledger?day=YYYY-MM-DD` | Per-install prefix counters and totals; defaults to today. `batches` is a count, never the batch IDs. |
+| `GET /ops/vocabulary/queue?limit=` | Hash, kind, distinct non-trusted install count, first/last day for eligible hashes absent from vocabulary; default 50, maximum 200. |
+
+Cluster ranking is computed at read time as `distinctInstalls28d × log2(1 + sightings28d) ×
+recency`, where recency is 1.0 within 7 days, 0.5 within 28 days, and 0.1 otherwise. The 28-day
+counts include today and the preceding 27 UTC dates. A cluster is new with a version when its
+first-seen day is at least that platform/version's first sighting day and it has no sighting
+under a numerically older version. Nullable JSON fields are omitted. An install app-version value outside the existing version grammars is omitted from the operator view.
+
+### Mutations with curl
+
+Set `CENSUS_URL` to the server origin, `OPERATOR_TOKEN` from the password manager, and `TOTP`
+to a fresh code before **each** command. Do not enable shell tracing or curl verbose output.
+Read the full install UUID from the phone's developer settings; the surface shows prefixes only.
+These examples use environment placeholders, never embedded credentials.
+
+```sh
+curl --fail-with-body "$CENSUS_URL/ops/clusters/$FINGERPRINT/status" \
+  -H "Authorization: Bearer $OPERATOR_TOKEN" -H "X-Census-Totp: $TOTP" \
+  -H 'Content-Type: application/json' \
+  -d '{"status":"resolved","resolvedRuleId":"doordash.screen.offer","notes":"Reviewed"}'
+
+curl --fail-with-body "$CENSUS_URL/ops/installs/$INSTALL_UUID/trust" \
+  -H "Authorization: Bearer $OPERATOR_TOKEN" -H "X-Census-Totp: $TOTP" \
+  -H 'Content-Type: application/json' -d '{"trusted":true}'
+
+curl --fail-with-body -X POST "$CENSUS_URL/ops/installs/$INSTALL_UUID/revoke" \
+  -H "Authorization: Bearer $OPERATOR_TOKEN" -H "X-Census-Totp: $TOTP"
+
+curl --fail-with-body "$CENSUS_URL/ops/vocabulary/resolve" \
+  -H "Authorization: Bearer $OPERATOR_TOKEN" -H "X-Census-Totp: $TOTP" \
+  -H 'Content-Type: application/json' \
+  -d "{\"tokenHash\":\"$TOKEN_HASH\",\"clearText\":\"Looking for offers\",\"source\":\"corpus\",\"reject\":false}"
+
+curl --fail-with-body "$CENSUS_URL/ops/vocabulary/resolve" \
+  -H "Authorization: Bearer $OPERATOR_TOKEN" -H "X-Census-Totp: $TOTP" \
+  -H 'Content-Type: application/json' \
+  -d "{\"tokenHash\":\"$TOKEN_HASH\",\"clearText\":null,\"source\":\"corpus\",\"reject\":true}"
+```
+
+Status accepts `new`, `triaged`, `drafted`, `resolved`, or `ignored`; notes are at most 2,000
+characters and the optional resolved rule must match the wire rule-ID grammar. Set `trusted`
+to false to remove trust. Successful mutations return 204; missing target rows return 404.
+Revocation is idempotent and immediately blocks the install's signed requests.
+
+Vocabulary source is `trusted:<eight-hex-prefix>`, `corpus`, or `rule_anchor`. Clear text is at
+most 128 characters. Resolution proves `CensusHash.of(clearText) == tokenHash`; mismatch returns
+422 `hash_mismatch`. Rejection stores NULL clear text. Resolution requires current non-trusted
+k eligibility, and never overwrites an existing vocabulary row. Queue promotion/nightly work
+and `shipped` export remain M4/#641.
