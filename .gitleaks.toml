@@ -1,0 +1,12 @@
+# gitleaks configuration — the server repo must never carry a secret (operator tokens live outside
+# both repos; the server stores only sha256 digests). Everything allow-listed here is a DETERMINISTIC
+# test vector, not a credential; add to this list only with the comment that proves it.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Deterministic test vectors"
+regexes = [
+  # RequestSignerTest.SECRET: base64url of the bytes 0x00..0x1f (the install-secret shape), used to pin the HMAC vector.
+  '''AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8''',
+]
