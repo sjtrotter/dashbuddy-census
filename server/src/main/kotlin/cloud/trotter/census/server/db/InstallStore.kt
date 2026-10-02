@@ -73,7 +73,8 @@ class InstallStore(private val db: Database, private val clock: Clock) {
                 row.getObject("revoked_at") != null -> EnrolOutcome.Revoked
                 !sameHash(row.getString("key_hash"), keyHash) -> EnrolOutcome.KeyMismatch
                 else -> {
-                    update("UPDATE installs SET last_seen_day = ?, last_app_version = ? WHERE install_id = ?", day, appVersion, installId)
+                    // Review (Astra, round 3): a paused same-key enrol must never move activity backwards.
+                    update("UPDATE installs SET last_seen_day = GREATEST(last_seen_day, ?), last_app_version = ? WHERE install_id = ?", day, appVersion, installId)
                     EnrolOutcome.SameKey
                 }
             }
@@ -83,6 +84,17 @@ class InstallStore(private val db: Database, private val clock: Clock) {
     /** Read-only, including for revoked rows; the caller verifies the credential before using it. */
     suspend fun lookup(installId: UUID): Install? = query {
         select("SELECT * FROM installs WHERE install_id = ?", installId) { row ->
+            Install(
+                installId, row.getObject("created_day", LocalDate::class.java),
+                row.getObject("last_seen_day", LocalDate::class.java), row.getBoolean("trusted"),
+                row.getString("key_hash"), row.getObject("revoked_at", java.time.OffsetDateTime::class.java)?.toInstant(),
+            )
+        }
+    }
+
+    /** [lookup] bound to the CURRENT credential and generation (review, Astra round 3): a withdrawn-and-re-enrolled id with a new key is NOT visible to the old key. */
+    suspend fun lookupActive(installId: UUID, keyHash: String): Install? = query {
+        select("SELECT * FROM installs WHERE install_id = ? AND key_hash = ? AND revoked_at IS NULL", installId, keyHash) { row ->
             Install(
                 installId, row.getObject("created_day", LocalDate::class.java),
                 row.getObject("last_seen_day", LocalDate::class.java), row.getBoolean("trusted"),

@@ -119,7 +119,7 @@ fun Route.identityRoutes(store: InstallStore?, clock: Clock, policy: Policy) {
             get("/me") {
                 val now = call.attributes.getOrNull(RequestInstantKey) ?: clock.now()
                 val today = now.atOffset(ZoneOffset.UTC).toLocalDate()
-                val install = store.lookup(call.attributes[InstallRowKey].id)
+                val install = store.lookupActive(call.attributes[InstallRowKey].id, call.attributes[AuthenticatedInstallKey].secretHash)
                 if (install == null) {
                     call.respond(HttpStatusCode.Unauthorized, ErrorResponse("unauthorized"))
                     return@get

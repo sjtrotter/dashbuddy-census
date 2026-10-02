@@ -35,22 +35,31 @@ class AdmissionLimiter(
 
     @Synchronized
     fun admit(installId: String, now: Instant = clock.now()): Boolean {
-        val globalCapacity = globalAdmissionsPerMinute.toDouble()
-        val global = globalBucket ?: Bucket(globalCapacity, now).also { globalBucket = it }
-        refill(global, now, globalCapacity)
-        if (global.tokens < 1.0) return false
-        // Even failed per-ID admissions spend the global budget before accessing the LRU.
-        global.tokens -= 1.0
+        // Review (Astra, round 3): the per-ID bucket decides FIRST, so one exhausted (or invented) id cannot drain
+        // the global budget by hammering; the global token is spent only for requests the id bucket admits —
+        // churn across fresh ids is still bounded in aggregate by the global bucket.
+        var fresh = false
         val bucket = buckets[installId] ?: run {
             if (buckets.size == maxBuckets && !evictEligible(now)) {
                 capacityDenialCount++
                 return false
             }
+            fresh = true
             Bucket(PER_ID_CAPACITY, now).also { buckets[installId] = it }
         }
         refill(bucket, now, PER_ID_CAPACITY)
         if (bucket.tokens < 1.0) return false
+        val globalCapacity = globalAdmissionsPerMinute.toDouble()
+        val global = globalBucket ?: Bucket(globalCapacity, now).also { globalBucket = it }
+        refill(global, now, globalCapacity)
+        if (global.tokens < 1.0) {
+            // A never-admitted id leaves no resident bucket: global exhaustion must not fill the LRU with
+            // full-capacity entries that evict the depleted ones it exists to remember.
+            if (fresh) buckets.remove(installId)
+            return false
+        }
         bucket.tokens -= 1.0
+        global.tokens -= 1.0
         return true
     }
 

@@ -138,19 +138,49 @@ private suspend fun ApplicationCall.deny(counter: AtomicLong, error: String = "u
 }
 
 /** Read at most cap + 1 bytes, even for chunked bodies with no Content-Length. */
-internal suspend fun ApplicationCall.readLimitedBody(): ByteArray? {
-    val channel = receiveChannel()
-    val bytes = ByteArray(1_048_577)
+internal suspend fun ApplicationCall.readLimitedBody(): ByteArray? =
+    when (val read = readBounded(receiveChannel(), MAX_BODY_BYTES, BODY_READ_TIMEOUT_MS)) {
+        is BoundedRead.Ok -> read.bytes
+        BoundedRead.TooLarge -> {
+            respond(HttpStatusCode.PayloadTooLarge, ErrorResponse("payload_too_large"))
+            null
+        }
+        BoundedRead.Timeout -> {
+            // Review (Astra, round 3): a dripped body held an in-flight permit forever; the read now has a
+            // total deadline so 32 slow uploaders cannot exhaust authentication for everyone else.
+            respond(HttpStatusCode.RequestTimeout, ErrorResponse("request_timeout"))
+            null
+        }
+    }
+
+internal const val MAX_BODY_BYTES: Int = 1_048_576
+internal const val BODY_READ_TIMEOUT_MS: Long = 10_000
+
+internal sealed interface BoundedRead {
+    data class Ok(val bytes: ByteArray) : BoundedRead
+    data object TooLarge : BoundedRead
+    data object Timeout : BoundedRead
+}
+
+/** Reads at most [limit] + 1 bytes within [timeoutMs] total; pure over the channel so a test can drip bytes. */
+internal suspend fun readBounded(channel: io.ktor.utils.io.ByteReadChannel, limit: Int, timeoutMs: Long): BoundedRead {
+    val bytes = ByteArray(limit + 1)
     var size = 0
-    while (size < bytes.size) {
-        val count = channel.readAvailable(bytes, size, bytes.size - size)
-        if (count == -1) break
-        size += count
+    val completed = kotlinx.coroutines.withTimeoutOrNull(timeoutMs) {
+        while (size < bytes.size) {
+            val count = channel.readAvailable(bytes, size, bytes.size - size)
+            if (count == -1) break
+            size += count
+        }
+        true
     }
-    if (size > 1_048_576) {
+    if (completed == null) {
         channel.cancel(null)
-        respond(HttpStatusCode.PayloadTooLarge, ErrorResponse("payload_too_large"))
-        return null
+        return BoundedRead.Timeout
     }
-    return bytes.copyOf(size)
+    if (size > limit) {
+        channel.cancel(null)
+        return BoundedRead.TooLarge
+    }
+    return BoundedRead.Ok(bytes.copyOf(size))
 }

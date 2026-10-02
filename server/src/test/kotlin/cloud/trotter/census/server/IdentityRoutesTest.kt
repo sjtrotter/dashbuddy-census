@@ -4,6 +4,7 @@ import ch.qos.logback.classic.Logger
 import ch.qos.logback.classic.spi.ILoggingEvent
 import ch.qos.logback.core.read.ListAppender
 import cloud.trotter.census.server.auth.AdmissionLimiter
+import cloud.trotter.census.server.today
 import cloud.trotter.census.server.auth.AuthStats
 import cloud.trotter.census.server.auth.InstallAuth
 import cloud.trotter.census.server.auth.RequestSigner
@@ -575,6 +576,43 @@ class IdentityRoutesTest {
     private suspend fun assertError(response: HttpResponse, status: Int, error: String) {
         assertEquals(status, response.status.value)
         assertEquals("{\"error\":\"$error\"}", response.bodyAsText())
+    }
+
+    @Test
+    fun `an old credential cannot see a replacement generation of the same id (review round 3)`() {
+        val clock = FixedClock()
+        val id = UUID.randomUUID()
+        val hashA = hashSecret(secret(31))
+        val hashB = hashSecret(secret(32))
+        Database.connect(config()).use { db ->
+            val store = InstallStore(db, clock)
+            runBlocking {
+                assertEquals(EnrolOutcome.Created, store.enrol(id, hashA, "v1"))
+                assertNotNull(store.lookupActive(id, hashA))
+                assertTrue(store.withdraw(id, hashA) is MutationOutcome.Applied)
+                assertEquals(EnrolOutcome.Created, store.enrol(id, hashB, "v1"))
+                assertNull(store.lookupActive(id, hashA), "the replacement generation must be invisible to the old key")
+                assertNotNull(store.lookupActive(id, hashB))
+            }
+        }
+    }
+
+    @Test
+    fun `a paused same-key enrol never moves last_seen_day backwards (review round 3)`() {
+        val clock = FixedClock()
+        val id = UUID.randomUUID()
+        val hash = hashSecret(secret(33))
+        val today = clock.today()
+        Database.connect(config()).use { db ->
+            val store = InstallStore(db, clock)
+            runBlocking {
+                assertEquals(EnrolOutcome.Created, store.enrol(id, hash, "v1"))
+                assertTrue(store.touchLastSeen(id, hash, today.plusDays(1)))
+                assertEquals(EnrolOutcome.SameKey, store.enrol(id, hash, "v1")) // the clock still says `today`
+                assertEquals(today.plusDays(1), store.lookup(id)!!.lastSeenDay)
+                assertFalse(store.touchLastSeen(id, hash, today), "an older day must not win")
+            }
+        }
     }
 
     private fun seedChildren(id: String) = sql { connection ->
