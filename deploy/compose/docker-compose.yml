@@ -12,7 +12,10 @@ services:
         depends_on:
             postgres:
                 condition: service_healthy
-        networks: [edge, db]
+        networks:
+            edge:
+                ipv4_address: 172.30.0.10
+            db: {}
     postgres:
         image: postgres:16-alpine
         environment:
@@ -49,6 +52,9 @@ networks:
     edge:
         # Caddy needs egress for ACME certificate issuance and renewal.
         driver: bridge
+        ipam:
+            config:
+                - subnet: 172.30.0.0/24
     db:
         driver: bridge
         internal: true

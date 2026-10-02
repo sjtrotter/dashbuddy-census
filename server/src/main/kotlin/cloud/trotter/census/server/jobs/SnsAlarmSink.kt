@@ -9,6 +9,8 @@ import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runInterruptible
+import kotlinx.coroutines.withTimeout
 import org.slf4j.LoggerFactory
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.time.Duration.Companion.minutes
@@ -45,8 +47,11 @@ class SnsAlarmSink(
                 for (message in pending) {
                     try {
                         val kind = message.substringBefore('\n').removePrefix("kind=")
-                        publisher("census alarm: $kind", message)
+                        withTimeout(15_000) {
+                            runInterruptible(Dispatchers.IO) { publisher("census alarm: $kind", message) }
+                        }
                     } catch (failure: Exception) {
+                        // A publish deadline leaves this consumer active; shutdown cancels it.
                         if (failure is CancellationException && !isActive) throw failure
                         stats.record("sns_failed")
                         val now = nanoTime()

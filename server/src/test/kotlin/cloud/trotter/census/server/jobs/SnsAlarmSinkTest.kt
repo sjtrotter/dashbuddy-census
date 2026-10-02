@@ -7,6 +7,7 @@ import ch.qos.logback.core.read.ListAppender
 import cloud.trotter.census.server.assertPrivateLogs
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNull
@@ -113,6 +114,78 @@ class SnsAlarmSinkTest {
         } finally {
             release.countDown()
             worker.cancelAndJoin()
+        }
+    }
+
+    @Test
+    fun `cancelling worker interrupts blocked publisher without releasing latch`() = runBlocking {
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val interrupted = CountDownLatch(1)
+        val stats = AlarmStats()
+        val sink = SnsAlarmSink(arn, { _, _ ->
+            entered.countDown()
+            try {
+                release.await()
+            } catch (failure: InterruptedException) {
+                interrupted.countDown()
+                throw failure
+            }
+        }, AlarmSink {})
+        val worker = sink.start(this, stats)
+        try {
+            sink.raise(alarm)
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            worker.cancel()
+            withTimeout(2_000) { worker.join() }
+            assertTrue(worker.isCompleted)
+            assertEquals(1L, release.count)
+            assertEquals(0L, interrupted.count)
+            assertNull(stats.snapshot()["sns_failed"])
+        } finally {
+            release.countDown()
+            worker.cancelAndJoin()
+        }
+    }
+
+    @Test
+    fun `publish timeout counts failure warns and consumer serves next message`() = runBlocking {
+        val logger = LoggerFactory.getLogger("Alarm") as Logger
+        val logs = ListAppender<ILoggingEvent>().apply { start() }
+        logger.addAppender(logs)
+        val entered = CountDownLatch(1)
+        val interrupted = CountDownLatch(1)
+        val delivered = LinkedBlockingQueue<String>()
+        val stats = AlarmStats()
+        val sink = SnsAlarmSink(arn, { _, message ->
+            if (message.contains("\nversion=0\n")) {
+                entered.countDown()
+                try {
+                    Thread.sleep(60_000)
+                } catch (failure: InterruptedException) {
+                    interrupted.countDown()
+                    throw failure
+                }
+            }
+            delivered.add(message)
+        }, AlarmSink {})
+        val worker = sink.start(this, stats)
+        try {
+            sink.raise(alarm.copy(version = "0"))
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            sink.raise(alarm)
+            assertEquals(renderAlarm(alarm), delivered.poll(20, TimeUnit.SECONDS))
+            assertEquals(0L, interrupted.count)
+            assertEquals(1L, stats.snapshot()["sns_failed"])
+            assertTrue(worker.isActive)
+            val warning = logs.list.single()
+            assertEquals(Level.WARN, warning.level)
+            assertEquals("sns_publish_failed class=TimeoutCancellationException", warning.formattedMessage)
+            assertNull(warning.throwableProxy)
+        } finally {
+            worker.cancelAndJoin()
+            logger.detachAppender(logs)
+            logs.stop()
         }
     }
 

@@ -18,6 +18,7 @@ import org.slf4j.bridge.SLF4JBridgeHandler
 import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient
 import software.amazon.awssdk.services.sns.SnsClient
 import software.amazon.awssdk.services.sns.model.PublishRequest
+import java.time.Duration
 import kotlin.system.exitProcess
 import kotlin.time.Duration.Companion.hours
 import kotlin.time.Duration.Companion.minutes
@@ -52,7 +53,14 @@ fun main() {
             val sink: AlarmSink = config.alertsTopicArn?.let { arn ->
                 // Resolve the default credential/region chain only on the IO consumer, so even
                 // SDK initialization failure remains an optional delivery failure.
-                val client = lazy { SnsClient.builder().httpClientBuilder(UrlConnectionHttpClient.builder()).build() }
+                val client = lazy {
+                    SnsClient.builder()
+                        .overrideConfiguration {
+                            it.apiCallTimeout(Duration.ofSeconds(10)).apiCallAttemptTimeout(Duration.ofSeconds(5))
+                        }
+                        .httpClientBuilder(UrlConnectionHttpClient.builder())
+                        .build()
+                }
                 SnsAlarmSink(arn, { subject, message ->
                     client.value.publish(PublishRequest.builder().topicArn(arn).subject(subject).message(message).build())
                 }).also { sns ->
