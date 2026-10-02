@@ -49,7 +49,11 @@ The six-hourly purge deletes envelopes whose `purge_after` is before the current
 | `new_clusters` | At least five distinct clusters first seen today for a platform/version, joined through today's cluster sightings. |
 | `silence` | A trusted, active install has gone at least 48 elapsed hours since its last accepted health batch (or evaluator startup if none has been received), AND its stored last health day is at least two UTC days old. A missing stored day does not fire. A fresh backfill resets the elapsed clock regardless of the report's day. |
 
-Each delivered alarm is counted by kind in process-local `AlarmStats`. The `AlarmSink` seam currently writes WARN lines under logger `Alarm` containing only kind, platform, version, optional eight-character install prefix, and rule IDs. Platform, version, and rule IDs are rendered only when they match their token grammars; other values become `[redacted]`. SNS delivery is S6b work. No payload or credentials are included. Alarm evaluation failures after a committed health batch log one WARN `alarm_evaluation_failed class=<simple name>` under `Alarm`, without the exception message; the accepted response remains HTTP 200. Cancellation propagates. Dedupe keys are recorded only after successful sink delivery, so a throwing sink can be retried on the next evaluation.
+Each delivered alarm is counted by kind in process-local `AlarmStats`. The `AlarmSink` always writes WARN lines under logger `Alarm`, the system of record, containing only kind, platform, version, optional eight-character hex install prefix, and rule IDs. The shared renderer validates the kind against the catalogue and all other fields against their token grammars; invalid values become `[redacted]`. Alarm evaluation failures after a committed health batch log one WARN `alarm_evaluation_failed class=<simple name>` under `Alarm`, without the exception message; the accepted response remains HTTP 200. Cancellation propagates. Dedupe keys are recorded only after successful sink delivery, so a throwing sink can be retried on the next evaluation.
+
+On AWS, Terraform provisions `alerts_topic_arn` in SSM from the existing SNS topic; the host renderer injects optional `ALERTS_TOPIC_ARN`. Alarm email arrives through the **existing confirmed SNS subscription**. Its subject is `census alarm: <kind>` and its application body contains exactly `kind`, `platform`, `version`, `install_prefix`, and `rule_ids` as `name=value`, one field per line, using the same validated tokens and redaction as the WARN. It never includes payload strings, captures, full install IDs, fingerprints, hashes, bearer tokens, TOTP codes/secrets, a topic ARN/account ID, or exception messages. AWS's email envelope and unsubscribe links are outside the application body. Missing/`CHANGE-ME` optional parameters are omitted; no topic means logging only.
+
+SNS delivery uses one application-scoped `Dispatchers.IO` consumer and a capacity-32 drop-oldest channel. Slow or failed delivery never blocks health admission or purge; a failure increments `sns_failed` in process-local `AlarmStats` and emits at most one WARN per ten minutes, `sns_publish_failed class=<simple name>`, under `Alarm`. Queue overflow and shutdown can lose email copies. Today's delivered alarms and kind counters record local delivery, not SNS acknowledgement. Counters and warning throttling reset on restart.
 
 Deduplication is in memory by `(kind, full install identity when applicable, platform, version, rule)` for the current UTC day; the full identity is never logged. For rule-list alarms only newly firing rules are delivered. The set resets on a UTC-day change. A process restart may repeat that day's alarms, which is acceptable for this delivery seam. Counters also reset on restart. A trusted install may report a failed pipeline without needing any envelope upload.
 
@@ -77,7 +81,13 @@ steps with a one-step tolerance in either direction. Accepted codes cannot be re
 seconds in the current process; use a fresh code for each mutation. Missing/wrong codes return
 `401 totp_required`, reuse returns `401 totp_replayed`, and an unset secret returns
 `503 totp_unconfigured`. Bearer-authenticated reads remain available with no TOTP secret.
-SNS delivery and TOTP provisioning are S6b; this slice does not generate or distribute secrets.
+On AWS, provision the secret locally and store it as the SSM SecureString
+`/dashbuddy-census/operator_totp_secret`; `/usr/local/sbin/census-configure` reads it into the
+root-owned 0600 `/opt/census/.env`. Follow [Operator second factor + alarm delivery](../deploy/aws/README.md#operator-second-factor--alarm-delivery)
+for local generation, authenticator enrolment, Terraform apply, and the one-time renderer
+replacement on existing hosts whose cloud-init is frozen. Restart `census.service` after changing
+the parameter. A missing/`CHANGE-ME` secret is omitted, so mutations fail closed with the 503 above;
+it does not refuse server startup. Never generate, print, or distribute the secret through SSM Run Command.
 
 ### Display gate (#1175)
 

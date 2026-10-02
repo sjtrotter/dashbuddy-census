@@ -28,6 +28,11 @@ resource "aws_iam_role_policy" "instance" {
     Statement = [
       {
         Effect   = "Allow"
+        Action   = "sns:Publish"
+        Resource = aws_sns_topic.alerts.arn
+      },
+      {
+        Effect   = "Allow"
         Action   = "s3:PutObject"
         Resource = "${aws_s3_bucket.backup.arn}/*"
       },

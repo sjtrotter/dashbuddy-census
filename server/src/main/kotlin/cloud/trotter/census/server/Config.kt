@@ -17,10 +17,14 @@ data class Config(
     val serverVersion: String = "dev",
     val imageDigest: String? = null,
     val operatorTotpSecret: String? = null,
+    val alertsTopicArn: String? = null,
 ) {
     init {
         require(operatorTotpSecret == null || cloud.trotter.census.server.ops.Totp.validSecret(operatorTotpSecret)) {
             "Invalid variable: OPERATOR_TOTP_SECRET"
+        }
+        require(alertsTopicArn == null || alertsTopicArnPattern.matches(alertsTopicArn)) {
+            "Invalid variable: ALERTS_TOPIC_ARN"
         }
     }
 
@@ -53,6 +57,7 @@ data class Config(
                 operatorTokenSha256 = operatorTokenSha256.lowercase(),
                 serverVersion = env["SERVER_VERSION"]?.takeIf { it.isNotBlank() } ?: "dev",
                 operatorTotpSecret = env["OPERATOR_TOTP_SECRET"],
+                alertsTopicArn = env["ALERTS_TOPIC_ARN"],
                 imageDigest = env["IMAGE_DIGEST"]?.takeIf { it.isNotBlank() },
             )
         }
@@ -60,3 +65,5 @@ data class Config(
 }
 
 internal fun Char.isHexDigit(): Boolean = this in '0'..'9' || this in 'a'..'f' || this in 'A'..'F'
+
+internal val alertsTopicArnPattern = Regex("^arn:aws:sns:[a-z0-9-]+:[0-9]{12}:[A-Za-z0-9_-]{1,256}$")

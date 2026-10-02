@@ -2,8 +2,12 @@ package cloud.trotter.census.server
 
 import cloud.trotter.census.server.db.HealthStore
 import cloud.trotter.census.server.db.InstallStore
+import cloud.trotter.census.server.jobs.AlarmSink
+import cloud.trotter.census.server.jobs.AlarmStats
 import cloud.trotter.census.server.jobs.HealthAlarms
+import cloud.trotter.census.server.jobs.LoggingAlarmSink
 import cloud.trotter.census.server.jobs.PurgeJob
+import cloud.trotter.census.server.jobs.SnsAlarmSink
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.netty.Netty
 import kotlinx.coroutines.CancellationException
@@ -11,6 +15,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.slf4j.LoggerFactory
 import org.slf4j.bridge.SLF4JBridgeHandler
+import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient
+import software.amazon.awssdk.services.sns.SnsClient
+import software.amazon.awssdk.services.sns.model.PublishRequest
 import kotlin.system.exitProcess
 import kotlin.time.Duration.Companion.hours
 import kotlin.time.Duration.Companion.minutes
@@ -41,7 +48,20 @@ fun main() {
     }
     database.use { db ->
         embeddedServer(Netty, host = "0.0.0.0", port = config.port) {
-            val alarms = HealthAlarms(HealthStore(db, SystemClock), SystemClock, startedAt = SystemClock.now())
+            val stats = AlarmStats()
+            val sink: AlarmSink = config.alertsTopicArn?.let { arn ->
+                // Resolve the default credential/region chain only on the IO consumer, so even
+                // SDK initialization failure remains an optional delivery failure.
+                val client = lazy { SnsClient.builder().httpClientBuilder(UrlConnectionHttpClient.builder()).build() }
+                SnsAlarmSink(arn, { subject, message ->
+                    client.value.publish(PublishRequest.builder().topicArn(arn).subject(subject).message(message).build())
+                }).also { sns ->
+                    sns.start(this, stats).invokeOnCompletion {
+                        if (client.isInitialized()) runCatching { client.value.close() }
+                    }
+                }
+            } ?: LoggingAlarmSink()
+            val alarms = HealthAlarms(HealthStore(db, SystemClock), SystemClock, sink, stats, startedAt = SystemClock.now())
             module(config, db, alarmEvaluator = alarms)
             launch {
                 val purge = PurgeJob(InstallStore(db, SystemClock), SystemClock, alarms = alarms)

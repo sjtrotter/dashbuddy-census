@@ -86,9 +86,13 @@ write_files:
 
       prefix = '/${name_prefix}/'
       names = ['public_host', 'acme_email', 'postgres_password', 'operator_token_sha256']
+      optional = {
+          'operator_totp_secret': ('OPERATOR_TOTP_SECRET', r'^[A-Z2-7]{16,64}$'),
+          'alerts_topic_arn': ('ALERTS_TOPIC_ARN', r'^arn:aws:sns:[a-z0-9-]+:[0-9]{12}:[A-Za-z0-9_-]{1,256}$'),
+      }
       result = json.loads(subprocess.check_output([
           'aws', 'ssm', 'get-parameters', '--with-decryption', '--output', 'json',
-          '--names', *[prefix + name for name in names],
+          '--names', *[prefix + name for name in [*names, *optional]],
       ]))
       values = {p['Name'].removeprefix(prefix): p['Value'] for p in result['Parameters']}
       if any(not values.get(name) or values[name] == 'CHANGE-ME' for name in names):
@@ -115,6 +119,13 @@ write_files:
           'OPERATOR_TOKEN_SHA256': values['operator_token_sha256'],
           'CENSUS_IMAGE_TAG': tag,
       }
+      for name, (key, pattern) in optional.items():
+          value = values.get(name)
+          if not value or value == 'CHANGE-ME':
+              continue
+          if not re.fullmatch(pattern, value):
+              raise SystemExit('CENSUS: invalid optional parameter format: ' + name)
+          env[key] = value
       fd, temporary = tempfile.mkstemp(prefix='.env.', dir='/opt/census')
       try:
           with os.fdopen(fd, 'w') as stream:

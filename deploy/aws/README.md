@@ -63,7 +63,7 @@ This stops the old instance before detaching the data volume and re-attaches it 
 
 ## 3. Set parameters and resume startup
 
-The two SecureStrings use the AWS-managed `aws/ssm` key; the instance has scoped SSM reads and `kms:Decrypt` only on that key ARN, resolved through `alias/aws/ssm`, with no customer KMS key or broad KMS grant. Terraform creates placeholders and ignores later value changes. ACME email is an operator-owned String; `public_host` is a String continuously managed from `var.public_host`.
+The three SecureStrings use the AWS-managed `aws/ssm` key; the instance has scoped SSM reads and `kms:Decrypt` only on that key ARN, resolved through `alias/aws/ssm`, with no customer KMS key or broad KMS grant. Terraform creates placeholders and ignores later value changes. ACME email is an operator-owned String; `public_host` is a String continuously managed from `var.public_host`, and `alerts_topic_arn` is a String managed from the existing SNS topic. The optional TOTP secret is provisioned below.
 
 Run on the workstation (adjust the prefix if customized; disable shell tracing):
 
@@ -86,7 +86,112 @@ aws ssm put-parameter --name /dashbuddy-census/operator_token_sha256 \
 unset OPERATOR_TOKEN TOKEN_SHA256
 ```
 
-The host writes a root-owned 0600 `.env` atomically, never logs secret values, and refuses missing/placeholder parameters. Database passwords must use the documented base64 format (letters, digits, `+ / = _ -`); token hashes must have 64 hex digits. `POSTGRES_PASSWORD` and `DATABASE_PASSWORD` get the same value. Changing the SSM database password does not rotate an existing PostgreSQL role: coordinate the database password change before recreating containers.
+The host writes a root-owned 0600 `.env` atomically, never logs secret values, and refuses missing/placeholder **required** parameters (`public_host`, `acme_email`, `postgres_password`, `operator_token_sha256`). Database passwords must use the documented base64 format (letters, digits, `+ / = _ -`); token hashes must have 64 hex digits. `POSTGRES_PASSWORD` and `DATABASE_PASSWORD` get the same value. Changing the SSM database password does not rotate an existing PostgreSQL role: coordinate the database password change before recreating containers.
+
+## Operator second factor + alarm delivery
+
+1. Generate the TOTP secret **locally**, with shell tracing disabled. Retain it in the password manager and in `~/dashbuddy/secrets/census-operator-totp` with mode 0600. Generate only once; rotation requires enrolling the replacement and restarting the service.
+
+   ```sh
+   umask 077
+   mkdir -p ~/dashbuddy/secrets
+   (set -C; python3 -c 'import secrets,base64; print(base64.b32encode(secrets.token_bytes(20)).decode())' > ~/dashbuddy/secrets/census-operator-totp)
+   chmod 0600 ~/dashbuddy/secrets/census-operator-totp
+   ```
+
+   Enrol the retained secret in an authenticator using this URI (substitute privately; this is text, not a request to a website):
+
+   ```text
+   otpauth://totp/dashbuddy-census:operator?secret=<SECRET>&issuer=dashbuddy-census&algorithm=SHA1&digits=6&period=30
+   ```
+
+   A local QR is optional via `qrencode -t ANSIUTF8`; treat the URI and QR as the secret itself. Never paste them into tickets, logs, or an SSM command. After step 2 creates the placeholder, store the retained secret from the workstation:
+
+   ```sh
+   aws ssm put-parameter --name /dashbuddy-census/operator_totp_secret \
+     --type SecureString --value "$(cat ~/dashbuddy/secrets/census-operator-totp)" --overwrite
+   ```
+
+2. From `deploy/aws`, with the usual profile, region, and variable file, run the operator checks and apply:
+
+   ```sh
+   terraform fmt -check
+   terraform validate
+   terraform plan
+   terraform apply
+   ```
+
+   This adds the `operator_totp_secret` SecureString placeholder, the instance role's `sns:Publish` grant scoped to `aws_sns_topic.alerts.arn`, and the Terraform-managed `alerts_topic_arn` String. The existing SSM read resource `/dashbuddy-census/*` covers both names. Now run the workstation `put-parameter` above; never put the real TOTP secret in Terraform configuration. Confirm the existing SNS email subscription. Deploy the S6b app image through the usual image workflow before restarting below.
+
+   The renderer omits `OPERATOR_TOTP_SECRET` or `ALERTS_TOPIC_ARN` when its optional parameter is missing, empty, or `CHANGE-ME`; startup continues. Present values must match `^[A-Z2-7]{16,64}$` and `^arn:aws:sns:[a-z0-9-]+:[0-9]{12}:[A-Za-z0-9_-]{1,256}$` respectively. Invalid formats refuse rendering without printing values; the app also validates canonical base32. An omitted TOTP secret leaves authenticated mutations at `503 totp_unconfigured`; an omitted topic selects logging only. The four required parameters and their refusal are unchanged.
+
+3. **Existing host:** its cloud-init is frozen by `ignore_changes`, so applying the template edit does **not** update `/usr/local/sbin/census-configure`. Run this one-time SSM command from the workstation's reviewed S6b checkout in `deploy/aws`. It extracts that exact script from `cloud-init.yaml.tftpl`, substitutes only the three non-secret template settings, atomically replaces the root-owned 0700 host script, then runs `systemctl restart census.service`. Set `CENSUS_NAME_PREFIX` and `CENSUS_IMAGE_REF` to the values used for this deployment's `name_prefix` and `image_ref` (not an operator secret). It does not change the currently selected Compose image.
+
+   ```bash
+   set -euo pipefail
+   export AWS_DEFAULT_REGION="$(terraform output -raw region)"
+   export AWS_PAGER=''
+   export CENSUS_NAME_PREFIX='dashbuddy-census'
+   export CENSUS_IMAGE_REF='ghcr.io/sjtrotter/dashbuddy-census:latest' # use your image_ref value
+   CENSUS_INSTANCE_ID=$(terraform output -raw instance_id)
+   umask 077
+   CENSUS_RENDER_COMMAND=$(mktemp)
+   trap 'rm -f -- "$CENSUS_RENDER_COMMAND"' EXIT
+   python3 - > "$CENSUS_RENDER_COMMAND" <<'PY'
+   import base64
+   import json
+   import os
+   import re
+   import textwrap
+   from pathlib import Path
+
+   template = Path('cloud-init.yaml.tftpl').read_text()
+   block = template.split('  - path: /usr/local/sbin/census-configure\n', 1)[1].split('\n  - path:', 1)[0]
+   script = textwrap.dedent(block.split('    content: |\n', 1)[1]).rstrip() + '\n'
+   settings = {
+       'region': (os.environ['AWS_DEFAULT_REGION'], r'[a-z0-9-]+'),
+       'name_prefix': (os.environ['CENSUS_NAME_PREFIX'], r'[a-z0-9-]+'),
+       'image_ref': (os.environ['CENSUS_IMAGE_REF'], r'ghcr\.io/[A-Za-z0-9_./:@-]+'),
+   }
+   for name, (value, pattern) in settings.items():
+       if not re.fullmatch(pattern, value):
+           raise SystemExit('Invalid non-secret template setting: ' + name)
+       script = script.replace('${' + name + '}', value)
+   if '${' in script:
+       raise SystemExit('Unresolved template setting')
+   encoded = base64.b64encode(script.encode()).decode()
+   command = '\n'.join([
+       'set -eu',
+       'umask 077',
+       'temporary=$(mktemp /usr/local/sbin/.census-configure.XXXXXX)',
+       'trap \'rm -f -- "$temporary"\' EXIT',
+       'base64 --decode > "$temporary" <<\'CENSUS_RENDERER\'',
+       encoded,
+       'CENSUS_RENDERER',
+       'chown root:root "$temporary"',
+       'chmod 0700 "$temporary"',
+       'bash -n "$temporary"',
+       'mv -f -- "$temporary" /usr/local/sbin/census-configure',
+       'systemctl restart census.service',
+   ])
+   print(json.dumps({'commands': [command], 'executionTimeout': ['900']}))
+   PY
+   CENSUS_COMMAND_ID=$(aws ssm send-command \
+     --instance-ids "$CENSUS_INSTANCE_ID" \
+     --document-name AWS-RunShellScript \
+     --parameters "file://$CENSUS_RENDER_COMMAND" \
+     --timeout-seconds 300 \
+     --query Command.CommandId --output text)
+   aws ssm wait command-executed --command-id "$CENSUS_COMMAND_ID" --instance-id "$CENSUS_INSTANCE_ID"
+   aws ssm get-command-invocation --command-id "$CENSUS_COMMAND_ID" --instance-id "$CENSUS_INSTANCE_ID" \
+     --query Status --output text
+   ```
+
+   If the CLI waiter expires before the service restart finishes, query status again before resubmitting. A **new instance gets the updated renderer automatically from cloud-init**. After the one-time replacement, future parameter changes need only `systemctl restart census.service`; Compose already passes `.env` to Census via `env_file`.
+
+Application alarm email uses the existing SNS subscription. The WARN under `Alarm` is always the system of record. The subject is `census alarm: <kind>`; the body has exactly five lines: `kind=...`, `platform=...`, `version=...`, `install_prefix=...`, `rule_ids=...`. Values use the log's validated tokens and `[redacted]` replacements, with `-` for an absent prefix and a bracketed rule-ID list. Neither the application message nor its logs contain a topic ARN/account ID, full install ID, secret, token, TOTP code, payload string, or exception message. AWS's own email envelope/unsubscribe links are outside the application message. One application-scoped IO coroutine publishes from a capacity-32 drop-oldest queue. Failures increment process-local `AlarmStats.sns_failed` and produce at most one `Alarm` WARN `sns_publish_failed class=<simple name>` per ten minutes; health admission and purge continue. Queue overflow or shutdown may lose the SNS copy; counts of raised alarms refer to local delivery, not confirmed email delivery.
+
+**IMDSv2 hop limit:** the census container sits one Docker bridge hop behind the host, so `instance.tf` sets `http_put_response_hop_limit = 2` (with `http_tokens = "required"` kept) — the SDK's default IMDSv2 credential/region chain works from inside the container and the app configures no static credentials or region. `terraform apply` changes this in place (no instance replacement).
 
 ## 4. DNS and first start
 

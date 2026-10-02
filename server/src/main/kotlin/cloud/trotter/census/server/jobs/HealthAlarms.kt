@@ -51,17 +51,25 @@ fun interface AlarmSink {
 
 class LoggingAlarmSink : AlarmSink {
     override fun raise(alarm: Alarm) {
-        log.warn(
-            "alarm kind={} platform={} version={} install_prefix={} rule_ids={}",
-            alarm.kind, alarm.platform.takeIf { platformPattern.matches(it) } ?: "[redacted]",
-            alarm.version.takeIf { WireGrammars.platformAppVersion.matches(it) } ?: "[redacted]",
-            alarm.installPrefix ?: "-", alarm.ruleIds.map { it.takeIf { rule -> WireGrammars.ruleId.matches(rule) } ?: "[redacted]" },
-        )
+        log.warn("alarm {}", renderAlarm(alarm).replace('\n', ' '))
     }
 
     private val log = LoggerFactory.getLogger("Alarm")
-    private val platformPattern = Regex("^[a-z_][a-z0-9_]{0,31}$")
 }
+
+/** The single rendering owner for logs and SNS: validated tokens only, one field per line. */
+fun renderAlarm(alarm: Alarm): String {
+    val kind = alarm.kind.takeIf { it in alarmKinds } ?: "[redacted]"
+    val platform = alarm.platform.takeIf { platformPattern.matches(it) } ?: "[redacted]"
+    val version = alarm.version.takeIf { WireGrammars.platformAppVersion.matches(it) } ?: "[redacted]"
+    val prefix = alarm.installPrefix?.let { it.takeIf { candidate -> installPrefixPattern.matches(candidate) } ?: "[redacted]" } ?: "-"
+    val rules = alarm.ruleIds.map { it.takeIf { rule -> WireGrammars.ruleId.matches(rule) } ?: "[redacted]" }
+    return "kind=$kind\nplatform=$platform\nversion=$version\ninstall_prefix=$prefix\nrule_ids=$rules"
+}
+
+private val alarmKinds = setOf("silent_rule_death", "rule_share_cliff", "trips", "fleet_unknown", "new_clusters", "silence")
+private val platformPattern = Regex("^[a-z_][a-z0-9_]{0,31}$")
+private val installPrefixPattern = Regex("^[a-fA-F0-9]{8}$")
 
 /** Process-local counters, like PipelineStats: no identities or report contents are retained. */
 class AlarmStats {

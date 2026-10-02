@@ -34,6 +34,11 @@ dependencies {
     implementation(libs.kotlinx.html.jvm)
     implementation(libs.jul.to.slf4j)
     implementation(libs.logback.classic)
+    implementation(libs.aws.sns) {
+        exclude(group = "software.amazon.awssdk", module = "apache-client")
+        exclude(group = "software.amazon.awssdk", module = "netty-nio-client")
+    }
+    implementation(libs.aws.url.connection.client)
 
     testImplementation(libs.ktor.server.test.host)
     testImplementation(libs.logback.classic)
