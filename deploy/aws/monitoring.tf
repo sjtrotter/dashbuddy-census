@@ -37,9 +37,11 @@ resource "aws_ssm_parameter" "cloudwatch" {
   value = jsonencode({
     agent = { metrics_collection_interval = 300, run_as_user = "root" }
     metrics = {
-      namespace              = "CWAgent"
-      append_dimensions      = { InstanceId = "$${aws:InstanceId}" }
-      aggregation_dimensions = [["InstanceId"]]
+      namespace         = "CWAgent"
+      append_dimensions = { InstanceId = "$${aws:InstanceId}" }
+      # Review (Astra, S2 round 2): disk is collected PER PATH — the root and the Postgres data volume —
+      # with an [InstanceId, path] aggregation so one full filesystem can never hide inside an average.
+      aggregation_dimensions = [["InstanceId"], ["InstanceId", "path"]]
       metrics_collected = {
         mem = {
           measurement           = ["mem_used_percent"]
@@ -47,7 +49,7 @@ resource "aws_ssm_parameter" "cloudwatch" {
         }
         disk = {
           measurement           = ["used_percent"]
-          resources             = ["/"]
+          resources             = ["/", "/var/lib/census-data"]
           drop_device           = true
           drop_original_metrics = ["disk_used_percent"]
         }
@@ -79,12 +81,21 @@ locals {
       periods   = 3
       statistic = "Average"
     }
-    disk = {
-      namespace = "CWAgent"
-      metric    = "disk_used_percent"
-      threshold = 80
-      periods   = 1
-      statistic = "Average"
+    disk_root = {
+      namespace  = "CWAgent"
+      metric     = "disk_used_percent"
+      threshold  = 80
+      periods    = 1
+      statistic  = "Average"
+      dimensions = { path = "/" }
+    }
+    disk_data = {
+      namespace  = "CWAgent"
+      metric     = "disk_used_percent"
+      threshold  = 80
+      periods    = 1
+      statistic  = "Average"
+      dimensions = { path = "/var/lib/census-data" }
     }
   }
 }
@@ -93,7 +104,7 @@ resource "aws_cloudwatch_metric_alarm" "host" {
   for_each = local.alarms
 
   alarm_name                = "${var.name_prefix}-${each.key}"
-  alarm_description         = "${each.value.metric} on the census host (disk collects only path /)"
+  alarm_description         = "${each.value.metric} on the census host${contains(keys(each.value), "dimensions") ? " (path ${each.value.dimensions.path})" : ""}"
   namespace                 = each.value.namespace
   metric_name               = each.value.metric
   comparison_operator       = "GreaterThanThreshold"
@@ -102,7 +113,7 @@ resource "aws_cloudwatch_metric_alarm" "host" {
   period                    = 300
   statistic                 = each.value.statistic
   treat_missing_data        = "missing"
-  dimensions                = { InstanceId = aws_instance.census.id }
+  dimensions                = merge({ InstanceId = aws_instance.census.id }, lookup(each.value, "dimensions", {}))
   alarm_actions             = [aws_sns_topic.alerts.arn]
   ok_actions                = [aws_sns_topic.alerts.arn]
   insufficient_data_actions = [aws_sns_topic.alerts.arn]
