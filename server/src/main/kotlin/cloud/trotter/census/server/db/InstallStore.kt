@@ -8,9 +8,12 @@ import cloud.trotter.census.server.ingest.ConsumeOutcome
 import cloud.trotter.census.server.secondsToUtcMidnight
 import cloud.trotter.census.server.today
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import org.jetbrains.exposed.v1.jdbc.transactions.transaction
+import org.slf4j.LoggerFactory
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.sql.Connection
@@ -159,13 +162,37 @@ class InstallStore(private val db: Database, private val clock: Clock) {
         ) == 1
     }
 
-    suspend fun purgeNonces(olderThan: Instant): Int = query {
-        update("DELETE FROM nonces WHERE issued_at < ?", olderThan.atOffset(ZoneOffset.UTC))
+    suspend fun purgeNonces(olderThan: Instant): Int = purge("nonces") {
+        update("DELETE FROM nonces WHERE ctid IN (SELECT ctid FROM nonces WHERE issued_at < ? LIMIT 1000)", olderThan.atOffset(ZoneOffset.UTC))
     }
 
-    suspend fun purgeLedger(olderThan: LocalDate): Int = query {
-        update("DELETE FROM ingest_ledger WHERE day < ?", olderThan)
+    suspend fun purgeLedger(olderThan: LocalDate): Int = purge("ledger") {
+        update("DELETE FROM ingest_ledger WHERE ctid IN (SELECT ctid FROM ingest_ledger WHERE day < ? LIMIT 1000)", olderThan)
     }
+
+    suspend fun purgeTrustedEnvelopes(today: LocalDate): Int = purge("envelopes") {
+        update("DELETE FROM trusted_envelopes WHERE ctid IN (SELECT ctid FROM trusted_envelopes WHERE purge_after < ? LIMIT 1000)", today)
+    }
+
+    suspend fun purgeHealthDaily(olderThan: LocalDate): Int = purge("health") {
+        update("DELETE FROM health_daily WHERE ctid IN (SELECT ctid FROM health_daily WHERE day < ? LIMIT 1000)", olderThan)
+    }
+
+    private suspend fun purge(name: String, batch: Connection.() -> Int): Int {
+        var deleted = 0
+        var batches = 0
+        var count: Int
+        do {
+            currentCoroutineContext().ensureActive()
+            count = query(batch)
+            deleted += count
+            batches++
+        } while (count == 1000 && batches < 50)
+        purgeLog.info("purge sweep={} deleted={} batches={} capped={}", name, deleted, batches, count == 1000 && batches == 50)
+        return deleted
+    }
+
+    private val purgeLog = LoggerFactory.getLogger("Purge")
 
     /** The insert and conflict-update paths both enforce quotas in the same PostgreSQL statement. */
     suspend fun tryConsume(

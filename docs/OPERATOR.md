@@ -1,4 +1,4 @@
-# Operator runbook — S1 skeleton
+# Operator runbook
 
 ## Deploy
 
@@ -24,6 +24,33 @@ For recovery, use a fresh PostgreSQL volume/database, start only `postgres`, and
 
 ## Incident: what we can and cannot see
 
-The future database can show pseudonymous install IDs, key hashes, token hashes, structural fingerprints, day-level counts, and reviewed vocabulary. It must not contain screen plaintext below the promotion gate, bearer tokens, IP addresses, or device identifiers. Nonce and revocation timestamps are explicit exceptions to date-only observations. S1 request logs have known route, method, status, elapsed duration, and an optional eight-hex-character install-ID prefix; unmatched paths are redacted.
+The future database can show pseudonymous install IDs, key hashes, token hashes, structural fingerprints, day-level counts, and reviewed vocabulary. Skeleton storage must not contain screen plaintext below the promotion gate. The S5 trusted-envelope exception is described below. No storage path may retain bearer tokens, IP addresses, or device identifiers. Nonce and revocation timestamps are explicit exceptions to date-only observations. S1 request logs have known route, method, status, elapsed duration, and an optional eight-hex-character install-ID prefix; unmatched paths are redacted.
 
 These choices limit attribution and request reconstruction. Preserve only the minimum permitted evidence, disable affected entry points, rotate credentials where relevant, and publish the impact and recovery actions. Audit host, proxy, cloud, and log-collector settings too: their default logging could violate the intended retention promise. Ingest admission, poisoning defenses, and scheduled retention must ship before enrollment is enabled.
+
+## S5 trust and capture handling
+
+Enrollment leaves `installs.trusted` false. An operator may set that flag through controlled SQL; no `/ops/*` routes are supplied in this slice. Trust unlocks `POST /v1/envelopes` and the trusted-install silence alarm. Every install may submit skeletons and health reports. Trust does not bypass authentication, sensitive scanning, validation, quality limits, or shared budgets. Play Integrity decoding and attestation changes are outside this slice; the existing attestation column is untouched.
+
+A trusted envelope contains an **already-redacted `uinode.v1` capture**, including UI chrome and its capture metadata. It is not a skeleton and may contain plaintext UI strings and the capture's timestamp. The server repeats the public contract's sensitive-marker scan, rejects hits, and removes `metadata.deviceFingerprint` and `metadata.rulesetSignature` before re-serializing and storing. This scan is a backstop, not a general redactor. The envelope's database fingerprint remains NULL; app-side pairing uses `captureId`. Logs never contain captures, payload strings, fingerprints, hashes, bodies, or secrets. A sensitive rejection WARN contains only the public contract marker name.
+
+The six-hourly purge deletes envelopes whose `purge_after` is before the current UTC date, with a default deadline of received day plus 30 days. It also deletes install health rows older than 180 days. The strict date comparison retains a row on its deadline date. Nonce, ledger, envelope, and health purges each delete in 1,000-row `ctid` batches, with at most 50 batches per sweep per run and a coroutine cancellation check between batches. Each batch commits separately. INFO logs report `purge sweep=<name> deleted=<n> batches=<k> capped=<bool>`; a capped sweep leaves remaining eligible rows for the next run. Silence evaluation and each delete sweep have independent failure guards: one failure logs a single WARN `purge sweep=<name> failed class=<exception class simple name>` without its message, and the remaining sweeps continue. Cancellation propagates. Withdrawal synchronously deletes envelope and health rows together with the install's other keyed data. Anonymous fleet rollups remain aggregate history, and accepted health reports recompute each touched rollup from retained daily rows. Backup retention is still 14 days.
+
+## Health alarm catalogue
+
+`HealthAlarms` evaluates stored counters after an accepted health batch, and the existing six-hourly purge cadence evaluates silence before deleting old health history. A single evaluator instance is shared by both entry points. Trust is unnecessary for an install's own rule-death history (k = 1); fleet rules require two reporting installs where specified.
+
+| Kind | Decision |
+| --- | --- |
+| `silent_rule_death` | In the preceding 28 calendar days, at least three dashing days (admitted ≥ 200), median daily rule count ≥ 5; the reporting day admits ≥ 200 and the rule count is zero or absent. History and the reporting day are aggregated per install/platform/day across all stored app versions, including versions accepted in earlier batches. Admitted, unknown, trips, and per-rule counts are summed; the lexically greatest version is only the reporting-day alarm label. |
+| `rule_share_cliff` | Rule share (`count/admitted`) drops by strictly more than 80% versus the latest fleet day of the previous version. Previous means a different version string whose last reporting day precedes the current day; both compared days need at least two installs. No semantic version ordering is inferred. |
+| `trips` | Any accepted report's stored trip count exceeds zero. |
+| `fleet_unknown` | At least two reporting installs and `unknown/(admitted+unknown)` ≥ 0.5 for the fleet day. |
+| `new_clusters` | At least five distinct clusters first seen today for a platform/version, joined through today's cluster sightings. |
+| `silence` | A trusted, active install has gone at least 48 elapsed hours since its last accepted health batch (or evaluator startup if none has been received), AND its stored last health day is at least two UTC days old. A missing stored day does not fire. A fresh backfill resets the elapsed clock regardless of the report's day. |
+
+Each delivered alarm is counted by kind in process-local `AlarmStats`. The `AlarmSink` seam currently writes WARN lines under logger `Alarm` containing only kind, platform, version, optional eight-character install prefix, and rule IDs. Platform, version, and rule IDs are rendered only when they match their token grammars; other values become `[redacted]`. SNS delivery is S6 work. No payload or credentials are included. Alarm evaluation failures after a committed health batch log one WARN `alarm_evaluation_failed class=<simple name>` under `Alarm`, without the exception message; the accepted response remains HTTP 200. Cancellation propagates. Dedupe keys are recorded only after successful sink delivery, so a throwing sink can be retried on the next evaluation.
+
+Deduplication is in memory by `(kind, full install identity when applicable, platform, version, rule)` for the current UTC day; the full identity is never logged. For rule-list alarms only newly firing rules are delivered. The set resets on a UTC-day change. A process restart may repeat that day's alarms, which is acceptable for this delivery seam. Counters also reset on restart. A trusted install may report a failed pipeline without needing any envelope upload.
+
+The silence clock uses a process-local map of install IDs to server receipt instants, updated on every accepted health batch, and an evaluator startup instant for installs without an entry. After a process restart the silence clock restarts: it fails toward NO alarm for the first 48 hours; the stored-day check still bounds it. No receipt timestamp is added to the database.

@@ -197,8 +197,8 @@ object SkeletonValidator {
     private val platformPattern = Regex("[a-z_][a-z0-9_]{0,31}")
     private val dayPattern = Regex("[0-9]{4}-[0-9]{2}-[0-9]{2}")
     private val versionPatterns = mapOf(
-        "platformAppVersion" to Regex("""^[0-9]{1,5}(\.[0-9]{1,5}){0,3}$"""),
-        "appVersion" to Regex("""^([0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}(\+([0-9a-f]{7,40}(\.dirty)?|nogit))?|test)$"""),
-        "rulesetReleaseTag" to Regex("""^(corpus|dev|v?[0-9]{1,5}(\.[0-9]{1,5}){0,3}(-[a-z0-9]{1,12})?)$"""),
+        "platformAppVersion" to WireGrammars.platformAppVersion,
+        "appVersion" to WireGrammars.appVersion,
+        "rulesetReleaseTag" to WireGrammars.rulesetReleaseTag,
     )
 }

@@ -108,7 +108,7 @@ private fun logBatch(prefix: String, accepted: Int, duplicate: Int, rejected: Ma
 }
 
 @Serializable
-private data class SkeletonBatchResponse(
+internal data class SkeletonBatchResponse(
     val status: String,
     val accepted: Int,
     val duplicate: Int,
@@ -117,7 +117,7 @@ private data class SkeletonBatchResponse(
 )
 
 @Serializable
-private data class SkeletonBudgetResponse(
+internal data class SkeletonBudgetResponse(
     val skeletonsRemainingToday: Int,
     val bytesRemainingToday: Long,
     val batchesRemainingToday: Int,
@@ -125,4 +125,4 @@ private data class SkeletonBudgetResponse(
 )
 
 @Serializable
-private data class BatchQualityResponse(val error: String = "batch_quality", val rejected: Map<String, Int>)
+internal data class BatchQualityResponse(val error: String = "batch_quality", val rejected: Map<String, Int>)

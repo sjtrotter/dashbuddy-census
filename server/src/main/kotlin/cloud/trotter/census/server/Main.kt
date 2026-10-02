@@ -1,6 +1,8 @@
 package cloud.trotter.census.server
 
+import cloud.trotter.census.server.db.HealthStore
 import cloud.trotter.census.server.db.InstallStore
+import cloud.trotter.census.server.jobs.HealthAlarms
 import cloud.trotter.census.server.jobs.PurgeJob
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.netty.Netty
@@ -39,14 +41,18 @@ fun main() {
     }
     database.use { db ->
         embeddedServer(Netty, host = "0.0.0.0", port = config.port) {
-            module(config, db)
+            val alarms = HealthAlarms(HealthStore(db, SystemClock), SystemClock, startedAt = SystemClock.now())
+            module(config, db, alarmEvaluator = alarms)
             launch {
-                val purge = PurgeJob(InstallStore(db, SystemClock), SystemClock)
+                val purge = PurgeJob(InstallStore(db, SystemClock), SystemClock, alarms = alarms)
                 delay(1.minutes)
                 while (true) {
                     try {
                         val counts = purge.runOnce()
-                        log.info("purge nonces={} ledger_rows={}", counts.nonces, counts.ledgerRows)
+                        log.info(
+                            "purge nonces={} ledger_rows={} trusted_envelopes={} health_rows={}",
+                            counts.nonces, counts.ledgerRows, counts.trustedEnvelopes, counts.healthRows,
+                        )
                     } catch (failure: Exception) {
                         if (failure is CancellationException) throw failure
                         log.info("purge failures=1")
