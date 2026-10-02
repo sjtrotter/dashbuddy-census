@@ -47,6 +47,7 @@ dependencies {
 
 tasks.test {
     useJUnitPlatform()
+    systemProperty("census.contractDir", rootProject.file(providers.gradleProperty("censusContractPath").getOrElse("../DashBuddy/census-contract")).absolutePath)
     // Docker Engine 29 refuses API clients below 1.40; Testcontainers' docker-java still negotiates from
     // 1.32, so pin the API version it announces (harmless on CI runners' Docker 28; override via env).
     systemProperty("api.version", System.getenv("DOCKER_API_VERSION") ?: "1.44")

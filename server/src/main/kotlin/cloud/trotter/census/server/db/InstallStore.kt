@@ -175,32 +175,26 @@ class InstallStore(private val db: Database, private val clock: Clock) {
         items: Int,
         batchId: String?,
         policy: BudgetPolicy,
-    ): ConsumeOutcome = query {
-        require(bytes >= 0 && items >= 0)
-        val now = clock.now()
-        select(
-            """INSERT INTO ingest_ledger (install_id, day, bytes, accepted, batch_ids)
-                SELECT ?, ?, ?, ?, CASE WHEN ?::text IS NULL THEN '{}'::text[] ELSE ARRAY[?::text] END
-                WHERE ?::bigint <= ? AND ?::integer <= ? AND (CASE WHEN ?::text IS NULL THEN 0 ELSE 1 END) <= ?
-                ON CONFLICT (install_id, day) DO UPDATE SET
-                    bytes = ingest_ledger.bytes + EXCLUDED.bytes,
-                    accepted = ingest_ledger.accepted + EXCLUDED.accepted,
-                    batch_ids = CASE WHEN ?::text IS NULL OR ? = ANY(ingest_ledger.batch_ids)
-                        THEN ingest_ledger.batch_ids ELSE array_append(ingest_ledger.batch_ids, ?::text) END
-                WHERE ingest_ledger.bytes::numeric + EXCLUDED.bytes <= ?
-                    AND ingest_ledger.accepted::bigint + EXCLUDED.accepted <= ?
-                    AND cardinality(ingest_ledger.batch_ids) +
-                        (CASE WHEN ?::text IS NULL OR ? = ANY(ingest_ledger.batch_ids) THEN 0 ELSE 1 END) <= ?
-                RETURNING bytes, accepted, cardinality(batch_ids) AS batches""",
-            installId, day, bytes, items, batchId, batchId,
-            bytes, policy.dailyBytes, items, policy.dailySkeletonBudget, batchId, policy.dailyBatches,
-            batchId, batchId, batchId, policy.dailyBytes, policy.dailySkeletonBudget, batchId, batchId, policy.dailyBatches,
-        ) { row ->
-            ConsumeOutcome.Consumed(
-                policy.dailyBytes - row.getLong("bytes"), policy.dailySkeletonBudget - row.getInt("accepted"),
-                policy.dailyBatches - row.getInt("batches"),
-            )
-        } ?: ConsumeOutcome.BudgetExhausted(secondsToUtcMidnight(now))
+    ): ConsumeOutcome = query { consumeLedger(installId, day, bytes, items, batchId, policy, clock.now()) }
+
+    /**
+     * The credential-bound form of [recordIngest] (Astra, S4 round 2): a request authenticated under a key that has since
+     * been withdrawn (and its id re-enrolled) must not write ANY counter into the replacement generation's ledger —
+     * not even a rejection. False = not this generation; the caller answers 401 and records nothing.
+     */
+    suspend fun recordIngestIfCurrent(
+        installId: UUID,
+        keyHash: String,
+        day: LocalDate,
+        duplicate: Int,
+        rejectedByReason: Map<String, Int>,
+    ): Boolean = query {
+        val current = select(
+            "SELECT 1 FROM installs WHERE install_id = ? AND key_hash = ? AND revoked_at IS NULL FOR SHARE",
+            installId, keyHash,
+        ) { true } ?: false
+        if (current) recordIngestCounters(installId, day, duplicate, rejectedByReason)
+        current
     }
 
     /** Rejections and duplicates do not consume quota; accepted work must use tryConsume. */
@@ -210,24 +204,7 @@ class InstallStore(private val db: Database, private val clock: Clock) {
         duplicate: Int,
         rejectedByReason: Map<String, Int>,
     ): Unit = query {
-        require(duplicate >= 0 && rejectedByReason.values.all { it >= 0 })
-        update(
-            """INSERT INTO ingest_ledger (install_id, day, duplicate, rejected)
-                VALUES (?, ?, ?, ?::jsonb)
-                ON CONFLICT (install_id, day) DO UPDATE SET
-                    duplicate = ingest_ledger.duplicate + EXCLUDED.duplicate,
-                    rejected = (
-                        SELECT COALESCE(jsonb_object_agg(reason, total), '{}'::jsonb) FROM (
-                            SELECT reason, sum(amount::integer) AS total FROM (
-                                SELECT key AS reason, value AS amount FROM jsonb_each_text(ingest_ledger.rejected)
-                                UNION ALL
-                                SELECT key AS reason, value AS amount FROM jsonb_each_text(EXCLUDED.rejected)
-                            ) counts GROUP BY reason
-                        ) totals
-                    )""",
-            installId, day, duplicate, Json.encodeToString(rejectedByReason),
-        )
-        Unit
+        recordIngestCounters(installId, day, duplicate, rejectedByReason)
     }
 
     /**
@@ -275,15 +252,81 @@ class InstallStore(private val db: Database, private val clock: Clock) {
     }
 }
 
+/** Rejection and duplicate accounting, shared with the ingest transaction. */
+internal fun Connection.recordIngestCounters(
+    installId: UUID,
+    day: LocalDate,
+    duplicate: Int,
+    rejectedByReason: Map<String, Int>,
+) {
+    require(duplicate >= 0 && rejectedByReason.values.all { it >= 0 })
+    update(
+        """INSERT INTO ingest_ledger (install_id, day, duplicate, rejected)
+            VALUES (?, ?, ?, ?::jsonb)
+            ON CONFLICT (install_id, day) DO UPDATE SET
+                duplicate = ingest_ledger.duplicate + EXCLUDED.duplicate,
+                rejected = (
+                    SELECT COALESCE(jsonb_object_agg(reason, total), '{}'::jsonb) FROM (
+                        SELECT reason, sum(amount::integer) AS total FROM (
+                            SELECT key AS reason, value AS amount FROM jsonb_each_text(ingest_ledger.rejected)
+                            UNION ALL
+                            SELECT key AS reason, value AS amount FROM jsonb_each_text(EXCLUDED.rejected)
+                        ) counts GROUP BY reason
+                    ) totals
+                )""",
+        installId, day, duplicate, Json.encodeToString(rejectedByReason),
+    )
+}
+
+/**
+ * The ONE ledger-consume statement (atomic INSERT … ON CONFLICT with the three limits in its WHERE), callable inside a
+ * caller's transaction so that consuming the budget and storing the work it paid for commit TOGETHER
+ * (`SkeletonStore.ingest`) — a failure between the two must never leave a batch recorded as known but unstored.
+ */
+internal fun Connection.consumeLedger(
+    installId: UUID,
+    day: LocalDate,
+    bytes: Long,
+    items: Int,
+    batchId: String?,
+    policy: BudgetPolicy,
+    now: Instant,
+): ConsumeOutcome {
+    require(bytes >= 0 && items >= 0)
+    return select(
+        """INSERT INTO ingest_ledger (install_id, day, bytes, accepted, batch_ids)
+            SELECT ?, ?, ?, ?, CASE WHEN ?::text IS NULL THEN '{}'::text[] ELSE ARRAY[?::text] END
+            WHERE ?::bigint <= ? AND ?::integer <= ? AND (CASE WHEN ?::text IS NULL THEN 0 ELSE 1 END) <= ?
+            ON CONFLICT (install_id, day) DO UPDATE SET
+                bytes = ingest_ledger.bytes + EXCLUDED.bytes,
+                accepted = ingest_ledger.accepted + EXCLUDED.accepted,
+                batch_ids = CASE WHEN ?::text IS NULL OR ? = ANY(ingest_ledger.batch_ids)
+                    THEN ingest_ledger.batch_ids ELSE array_append(ingest_ledger.batch_ids, ?::text) END
+            WHERE ingest_ledger.bytes::numeric + EXCLUDED.bytes <= ?
+                AND ingest_ledger.accepted::bigint + EXCLUDED.accepted <= ?
+                AND cardinality(ingest_ledger.batch_ids) +
+                    (CASE WHEN ?::text IS NULL OR ? = ANY(ingest_ledger.batch_ids) THEN 0 ELSE 1 END) <= ?
+            RETURNING bytes, accepted, cardinality(batch_ids) AS batches""",
+        installId, day, bytes, items, batchId, batchId,
+        bytes, policy.dailyBytes, items, policy.dailySkeletonBudget, batchId, policy.dailyBatches,
+        batchId, batchId, batchId, policy.dailyBytes, policy.dailySkeletonBudget, batchId, batchId, policy.dailyBatches,
+    ) { row ->
+        ConsumeOutcome.Consumed(
+            policy.dailyBytes - row.getLong("bytes"), policy.dailySkeletonBudget - row.getInt("accepted"),
+            policy.dailyBatches - row.getInt("batches"),
+        )
+    } ?: ConsumeOutcome.BudgetExhausted(secondsToUtcMidnight(now))
+}
+
 private fun sameHash(first: String, second: String): Boolean =
     MessageDigest.isEqual(first.toByteArray(Charsets.US_ASCII), second.toByteArray(Charsets.US_ASCII))
 
-private fun Connection.update(sql: String, vararg args: Any?): Int = prepareStatement(sql).use { statement ->
+internal fun Connection.update(sql: String, vararg args: Any?): Int = prepareStatement(sql).use { statement ->
     args.forEachIndexed { index, value -> statement.setObject(index + 1, value) }
     statement.executeUpdate()
 }
 
-private fun <T> Connection.select(sql: String, vararg args: Any?, read: (ResultSet) -> T): T? =
+internal fun <T> Connection.select(sql: String, vararg args: Any?, read: (ResultSet) -> T): T? =
     prepareStatement(sql).use { statement ->
         args.forEachIndexed { index, value -> statement.setObject(index + 1, value) }
         statement.executeQuery().use { rows -> if (rows.next()) read(rows) else null }

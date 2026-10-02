@@ -17,6 +17,7 @@ import cloud.trotter.census.server.db.InstallStore
 import cloud.trotter.census.server.db.MutationOutcome
 import cloud.trotter.census.server.ingest.Budget
 import cloud.trotter.census.server.ingest.BudgetPolicy
+import cloud.trotter.census.server.ingest.parseBounded
 import cloud.trotter.census.server.secondsToUtcMidnight
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpMethod
@@ -43,11 +44,11 @@ import java.time.ZoneOffset
 private val identityJson = Json { encodeDefaults = true; explicitNulls = false }
 private val appVersionPattern = Regex("[A-Za-z0-9+._-]{1,64}")
 
-fun Route.identityRoutes(store: InstallStore?, clock: Clock, policy: Policy) {
+fun Route.identityRoutes(store: InstallStore?, clock: Clock, policy: Policy, authenticated: Route.() -> Unit = {}) {
     if (store == null) {
         listOf(
             HttpMethod.Post to "/v1/enroll", HttpMethod.Post to "/v1/rotate", HttpMethod.Post to "/v1/nonce",
-            HttpMethod.Delete to "/v1/installs/me", HttpMethod.Get to "/v1/me",
+            HttpMethod.Delete to "/v1/installs/me", HttpMethod.Get to "/v1/me", HttpMethod.Post to "/v1/skeletons",
         ).forEach { (method, path) ->
             route(path, method) { handle { call.respond(HttpStatusCode.ServiceUnavailable, ErrorResponse("db_unavailable")) } }
         }
@@ -135,11 +136,13 @@ fun Route.identityRoutes(store: InstallStore?, clock: Clock, policy: Policy) {
                     ),
                 )
             }
+            authenticated()
         }
     }
 }
 
 private inline fun <reified T> decode(bytes: ByteArray): T = try {
+    if (parseBounded(bytes) == null) throw BadRequestException("Invalid JSON")
     identityJson.decodeFromString<T>(bytes.decodeToString(throwOnInvalidSequence = true))
 } catch (_: SerializationException) {
     throw BadRequestException("Invalid JSON")

@@ -2,10 +2,13 @@ package cloud.trotter.census.server
 
 import cloud.trotter.census.server.auth.AuthenticatedInstallKey
 import cloud.trotter.census.server.db.InstallStore
+import cloud.trotter.census.server.db.SkeletonStore
 import cloud.trotter.census.server.routes.healthRoutes
 import cloud.trotter.census.server.routes.identityRoutes
 import cloud.trotter.census.server.routes.policyRoutes
+import cloud.trotter.census.server.routes.skeletonRoutes
 import io.ktor.http.HttpStatusCode
+import io.ktor.http.content.OutgoingContent
 import io.ktor.serialization.kotlinx.json.json
 import io.ktor.server.application.Application
 import io.ktor.server.application.install
@@ -78,8 +81,9 @@ fun Application.module(config: Config, db: Database?, clock: Clock = SystemClock
         }
     }
     install(StatusPages) {
-        status(HttpStatusCode.TooManyRequests) { call, status ->
-            call.respond(status, ErrorResponse("rate_limited"))
+        status(HttpStatusCode.TooManyRequests) { status ->
+            // RateLimit sends an empty status; preserve explicit errors such as budget_exhausted.
+            if (content is OutgoingContent.NoContent) call.respond(status, ErrorResponse("rate_limited"))
         }
         exception<BadRequestException> { call, _ ->
             call.respond(HttpStatusCode.BadRequest, ErrorResponse("bad_request"))
@@ -96,12 +100,16 @@ fun Application.module(config: Config, db: Database?, clock: Clock = SystemClock
         healthRoutes(db)
         val policy = Policy(serverVersion = config.serverVersion, imageDigest = config.imageDigest)
         policyRoutes(policy)
-        identityRoutes(db?.let { InstallStore(it, clock) }, clock, policy)
+        val store = db?.let { InstallStore(it, clock) }
+        val skeletons = db?.let { SkeletonStore(it, clock) }
+        identityRoutes(store, clock, policy) {
+            if (store != null && skeletons != null) skeletonRoutes(store, skeletons, clock, policy)
+        }
     }
 }
 
 private val LOGGABLE_PATHS = setOf(
-    "/healthz", "/readyz", "/v1/policy", "/v1/enroll", "/v1/rotate", "/v1/nonce", "/v1/installs/me", "/v1/me",
+    "/healthz", "/readyz", "/v1/policy", "/v1/enroll", "/v1/rotate", "/v1/nonce", "/v1/installs/me", "/v1/me", "/v1/skeletons",
 )
 
 @Serializable
