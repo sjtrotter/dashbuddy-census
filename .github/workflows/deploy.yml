@@ -1,0 +1,129 @@
+name: Deploy AWS
+on:
+    workflow_dispatch:
+        inputs:
+            image_ref:
+                description: 'Image tag or manifest digest (production pins @sha256:<digest>)'
+                required: true
+                default: ghcr.io/sjtrotter/dashbuddy-census:latest
+                type: string
+permissions:
+    id-token: write
+    contents: read
+concurrency:
+    group: deploy-production
+    cancel-in-progress: false
+jobs:
+    deploy:
+        runs-on: ubuntu-latest
+        timeout-minutes: 25
+        steps:
+            - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+              with:
+                  role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+                  aws-region: ${{ vars.AWS_REGION || 'us-east-2' }}
+            - name: Deploy census through SSM and wait for completion
+              id: deploy
+              env:
+                  IMAGE_REF: ${{ inputs.image_ref }}
+                  INSTANCE_ID: ${{ vars.CENSUS_INSTANCE_ID }}
+                  AWS_PAGER: ''
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  # Treat dispatch input as data. Restrict shell/sed metacharacters.
+                  [[ "$IMAGE_REF" =~ ^ghcr\.io/[a-z0-9._/-]+(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}|@sha256:[a-f0-9]{64})$ ]] || {
+                      echo 'image_ref must be a GHCR image with an explicit tag or SHA-256 digest' >&2
+                      exit 1
+                  }
+                  [[ "$INSTANCE_ID" =~ ^i-[0-9a-f]+$ ]] || { echo 'Set CENSUS_INSTANCE_ID' >&2; exit 1; }
+                  # Scope sed to census: a global image substitution would also
+                  # replace the postgres and caddy images. SSM runs this as root.
+                  parameters=$(python3 - <<'PY'
+                  import json
+                  import os
+                  import shlex
+                  script = r'''set -euo pipefail
+                  cd /opt/census
+                  mountpoint -q /var/lib/census-data
+                  test -s .env || { echo 'Set SSM parameters and start census.service first'; exit 1; }
+                  trap 'docker compose logs --tail=50 census' ERR
+                  sed -i "/^    census:/,/^    [a-zA-Z0-9_-]*:/s#^\([[:space:]]*image:[[:space:]]*\).*#\1''' + os.environ['IMAGE_REF'] + r'''#" docker-compose.yml
+                  docker compose pull
+                  docker compose up -d --wait --wait-timeout 180
+                  # Census has no published host port; check inside its container.
+                  deadline=$((SECONDS + 60))
+                  ready=false
+                  while remaining=$((deadline - SECONDS)); (( remaining > 0 )); do
+                      if timeout "$remaining"s docker compose exec -T census wget -qO- http://127.0.0.1:8080/readyz; then
+                          ready=true
+                          break
+                      fi
+                      if (( SECONDS < deadline )); then sleep 1; fi
+                  done
+                  if [[ "$ready" != true ]]; then
+                      echo 'CENSUS: readiness timed out' >&2
+                      docker compose logs --tail=50 census
+                      exit 1
+                  fi
+                  docker compose ps
+                  '''
+                  command = 'mountpoint -q /var/lib/census-data && flock -w 600 /var/lib/census-data/.deploy.lock bash -c ' + shlex.quote(script)
+                  print(json.dumps({'commands': [command], 'executionTimeout': ['900']}))
+                  PY
+                  )
+                  command_id=$(aws ssm send-command --instance-ids "$INSTANCE_ID" \
+                      --document-name AWS-RunShellScript --parameters "$parameters" \
+                      --timeout-seconds 300 \
+                      --query 'Command.CommandId' --output text)
+                  echo "command_id=$command_id" >> "$GITHUB_OUTPUT"
+                  cancel_on_exit() {
+                      result=$?
+                      trap - EXIT
+                      if (( result != 0 )); then
+                          aws ssm cancel-command --command-id "$command_id" --instance-ids "$INSTANCE_ID" || true
+                      fi
+                      exit "$result"
+                  }
+                  trap cancel_on_exit EXIT
+                  trap 'exit 130' INT
+                  trap 'exit 143' TERM
+                  echo "SSM command: $command_id"
+                  # Wall-clock budget includes API calls, retries and sleeps.
+                  deadline=$((SECONDS + 1200))
+                  while remaining=$((deadline - SECONDS)); (( remaining > 0 )); do
+                      if invocation=$(timeout "$remaining"s aws ssm get-command-invocation --command-id "$command_id" \
+                          --instance-id "$INSTANCE_ID" --output json 2>ssm-error.txt); then
+                          status=$(jq -r '.Status' <<<"$invocation")
+                          case "$status" in
+                              Success|Failed|Cancelled|TimedOut)
+                                  jq -r '.StandardOutputContent, .StandardErrorContent' <<<"$invocation"
+                                  [[ "$status" == Success ]] && exit 0
+                                  echo "SSM deployment ended: $status" >&2
+                                  exit 1
+                                  ;;
+                              Pending|InProgress|Delayed|Cancelling) ;;
+                              *) echo "Unexpected SSM status: $status" >&2; exit 1 ;;
+                          esac
+                      elif ! grep -q 'InvocationDoesNotExist' ssm-error.txt; then
+                          cat ssm-error.txt >&2
+                          exit 1
+                      fi
+                      remaining=$((deadline - SECONDS))
+                      if (( remaining > 0 )); then
+                          sleep "$((remaining < 10 ? remaining : 10))"
+                      fi
+                  done
+                  echo "Timed out waiting for SSM command $command_id; inspect it in Systems Manager" >&2
+                  exit 1
+            - name: Cancel outstanding SSM deployment
+              if: cancelled() || failure()
+              env:
+                  COMMAND_ID: ${{ steps.deploy.outputs.command_id }}
+                  INSTANCE_ID: ${{ vars.CENSUS_INSTANCE_ID }}
+                  AWS_PAGER: ''
+              shell: bash
+              run: |
+                  if [[ -n "$COMMAND_ID" ]]; then
+                      aws ssm cancel-command --command-id "$COMMAND_ID" --instance-ids "$INSTANCE_ID"
+                  fi
