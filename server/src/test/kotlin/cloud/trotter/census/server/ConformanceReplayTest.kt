@@ -4,12 +4,25 @@ import ch.qos.logback.classic.Level
 import ch.qos.logback.classic.Logger
 import ch.qos.logback.classic.spi.ILoggingEvent
 import ch.qos.logback.core.read.ListAppender
+import cloud.trotter.census.contract.CensusFingerprint
+import cloud.trotter.census.contract.SkeletonSchema
+import cloud.trotter.census.server.auth.RequestSigner
+import cloud.trotter.census.server.auth.hashSecret
+import cloud.trotter.census.server.db.IngestOutcome
 import cloud.trotter.census.server.db.InstallStore
+import cloud.trotter.census.server.db.SkeletonStore
+import cloud.trotter.census.server.ingest.BudgetPolicy
+import cloud.trotter.census.server.ingest.ItemVerdict
+import cloud.trotter.census.server.ingest.SkeletonValidator
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.testing.testApplication
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -21,6 +34,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeAll
 import org.junit.jupiter.api.Test
@@ -97,6 +111,19 @@ class ConformanceReplayTest {
                     val fingerprints = posted.groupBy { it.getValue("fingerprint").jsonPrimitive.content }
                     val counts = tableCounts()
                     assertEquals(fingerprints.size, counts.getValue("clusters"))
+                    // F6(a), as jsonb normalizes spacing/key order: the stored sample is the item's canonical content
+                    // (parsed-equal to SkeletonSchema.measure(...).json), never the client bytes and never a placeholder.
+                    for ((fingerprint, group) in fingerprints.entries.take(5)) {
+                        val stored = sql { connection ->
+                            connection.prepareStatement("SELECT skeleton::text FROM cluster_samples WHERE fingerprint = ?").use { statement ->
+                                statement.setString(1, fingerprint)
+                                statement.executeQuery().use { rows -> buildList { while (rows.next()) add(rows.getString(1)) } }
+                            }
+                        }
+                        assertTrue(stored.isNotEmpty(), "a sample must exist for $fingerprint")
+                        val expected = SkeletonSchema.measure(SkeletonSchema.deserialize(group.first().getValue("skeleton").jsonObject.toString())).json
+                        assertEquals(Json.parseToJsonElement(expected), Json.parseToJsonElement(stored.single()))
+                    }
                     val sightings = sql { connection ->
                         connection.prepareStatement("SELECT fingerprint, sum(count) FROM cluster_sightings WHERE install_id = ?::uuid GROUP BY fingerprint").use { statement ->
                             statement.setString(1, id)
@@ -179,10 +206,95 @@ class ConformanceReplayTest {
                         assertError(client.signed(clock, freshId, freshKey, HttpMethod.Post, "/v1/skeletons", body), 400, "bad_request")
                     }
                     assertError(client.signed(clock, freshId, freshKey, HttpMethod.Post, "/v1/skeletons", batch("too-many", List(101) { JsonObject(emptyMap()) })), 413, "batch_too_large")
+
+                    // Concurrent retries must make their decision under the same ledger row lock.
+                    val raceId = UUID.randomUUID().toString()
+                    val raceKey = secret(43)
+                    assertEquals(HttpStatusCode.OK, client.enrol(raceId, raceKey).status)
+                    val raceBody = batch("race", listOf(items.first()))
+                    val raceBefore = store.ledgerFor(UUID.fromString(raceId), day)
+                    val responses = coroutineScope {
+                        val start = CompletableDeferred<Unit>()
+                        val requests = List(2) {
+                            async {
+                                start.await()
+                                client.signed(clock, raceId, raceKey, HttpMethod.Post, "/v1/skeletons", raceBody)
+                            }
+                        }
+                        start.complete(Unit)
+                        requests.awaitAll()
+                    }
+                    val statuses = responses.map { response ->
+                        assertEquals(HttpStatusCode.OK, response.status)
+                        Json.parseToJsonElement(response.bodyAsText()).jsonObject.getValue("status").jsonPrimitive.content
+                    }
+                    assertEquals(listOf("accepted", "duplicate"), statuses.sorted())
+                    val raceFingerprint = items.first().getValue("fingerprint").jsonPrimitive.content
+                    assertEquals(1, sql { connection ->
+                        connection.prepareStatement("SELECT sum(count) FROM cluster_sightings WHERE fingerprint = ? AND install_id = ?::uuid").use { statement ->
+                            statement.setString(1, raceFingerprint)
+                            statement.setString(2, raceId)
+                            statement.executeQuery().use { rows -> rows.next(); rows.getInt(1) }
+                        }
+                    })
+                    val raceLedger = requireNotNull(store.ledgerFor(UUID.fromString(raceId), day))
+                    assertEquals((raceBefore?.accepted ?: 0) + 1, raceLedger.accepted)
+                    assertEquals((raceBefore?.duplicate ?: 0) + 1, raceLedger.duplicate)
+                    assertEquals(raceBody.toByteArray().size.toLong(), raceLedger.bytes)
+                    assertEquals(listOf("race"), raceLedger.batchIds)
+
+                    // One fingerprint retains the first sample but counts sightings for both versions.
+                    val versionRoot = JsonObject(mapOf("class" to JsonPrimitive("SightingVersionProbe")))
+                    val versionBase = JsonObject(items.first() + ("root" to versionRoot))
+                    val versionFingerprint = requireNotNull(CensusFingerprint.of(SkeletonSchema.deserialize(versionBase.toString()).root))
+                    val versionItems = listOf("1.0.0", "2.0.0").map { version ->
+                        JsonObject(versionBase + mapOf(
+                            "fingerprint" to JsonPrimitive(versionFingerprint), "platformAppVersion" to JsonPrimitive(version),
+                        ))
+                    }
+                    val versions = client.signed(clock, raceId, raceKey, HttpMethod.Post, "/v1/skeletons", batch("versions", versionItems))
+                    assertEquals(HttpStatusCode.OK, versions.status)
+                    val versionsBody = Json.parseToJsonElement(versions.bodyAsText()).jsonObject
+                    assertEquals("accepted", versionsBody.getValue("status").jsonPrimitive.content)
+                    assertEquals(1, versionsBody.getValue("accepted").jsonPrimitive.int)
+                    assertEquals(1, versionsBody.getValue("duplicate").jsonPrimitive.int)
+                    assertEquals(mapOf("1.0.0" to 1, "2.0.0" to 1), sql { connection ->
+                        connection.prepareStatement("SELECT platform_app_version, count FROM cluster_sightings WHERE fingerprint = ? AND install_id = ?::uuid").use { statement ->
+                            statement.setString(1, versionFingerprint)
+                            statement.setString(2, raceId)
+                            statement.executeQuery().use { rows -> buildMap { while (rows.next()) put(rows.getString(1), rows.getInt(2)) } }
+                        }
+                    })
+                    assertEquals(listOf("1.0.0"), sql { connection ->
+                        connection.prepareStatement("SELECT platform_app_version FROM cluster_samples WHERE fingerprint = ?").use { statement ->
+                            statement.setString(1, versionFingerprint)
+                            statement.executeQuery().use { rows -> buildList { while (rows.next()) add(rows.getString(1)) } }
+                        }
+                    })
+
+                    // The old signature remains in-window, but neither auth nor ingest may use the replacement.
+                    val staleBody = batch("stale", listOf(items.first()))
+                    val timestamp = clock.now().epochSecond.toString()
+                    val staleSignature = RequestSigner.sign(raceKey, RequestSigner.canonical("POST", "/v1/skeletons", timestamp, staleBody.toByteArray()))
+                    val authenticated = requireNotNull(store.lookup(UUID.fromString(raceId)))
+                    val acceptedItem = SkeletonValidator.validate(items.first(), Policy(), day) as ItemVerdict.Accepted
+                    assertEquals(HttpStatusCode.Accepted, client.signed(clock, raceId, raceKey, HttpMethod.Delete, "/v1/installs/me").status)
+                    val replacementKey = secret(44)
+                    assertEquals(HttpStatusCode.OK, client.enrol(raceId, replacementKey).status)
+                    assertTrue(RequestSigner.timestampInWindow(timestamp, clock.now()))
+                    assertError(client.signed(clock, raceId, raceKey, HttpMethod.Post, "/v1/skeletons", staleBody, signature = staleSignature), 401, "unauthorized")
+                    val beforeStale = tableCounts()
+                    assertEquals(IngestOutcome.StaleCredential, SkeletonStore(db, clock).ingest(
+                        authenticated.id, authenticated.keyHash, day, listOf(acceptedItem), 0, emptyMap(),
+                        "stale", staleBody.toByteArray().size.toLong(), BudgetPolicy(), clock.now(),
+                    ))
+                    assertEquals(beforeStale, tableCounts())
+                    assertNull(store.ledgerFor(authenticated.id, day))
+                    assertEquals(hashSecret(replacementKey), requireNotNull(store.lookup(authenticated.id)).keyHash)
                 }
             }
             val ingestInfo = logs.list.filter { it.loggerName == "Ingest" && it.level == Level.INFO }
-            assertEquals(13, ingestInfo.size)
+            assertEquals(16, ingestInfo.size)
             val linePattern = Regex("ingest install_prefix=[0-9a-f]{8} accepted=[0-9]+ duplicate=[0-9]+ rejected=[0-9]+ bytes=[0-9]+ status=(accepted|duplicate|batch_quality|budget_exhausted)")
             val forbiddenHex = Regex("(?<![0-9a-fA-F])(?:[0-9a-fA-F]{64}|[0-9a-fA-F]{16})(?![0-9a-fA-F])")
             for (event in ingestInfo) {

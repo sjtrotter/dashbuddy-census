@@ -15,8 +15,10 @@ import java.util.UUID
 
 data class IngestSummary(val clustersTouched: Int, val newClusters: Int, val samplesStored: Int, val tokensTouched: Int)
 
-/** Budget and storage decide together: an exhausted budget stores nothing, a stored batch has paid for itself. */
+/** Credential, duplicate, budget, storage and accounting decisions share one transaction. */
 sealed interface IngestOutcome {
+    data object StaleCredential : IngestOutcome
+    data object Duplicate : IngestOutcome
     data class Stored(val summary: IngestSummary, val consumed: ConsumeOutcome.Consumed) : IngestOutcome
     data class BudgetExhausted(val retryAfterSeconds: Long) : IngestOutcome
 }
@@ -37,13 +39,36 @@ class SkeletonStore(private val db: Database, private val clock: Clock) {
      */
     suspend fun ingest(
         installId: UUID,
+        keyHash: String,
         day: LocalDate,
         accepted: List<ItemVerdict.Accepted>,
+        duplicateInBatch: Int,
+        rejected: Map<String, Int>,
         batchId: String,
         bodyBytes: Long,
         policy: BudgetPolicy,
         now: Instant = clock.now(),
     ): IngestOutcome = query {
+        val current = select(
+            "SELECT 1 FROM installs WHERE install_id = ? AND key_hash = ? AND revoked_at IS NULL FOR SHARE",
+            installId, keyHash,
+        ) { true } ?: false
+        if (!current) return@query IngestOutcome.StaleCredential
+        update("INSERT INTO ingest_ledger (install_id, day) VALUES (?, ?) ON CONFLICT DO NOTHING", installId, day)
+        val known = select(
+            "SELECT batch_ids FROM ingest_ledger WHERE install_id = ? AND day = ? FOR UPDATE",
+            installId, day,
+        ) { row ->
+            val array = row.getArray("batch_ids")
+            try { batchId in (array.array as Array<*>) } finally { array.free() }
+        } ?: error("Missing ledger row")
+        if (known) {
+            update(
+                "UPDATE ingest_ledger SET duplicate = duplicate + ? WHERE install_id = ? AND day = ?",
+                accepted.size + rejected.values.sum(), installId, day,
+            )
+            return@query IngestOutcome.Duplicate
+        }
         val consumed = when (val outcome = consumeLedger(installId, day, bodyBytes, accepted.size, batchId, policy, now)) {
             is ConsumeOutcome.BudgetExhausted -> return@query IngestOutcome.BudgetExhausted(outcome.retryAfterSeconds)
             is ConsumeOutcome.Consumed -> outcome
@@ -52,7 +77,7 @@ class SkeletonStore(private val db: Database, private val clock: Clock) {
         var newClusters = 0
         var samplesStored = 0
         var tokensTouched = 0
-        for ((fingerprint, group) in groups) {
+        for ((fingerprint, group) in groups.toSortedMap()) {
             val first = group.first()
             val version = first.item.platformAppVersion ?: "unknown"
             val inserted = select(
@@ -70,13 +95,15 @@ class SkeletonStore(private val db: Database, private val clock: Clock) {
                     ON CONFLICT DO NOTHING""",
                 fingerprint, version, day, first.canonicalJson, fingerprint,
             )
-            update(
-                """INSERT INTO cluster_sightings (fingerprint, install_id, day, platform_app_version, count)
-                    VALUES (?, ?, ?, ?, ?)
-                    ON CONFLICT (fingerprint, install_id, day, platform_app_version) DO UPDATE SET
-                        count = cluster_sightings.count + EXCLUDED.count""",
-                fingerprint, installId, day, version, group.size,
-            )
+            for ((sightingVersion, occurrences) in group.groupBy { it.item.platformAppVersion ?: "unknown" }) {
+                update(
+                    """INSERT INTO cluster_sightings (fingerprint, install_id, day, platform_app_version, count)
+                        VALUES (?, ?, ?, ?, ?)
+                        ON CONFLICT (fingerprint, install_id, day, platform_app_version) DO UPDATE SET
+                            count = cluster_sightings.count + EXCLUDED.count""",
+                    fingerprint, installId, day, sightingVersion, occurrences.size,
+                )
+            }
             for (token in group.flatMap { it.tokens }.distinct()) {
                 tokensTouched += update(
                     """INSERT INTO token_sightings (token_hash, install_id, first_day, last_day, kind)
@@ -87,6 +114,7 @@ class SkeletonStore(private val db: Database, private val clock: Clock) {
                 )
             }
         }
+        recordIngestCounters(installId, day, duplicateInBatch, rejected)
         IngestOutcome.Stored(IngestSummary(groups.size, newClusters, samplesStored, tokensTouched), consumed)
     }
 }

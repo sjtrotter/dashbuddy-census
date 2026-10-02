@@ -17,6 +17,7 @@ import cloud.trotter.census.server.db.InstallStore
 import cloud.trotter.census.server.db.MutationOutcome
 import cloud.trotter.census.server.ingest.Budget
 import cloud.trotter.census.server.ingest.BudgetPolicy
+import cloud.trotter.census.server.ingest.parseBounded
 import cloud.trotter.census.server.secondsToUtcMidnight
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpMethod
@@ -141,6 +142,7 @@ fun Route.identityRoutes(store: InstallStore?, clock: Clock, policy: Policy, aut
 }
 
 private inline fun <reified T> decode(bytes: ByteArray): T = try {
+    if (parseBounded(bytes) == null) throw BadRequestException("Invalid JSON")
     identityJson.decodeFromString<T>(bytes.decodeToString(throwOnInvalidSequence = true))
 } catch (_: SerializationException) {
     throw BadRequestException("Invalid JSON")

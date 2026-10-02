@@ -4,24 +4,23 @@ import cloud.trotter.census.server.Clock
 import cloud.trotter.census.server.ErrorResponse
 import cloud.trotter.census.server.Policy
 import cloud.trotter.census.server.auth.AuthenticatedBodyKey
+import cloud.trotter.census.server.auth.AuthenticatedInstallKey
 import cloud.trotter.census.server.auth.InstallRowKey
 import cloud.trotter.census.server.auth.RequestInstantKey
-import cloud.trotter.census.server.db.InstallStore
 import cloud.trotter.census.server.db.IngestOutcome
+import cloud.trotter.census.server.db.InstallStore
 import cloud.trotter.census.server.db.SkeletonStore
 import cloud.trotter.census.server.ingest.BudgetPolicy
 import cloud.trotter.census.server.ingest.ItemVerdict
 import cloud.trotter.census.server.ingest.SkeletonValidator
+import cloud.trotter.census.server.ingest.parseBounded
 import cloud.trotter.census.server.secondsToUtcMidnight
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
-import io.ktor.server.plugins.BadRequestException
 import io.ktor.server.response.respond
 import io.ktor.server.routing.Route
 import io.ktor.server.routing.post
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.SerializationException
-import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -35,13 +34,7 @@ private val ingestLog = LoggerFactory.getLogger("Ingest")
 fun Route.skeletonRoutes(store: InstallStore, skeletons: SkeletonStore, clock: Clock, policy: Policy) {
     post("/skeletons") {
         val rawBody = call.attributes[AuthenticatedBodyKey]
-        val body = try {
-            Json.parseToJsonElement(rawBody.decodeToString(throwOnInvalidSequence = true)) as? JsonObject
-        } catch (_: SerializationException) {
-            throw BadRequestException("Invalid JSON")
-        } catch (_: CharacterCodingException) {
-            throw BadRequestException("Invalid UTF-8")
-        }
+        val body = parseBounded(rawBody) as? JsonObject
         val batchId = (body?.get("batchId") as? JsonPrimitive)?.takeIf { it.isString }?.content
         val items = body?.get("items") as? JsonArray
         if (batchId == null || !batchIdPattern.matches(batchId) || items == null || items.isEmpty()) {
@@ -56,12 +49,6 @@ fun Route.skeletonRoutes(store: InstallStore, skeletons: SkeletonStore, clock: C
         val today = now.atOffset(ZoneOffset.UTC).toLocalDate()
         val installId = call.attributes[InstallRowKey].id
         val prefix = installId.toString().take(8)
-        if (store.isBatchKnown(installId, today, batchId)) {
-            store.recordIngest(installId, today, items.size, emptyMap())
-            logBatch(prefix, 0, items.size, emptyMap(), rawBody.size, "duplicate")
-            call.respond(SkeletonBatchResponse("duplicate", 0, items.size, emptyMap()))
-            return@post
-        }
         val accepted = mutableListOf<ItemVerdict.Accepted>()
         val rejected = linkedMapOf<String, Int>()
         for (element in items) {
@@ -76,19 +63,24 @@ fun Route.skeletonRoutes(store: InstallStore, skeletons: SkeletonStore, clock: C
             call.respond(HttpStatusCode.UnprocessableEntity, BatchQualityResponse(rejected = rejected))
             return@post
         }
+        val duplicate = accepted.size - accepted.map { it.item.fingerprint }.toSet().size
         val outcome = skeletons.ingest(
-            installId, today, accepted, batchId, rawBody.size.toLong(),
+            installId, call.attributes[AuthenticatedInstallKey].secretHash, today, accepted, duplicate, rejected,
+            batchId, rawBody.size.toLong(),
             BudgetPolicy(dailySkeletonBudget = policy.dailySkeletonBudget), now,
         )
         when (outcome) {
+            IngestOutcome.StaleCredential -> call.respond(HttpStatusCode.Unauthorized, ErrorResponse("unauthorized"))
+            IngestOutcome.Duplicate -> {
+                logBatch(prefix, 0, items.size, emptyMap(), rawBody.size, "duplicate")
+                call.respond(SkeletonBatchResponse("duplicate", 0, items.size, emptyMap()))
+            }
             is IngestOutcome.BudgetExhausted -> {
                 logBatch(prefix, 0, 0, rejected, rawBody.size, "budget_exhausted")
                 call.response.headers.append(HttpHeaders.RetryAfter, outcome.retryAfterSeconds.toString())
                 call.respond(HttpStatusCode.TooManyRequests, ErrorResponse("budget_exhausted"))
             }
             is IngestOutcome.Stored -> {
-                val duplicate = accepted.size - accepted.map { it.item.fingerprint }.toSet().size
-                store.recordIngest(installId, today, duplicate, rejected)
                 logBatch(prefix, accepted.size - duplicate, duplicate, rejected, rawBody.size, "accepted")
                 val budget = outcome.consumed
                 call.respond(SkeletonBatchResponse(

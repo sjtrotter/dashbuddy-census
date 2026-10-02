@@ -74,6 +74,48 @@ class SkeletonValidatorTest {
     }
 
     @Test
+    fun `plaintext metadata probes receive their exact reason codes`() {
+        assertRejected("bad_platform", item("platform", JsonPrimitive("alice_smith_hiv_positive")))
+        assertRejected("bad_version", item("platformAppVersion", JsonPrimitive("Alice-Smith-HIV-positive")))
+        assertRejected("bad_version", item("appVersion", JsonPrimitive("AliceSmith")))
+        assertRejected("bad_version", item("rulesetReleaseTag", JsonPrimitive("Alice-Smith-HIV-positive")))
+        assertRejected("unknown_field", node("text", JsonObject(mapOf(
+            "aliceSmith" to JsonObject(mapOf("kind" to JsonPrimitive("digits"))),
+        ))))
+    }
+
+    @Test
+    fun `fleet metadata grammars and policy allowlists are enforced`() {
+        val versions = mapOf(
+            "platformAppVersion" to listOf("8.97.8", "0.0.0", "12345.12345.12345.12345"),
+            "appVersion" to listOf("test", "1.2.3", "1.2.3+abcdef0", "1.2.3+abcdef0.dirty", "1.2.3+nogit", "9999.9999.9999+" + "a".repeat(40)),
+            "rulesetReleaseTag" to listOf("corpus", "dev", "v1.2.3", "1.2.3-rc1", "12345.12345.12345.12345-abcdefghijkl"),
+        )
+        for ((key, values) in versions) {
+            for (value in values) assertTrue(SkeletonValidator.validate(item(key, JsonPrimitive(value)), policy, today) is ItemVerdict.Accepted)
+        }
+        val invalidVersions = mapOf(
+            "platformAppVersion" to listOf("", "123456", "1.2.3.4.5", "v1.2.3", "1.2.3-beta"),
+            "appVersion" to listOf("1.2", "10000.1.1", "1.2.3+42", "1.2.3+ABCDEF0", "1.2.3+nogit.dirty"),
+            "rulesetReleaseTag" to listOf("", "123456", "v1.2-RC1", "1-abcdefghijklm", "corpus-extra"),
+        )
+        for ((key, values) in invalidVersions) {
+            for (value in values) assertRejected("bad_version", item(key, JsonPrimitive(value)))
+        }
+        for (platform in policy.acceptedPlatforms) {
+            assertTrue(SkeletonValidator.validate(item("platform", JsonPrimitive(platform)), policy, today) is ItemVerdict.Accepted)
+        }
+        assertRejected("bad_platform", skeleton, policy.copy(acceptedPlatforms = emptyList()))
+        for (key in policy.acceptedTextKeys) {
+            val candidate = node("text", JsonObject(mapOf(key to JsonObject(mapOf("kind" to JsonPrimitive("digits"))))))
+            val decoded = SkeletonSchema.deserialize(candidate.toString())
+            val corrected = JsonObject(candidate + ("fingerprint" to JsonPrimitive(requireNotNull(CensusFingerprint.of(decoded.root)))))
+            assertTrue(SkeletonValidator.validate(corrected, policy, today) is ItemVerdict.Accepted)
+            assertRejected("unknown_field", corrected, policy.copy(acceptedTextKeys = emptyList()))
+        }
+    }
+
+    @Test
     fun `hash mutations do not change the structural fingerprint`() {
         val original = SkeletonSchema.json.decodeFromJsonElement(UiSkeletonDto.serializer(), skeleton)
         val root = original.root.copy(text = mapOf("text" to cloud.trotter.census.contract.TextSlot("0123456789abcdef", "words:2")))
@@ -98,7 +140,7 @@ class SkeletonValidatorTest {
         assertRejected("plaintext_field", node("isChecked", JsonArray(listOf(JsonPrimitive("plain")))))
         assertRejected("bad_item", node("isEnabled", JsonPrimitive(1)))
         assertRejected("bad_item", node("children", JsonObject(emptyMap())))
-        assertRejected("bad_item", node("text", JsonObject(mapOf("not a key" to JsonObject(mapOf("kind" to JsonPrimitive("digits")))))))
+        assertRejected("unknown_field", node("text", JsonObject(mapOf("not a key" to JsonObject(mapOf("kind" to JsonPrimitive("digits")))))))
         assertRejected("bad_id", node("id", JsonPrimitive("name\u0000")))
         assertRejected("bad_class", node("class", JsonPrimitive("Name\uD800")))
         assertRejected("bad_item", item("filterRev", JsonPrimitive(0)))

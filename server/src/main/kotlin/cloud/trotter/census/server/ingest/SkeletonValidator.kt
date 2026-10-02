@@ -27,14 +27,17 @@ sealed interface ItemVerdict {
 
 data class Token(val hash: String, val kind: String)
 
-/** Pure admission checks. Structural inspection never recurses, even through incorrectly typed values. */
+/**
+ * Pure admission checks. Structural inspection never recurses, even through incorrectly typed values.
+ * The residual free-text channel in an id NAME / class is handled by the M4 operator unblinding design, NOT here.
+ */
 object SkeletonValidator {
     fun validate(element: JsonElement, policy: Policy, today: LocalDate): ItemVerdict {
         if (element !is JsonObject) return reject("bad_item")
         val schema = element.string("schemaId")
         if (schema == null || schema !in policy.acceptedSchemaIds) return reject("unknown_schema")
         val structure = inspect(element)
-        if (structure.unknownField) return reject("unknown_field")
+        if (structure.unknownField || structure.textKeys.any { it !in policy.acceptedTextKeys }) return reject("unknown_field")
         if (structure.plaintext) return reject("plaintext_field")
         if (structure.badType) return reject("bad_item")
         if (structure.tooDeep) return reject("too_deep")
@@ -50,7 +53,6 @@ object SkeletonValidator {
             if (hash == null && KindClassifier.isHashableKind(kind)) return reject("missing_hash")
             if (hash != null) tokens += Token(hash, kind)
         }
-        if (structure.textKeys.any { !textKeyPattern.matches(it) }) return reject("bad_item")
         for (node in structure.nodes) {
             val id = node.string("id")
             val className = node.string("class")
@@ -64,7 +66,8 @@ object SkeletonValidator {
         if ((element["hashDomain"] as JsonPrimitive).intOrNull !in policy.acceptedHashDomains) {
             return reject("hash_domain_mismatch")
         }
-        if (!platformPattern.matches(requireNotNull(element.string("platform")))) return reject("bad_platform")
+        val platform = requireNotNull(element.string("platform"))
+        if (!platformPattern.matches(platform) || platform !in policy.acceptedPlatforms) return reject("bad_platform")
         val dayString = requireNotNull(element.string("day"))
         if (!dayPattern.matches(dayString)) return reject("bad_day")
         val day = try {
@@ -73,9 +76,9 @@ object SkeletonValidator {
             return reject("bad_day")
         }
         if (day < today.minusDays(7) || day > today.plusDays(1)) return reject("stale_day")
-        for (key in versionKeys) {
+        for ((key, pattern) in versionPatterns) {
             val version = element.string(key) ?: continue
-            if (version.length > 64 || !versionPattern.matches(version)) return reject("bad_version")
+            if (version.length > 64 || !pattern.matches(version)) return reject("bad_version")
         }
 
         // A missing / null / malformed declared fingerprint is a fingerprint the recompute cannot match — named as
@@ -189,11 +192,13 @@ object SkeletonValidator {
         "isEnabled" to Shape.BOOLEAN, "isChecked" to Shape.INTEGER, "text" to Shape.TEXT_MAP, "children" to Shape.CHILDREN,
     )
     private val slotFields = mapOf("h" to Shape.OPTIONAL_STRING, "kind" to Shape.STRING)
-    private val textKeyPattern = Regex("[a-z][A-Za-z0-9]{0,15}")
     // The app's wire token for a platform it could not resolve is `_unknown` (the conformance golden carries 471 of
     // them), so a leading underscore is part of the grammar; everything else is lowercase ASCII, ≤ 32 chars.
     private val platformPattern = Regex("[a-z_][a-z0-9_]{0,31}")
     private val dayPattern = Regex("[0-9]{4}-[0-9]{2}-[0-9]{2}")
-    private val versionPattern = Regex("[A-Za-z0-9+._-]+")
-    private val versionKeys = listOf("platformAppVersion", "appVersion", "rulesetReleaseTag")
+    private val versionPatterns = mapOf(
+        "platformAppVersion" to Regex("""^[0-9]{1,5}(\.[0-9]{1,5}){0,3}$"""),
+        "appVersion" to Regex("""^([0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}(\+([0-9a-f]{7,40}(\.dirty)?|nogit))?|test)$"""),
+        "rulesetReleaseTag" to Regex("""^(corpus|dev|v?[0-9]{1,5}(\.[0-9]{1,5}){0,3}(-[a-z0-9]{1,12})?)$"""),
+    )
 }

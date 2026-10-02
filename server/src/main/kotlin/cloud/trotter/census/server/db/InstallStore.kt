@@ -184,24 +184,7 @@ class InstallStore(private val db: Database, private val clock: Clock) {
         duplicate: Int,
         rejectedByReason: Map<String, Int>,
     ): Unit = query {
-        require(duplicate >= 0 && rejectedByReason.values.all { it >= 0 })
-        update(
-            """INSERT INTO ingest_ledger (install_id, day, duplicate, rejected)
-                VALUES (?, ?, ?, ?::jsonb)
-                ON CONFLICT (install_id, day) DO UPDATE SET
-                    duplicate = ingest_ledger.duplicate + EXCLUDED.duplicate,
-                    rejected = (
-                        SELECT COALESCE(jsonb_object_agg(reason, total), '{}'::jsonb) FROM (
-                            SELECT reason, sum(amount::integer) AS total FROM (
-                                SELECT key AS reason, value AS amount FROM jsonb_each_text(ingest_ledger.rejected)
-                                UNION ALL
-                                SELECT key AS reason, value AS amount FROM jsonb_each_text(EXCLUDED.rejected)
-                            ) counts GROUP BY reason
-                        ) totals
-                    )""",
-            installId, day, duplicate, Json.encodeToString(rejectedByReason),
-        )
-        Unit
+        recordIngestCounters(installId, day, duplicate, rejectedByReason)
     }
 
     /**
@@ -247,6 +230,32 @@ class InstallStore(private val db: Database, private val clock: Clock) {
             "trusted_envelopes", "health_daily", "token_sightings", "cluster_sightings", "ingest_ledger", "nonces", "installs",
         )
     }
+}
+
+/** Rejection and duplicate accounting, shared with the ingest transaction. */
+internal fun Connection.recordIngestCounters(
+    installId: UUID,
+    day: LocalDate,
+    duplicate: Int,
+    rejectedByReason: Map<String, Int>,
+) {
+    require(duplicate >= 0 && rejectedByReason.values.all { it >= 0 })
+    update(
+        """INSERT INTO ingest_ledger (install_id, day, duplicate, rejected)
+            VALUES (?, ?, ?, ?::jsonb)
+            ON CONFLICT (install_id, day) DO UPDATE SET
+                duplicate = ingest_ledger.duplicate + EXCLUDED.duplicate,
+                rejected = (
+                    SELECT COALESCE(jsonb_object_agg(reason, total), '{}'::jsonb) FROM (
+                        SELECT reason, sum(amount::integer) AS total FROM (
+                            SELECT key AS reason, value AS amount FROM jsonb_each_text(ingest_ledger.rejected)
+                            UNION ALL
+                            SELECT key AS reason, value AS amount FROM jsonb_each_text(EXCLUDED.rejected)
+                        ) counts GROUP BY reason
+                    ) totals
+                )""",
+        installId, day, duplicate, Json.encodeToString(rejectedByReason),
+    )
 }
 
 /**
