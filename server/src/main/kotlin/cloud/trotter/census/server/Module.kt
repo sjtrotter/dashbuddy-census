@@ -78,10 +78,6 @@ fun Application.module(config: Config, db: Database?, clock: Clock = SystemClock
         }
     }
     install(RateLimit) {
-        register(RateLimitName("ops")) {
-            rateLimiter(limit = 60, refillPeriod = 1.minutes)
-            requestKey { "ops" }
-        }
         register(RateLimitName("enrol")) {
             rateLimiter(limit = 120, refillPeriod = 1.hours)
             requestKey { "global" }

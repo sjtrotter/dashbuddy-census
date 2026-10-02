@@ -41,6 +41,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeAll
 import org.junit.jupiter.api.BeforeEach
@@ -256,7 +257,14 @@ class OpsRoutesTest {
                 assertTrue(trusted.unblinded)
                 assertTrue(ops.trust(first, false))
                 assertEquals(2, ops.cluster(fresh.item.fingerprint)?.distinctInstalls28d)
-                assertTrue(ops.status(fresh.item.fingerprint, "ignored", null, null))
+                // Round 1 (Astra): an annotation can quote a label — below k it is withheld from every JSON read.
+                assertTrue(ops.status(fresh.item.fingerprint, "ignored", null, "seen by k installs"))
+                assertEquals("seen by k installs", requireNotNull(ops.cluster(fresh.item.fingerprint)).notes)
+                assertTrue(ops.status(old.item.fingerprint, "triaged", null, "android.widget.Hidden com.example:id/Hidden"))
+                val below = requireNotNull(ops.cluster(old.item.fingerprint))
+                assertFalse(below.unblinded)
+                assertNull(below.notes)
+                assertTrue(below.notesWithheld)
                 assertEquals(listOf(fresh.item.fingerprint), ops.clusters(status = "ignored").flatMap { it.clusters }.map { it.fingerprint })
             }
         }
@@ -272,6 +280,26 @@ class OpsRoutesTest {
                     assertEquals(200, client.ops(path).status.value)
                 }
                 assertError(client.ops("/ops/clusters"), 429, "rate_limited")
+            }
+        }
+    }
+
+    @Test
+    fun `failed TOTP attempts spend the ops bucket and an exhausted bucket never consumes a valid code`() {
+        Database.connect(config()).use { db ->
+            testApplication {
+                application { module(config().copy(operatorTotpSecret = totpSecret), db, clock) }
+                val path = "/ops/clusters/" + "a".repeat(64) + "/status"
+                val body = """{"status":"triaged"}"""
+                val statuses = (1..100).map { client.ops(path, body, code = "000000").status.value }
+                assertEquals(60, statuses.count { it == 401 }, "a wrong second factor spends a token")
+                assertEquals(40, statuses.count { it == 429 })
+                instant = instant.plusSeconds(120) // full refill
+                repeat(60) { assertEquals(200, client.ops("/ops/alarms").status.value) }
+                val code = Totp.code(totpSecret, instant.epochSecond)
+                assertError(client.ops(path, body, code = code), 429, "rate_limited")
+                instant = instant.plusSeconds(1) // one token back; the same code is still inside its 30 s step
+                assertEquals(404, client.ops(path, body, code = code).status.value, "the refused request must not have consumed the code")
             }
         }
     }

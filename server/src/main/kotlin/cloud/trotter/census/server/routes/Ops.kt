@@ -17,8 +17,6 @@ import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.ApplicationCall
 import io.ktor.server.application.install
 import io.ktor.server.plugins.BadRequestException
-import io.ktor.server.plugins.ratelimit.RateLimitName
-import io.ktor.server.plugins.ratelimit.rateLimit
 import io.ktor.server.response.respond
 import io.ktor.server.routing.Route
 import io.ktor.server.routing.get
@@ -41,10 +39,10 @@ private val clusterStatuses = setOf("new", "triaged", "drafted", "resolved", "ig
 fun Route.opsRoutes(config: Config, store: OpsStore?, alarms: HealthAlarms?, clock: Clock, policy: Policy) {
     route("/ops") {
         install(OpsAuth) { this.config = config; this.clock = clock }
-        rateLimit(RateLimitName("ops")) {
+        run {
             if (store == null || alarms == null) {
                 route("/{rest...}") { handle { call.respond(HttpStatusCode.ServiceUnavailable, ErrorResponse("db_unavailable")) } }
-                return@rateLimit
+                return@run
             }
             dashboardRoute(store, alarms, clock, policy)
             get("/clusters") {

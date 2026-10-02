@@ -43,7 +43,9 @@ data class OpsCluster(
     val newWithVersion: Boolean,
     val unblinded: Boolean,
     val resolvedRuleId: String? = null,
+    /** Free text an operator typed about a cluster — serialised only when [unblinded] (#1175: an annotation can quote a label). */
     val notes: String? = null,
+    val notesWithheld: Boolean = false,
     val samples: List<OpsSample>? = null,
 )
 
@@ -109,11 +111,13 @@ class OpsStore(private val db: Database, private val clock: Clock, private val p
             do {
                 val count = rows.getInt("installs")
                 val trusted = rows.getBoolean("trusted")
+                val visible = unblinded(count, trusted, policy.k)
+                val notes = rows.getString("notes")
                 add(OpsCluster(
                     rows.getString("fingerprint"), rows.getString("platform"), rows.getString("status"),
                     rows.getString("first_seen_day"), rows.getString("last_seen_day"), count, trusted, rows.getLong("sightings"),
                     Json.decodeFromString<List<String>>(rows.getString("versions")).sortedWith(opsVersionOrder.reversed()),
-                    false, unblinded(count, trusted, policy.k), rows.getString("resolved_rule_id"), rows.getString("notes"),
+                    false, visible, rows.getString("resolved_rule_id"), notes?.takeIf { visible }, notesWithheld = notes != null && !visible,
                 ))
             } while (rows.next())
         } } ?: emptyList()

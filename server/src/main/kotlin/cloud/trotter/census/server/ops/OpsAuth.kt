@@ -26,8 +26,17 @@ val OpsAuth = createRouteScopedPlugin("OpsAuth", ::OpsAuthConfig) {
     val config = requireNotNull(pluginConfig.config)
     val clock = pluginConfig.clock
     val replay = TotpReplay()
+    val bucket = OpsBucket()
     onCall { call ->
         if (call.isHandled) return@onCall
+        // Review (Astra, S6 round 1): Ktor's route-scoped RateLimit runs AFTER this hook and skips handled calls, so a
+        // 401 never spent a token — unlimited TOTP guesses with a stolen bearer. Admission is decided FIRST, here, and
+        // a refused request never reaches the TOTP verifier (so a valid code is never consumed by a 429).
+        if (!bucket.admit(clock.now())) {
+            call.response.headers.append(HttpHeaders.RetryAfter, "1")
+            call.respond(HttpStatusCode.TooManyRequests, ErrorResponse("rate_limited"))
+            return@onCall
+        }
         val header = call.request.headers[HttpHeaders.Authorization]
         val token = header?.takeIf { it.startsWith("Bearer ", ignoreCase = true) }?.substring(7)
         if (token.isNullOrEmpty() || !MessageDigest.isEqual(
@@ -68,5 +77,24 @@ val OpsLogging = createApplicationPlugin("OpsLogging") {
             val method = call.request.httpMethod.value.takeIf { it in setOf("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS") } ?: "OTHER"
             log.info("ops method={} path={} status={}", method, opsLogPath(call.request.path()), call.response.status()?.value ?: 0)
         }
+    }
+}
+
+/** One process-wide token bucket for every `/ops` request, successful or not: 60 tokens, refilled at 60/minute. */
+class OpsBucket(private val capacity: Int = 60, private val perMinute: Int = 60) {
+    private var tokens = capacity.toDouble()
+    private var updatedAt: java.time.Instant? = null
+
+    @Synchronized
+    fun admit(now: java.time.Instant): Boolean {
+        val last = updatedAt
+        if (last != null && now.isAfter(last)) {
+            val elapsed = java.time.Duration.between(last, now)
+            tokens = (tokens + (elapsed.seconds + elapsed.nano / 1_000_000_000.0) * perMinute / 60).coerceAtMost(capacity.toDouble())
+        }
+        updatedAt = if (last == null || now.isAfter(last)) now else last
+        if (tokens < 1.0) return false
+        tokens -= 1.0
+        return true
     }
 }
