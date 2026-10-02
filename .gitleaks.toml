@@ -9,4 +9,6 @@ description = "Deterministic test vectors"
 regexes = [
   # RequestSignerTest.SECRET: base64url of the bytes 0x00..0x1f (the install-secret shape), used to pin the HMAC vector.
   '''AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8''',
+  # TotpTest / OpsRoutesTest: the RFC 6238 Appendix B test key `12345678901234567890` in base32 — a published vector, never a credential.
+  '''GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ''',
 ]
