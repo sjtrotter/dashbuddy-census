@@ -34,7 +34,11 @@ data class Install(
     val trusted: Boolean,
     val keyHash: String,
     val revokedAt: Instant?,
-)
+) {
+    override fun toString(): String =
+        "Install(id=${id.toString().take(8)}…, keyHash=[redacted], createdDay=$createdDay, " +
+            "lastSeenDay=$lastSeenDay, trusted=$trusted, revokedAt=$revokedAt)"
+}
 
 data class LedgerRow(
     val bytes: Long = 0,
@@ -87,12 +91,11 @@ class InstallStore(private val db: Database, private val clock: Clock) {
         }
     }
 
-    suspend fun touchLastSeen(installId: UUID, today: LocalDate): Unit = query {
+    suspend fun touchLastSeen(installId: UUID, keyHash: String, day: LocalDate): Boolean = query {
         update(
-            "UPDATE installs SET last_seen_day = ? WHERE install_id = ? AND last_seen_day <> ? AND revoked_at IS NULL",
-            today, installId, today,
-        )
-        Unit
+            "UPDATE installs SET last_seen_day = ? WHERE install_id = ? AND key_hash = ? AND revoked_at IS NULL AND last_seen_day < ?",
+            day, installId, keyHash, day,
+        ) == 1
     }
 
     suspend fun rotate(installId: UUID, expectedCurrentKeyHash: String, newKeyHash: String): MutationOutcome = query {

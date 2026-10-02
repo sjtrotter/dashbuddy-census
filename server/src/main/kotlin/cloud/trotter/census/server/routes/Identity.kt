@@ -7,6 +7,7 @@ import cloud.trotter.census.server.auth.AuthenticatedBodyKey
 import cloud.trotter.census.server.auth.AuthenticatedInstallKey
 import cloud.trotter.census.server.auth.InstallAuth
 import cloud.trotter.census.server.auth.InstallRowKey
+import cloud.trotter.census.server.auth.RequestInstantKey
 import cloud.trotter.census.server.auth.hashSecret
 import cloud.trotter.census.server.auth.isValidSecret
 import cloud.trotter.census.server.auth.parseBearer
@@ -17,7 +18,6 @@ import cloud.trotter.census.server.db.MutationOutcome
 import cloud.trotter.census.server.ingest.Budget
 import cloud.trotter.census.server.ingest.BudgetPolicy
 import cloud.trotter.census.server.secondsToUtcMidnight
-import cloud.trotter.census.server.today
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
@@ -104,7 +104,9 @@ fun Route.identityRoutes(store: InstallStore?, clock: Clock, policy: Policy) {
                 when (val result = store.withdraw(call.attributes[InstallRowKey].id, call.attributes[AuthenticatedInstallKey].secretHash)) {
                     is MutationOutcome.Applied -> {
                         call.application.environment.log.info("withdraw rows={}", result.deletedRows.values.sum())
-                        call.respond(HttpStatusCode.Accepted, WithdrawalResponse(completionDeadline = clock.today().plusDays(1).toString()))
+                        val now = call.attributes.getOrNull(RequestInstantKey) ?: clock.now()
+                        val deadline = now.atOffset(ZoneOffset.UTC).toLocalDate().plusDays(1)
+                        call.respond(HttpStatusCode.Accepted, WithdrawalResponse(completionDeadline = deadline.toString()))
                     }
                     MutationOutcome.StaleCredential -> call.respond(HttpStatusCode.Unauthorized, ErrorResponse("unauthorized"))
                 }
@@ -115,9 +117,13 @@ fun Route.identityRoutes(store: InstallStore?, clock: Clock, policy: Policy) {
                 }
             }
             get("/me") {
-                val now = clock.now()
+                val now = call.attributes.getOrNull(RequestInstantKey) ?: clock.now()
                 val today = now.atOffset(ZoneOffset.UTC).toLocalDate()
-                val install = call.attributes[InstallRowKey]
+                val install = store.lookup(call.attributes[InstallRowKey].id)
+                if (install == null) {
+                    call.respond(HttpStatusCode.Unauthorized, ErrorResponse("unauthorized"))
+                    return@get
+                }
                 val ledger = store.ledgerFor(install.id, today)
                 val budget = Budget(clock, BudgetPolicy(dailySkeletonBudget = policy.dailySkeletonBudget))
                 call.respond(

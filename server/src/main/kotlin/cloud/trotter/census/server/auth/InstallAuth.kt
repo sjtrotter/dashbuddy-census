@@ -17,6 +17,7 @@ import io.ktor.server.response.respond
 import io.ktor.util.AttributeKey
 import io.ktor.utils.io.readAvailable
 import java.security.MessageDigest
+import java.time.Instant
 import java.time.ZoneOffset
 import java.util.concurrent.atomic.AtomicLong
 import org.slf4j.LoggerFactory
@@ -26,6 +27,7 @@ data class AuthenticatedInstall(val id: String, val prefix: String, val secretHa
 
 val AuthenticatedInstallKey = AttributeKey<AuthenticatedInstall>("AuthenticatedInstall")
 val AuthenticatedBodyKey = AttributeKey<ByteArray>("AuthenticatedBody")
+val RequestInstantKey = AttributeKey<Instant>("RequestInstant")
 val InstallRowKey = AttributeKey<Install>("InstallRow")
 
 object AuthStats {
@@ -68,53 +70,66 @@ val InstallAuth = createRouteScopedPlugin("InstallAuth", ::InstallAuthConfig) {
     val admissionLimiter = pluginConfig.admissionLimiter ?: AdmissionLimiter(clock)
     onCall { call ->
         if (call.isHandled) return@onCall
-        val bearer = parseBearer(call.request.headers[HttpHeaders.Authorization])
-        if (bearer == null) {
-            call.deny(AuthStats.badBearer)
-            return@onCall
-        }
-        if (!admissionLimiter.admit(bearer.installId.value)) {
-            AuthStats.record(AuthStats.rateLimited)
-            call.response.headers.append(HttpHeaders.RetryAfter, "1")
-            call.respond(HttpStatusCode.TooManyRequests, ErrorResponse("rate_limited"))
-            return@onCall
-        }
         val now = clock.now()
-        val timestamp = call.request.headers["X-Census-Timestamp"]
-        if (timestamp == null || !RequestSigner.timestampInWindow(timestamp, now)) {
-            call.deny(AuthStats.skew)
+        call.attributes.put(RequestInstantKey, now)
+        if (!admissionLimiter.tryAcquire()) {
+            call.rateLimited()
             return@onCall
         }
-        val body = call.readLimitedBody() ?: return@onCall
-        AuthStats.lookups.incrementAndGet()
-        val row = store.lookup(bearer.installId.toUuid())
-        if (row == null) {
-            call.deny(AuthStats.unknownInstall)
-            return@onCall
+        try {
+            val bearer = parseBearer(call.request.headers[HttpHeaders.Authorization])
+            if (bearer == null) {
+                call.deny(AuthStats.badBearer)
+                return@onCall
+            }
+            if (!admissionLimiter.admit(bearer.installId.value, now)) {
+                call.rateLimited()
+                return@onCall
+            }
+            val timestamp = call.request.headers["X-Census-Timestamp"]
+            if (timestamp == null || !RequestSigner.timestampInWindow(timestamp, now)) {
+                call.deny(AuthStats.skew)
+                return@onCall
+            }
+            val body = call.readLimitedBody() ?: return@onCall
+            AuthStats.lookups.incrementAndGet()
+            val row = store.lookup(bearer.installId.toUuid())
+            if (row == null) {
+                call.deny(AuthStats.unknownInstall)
+                return@onCall
+            }
+            val hash = hashSecret(bearer.secret)
+            if (!MessageDigest.isEqual(hash.toByteArray(Charsets.US_ASCII), row.keyHash.toByteArray(Charsets.US_ASCII))) {
+                call.deny(AuthStats.badBearer)
+                return@onCall
+            }
+            if (row.revokedAt != null) {
+                call.deny(AuthStats.revoked, "revoked")
+                return@onCall
+            }
+            val canonical = RequestSigner.canonical(call.request.httpMethod.value, call.request.path(), timestamp, body)
+            val signature = call.request.headers["X-Census-Signature"] ?: ""
+            if (!RequestSigner.verify(bearer.secret, canonical, signature)) {
+                call.deny(AuthStats.badSignature)
+                return@onCall
+            }
+            val today = now.atOffset(ZoneOffset.UTC).toLocalDate()
+            if (row.lastSeenDay < today) store.touchLastSeen(row.id, hash, today)
+            val id = bearer.installId.value
+            call.attributes.put(AuthenticatedInstallKey, AuthenticatedInstall(id, id.take(8), hash))
+            call.attributes.put(AuthenticatedBodyKey, body)
+            call.attributes.put(InstallRowKey, row)
+            AuthStats.record(AuthStats.ok)
+        } finally {
+            admissionLimiter.release()
         }
-        val hash = hashSecret(bearer.secret)
-        if (!MessageDigest.isEqual(hash.toByteArray(Charsets.US_ASCII), row.keyHash.toByteArray(Charsets.US_ASCII))) {
-            call.deny(AuthStats.badBearer)
-            return@onCall
-        }
-        if (row.revokedAt != null) {
-            call.deny(AuthStats.revoked, "revoked")
-            return@onCall
-        }
-        val canonical = RequestSigner.canonical(call.request.httpMethod.value, call.request.path(), timestamp, body)
-        val signature = call.request.headers["X-Census-Signature"] ?: ""
-        if (!RequestSigner.verify(bearer.secret, canonical, signature)) {
-            call.deny(AuthStats.badSignature)
-            return@onCall
-        }
-        val today = now.atOffset(ZoneOffset.UTC).toLocalDate()
-        if (row.lastSeenDay != today) store.touchLastSeen(row.id, today)
-        val id = bearer.installId.value
-        call.attributes.put(AuthenticatedInstallKey, AuthenticatedInstall(id, id.take(8), hash))
-        call.attributes.put(AuthenticatedBodyKey, body)
-        call.attributes.put(InstallRowKey, row.copy(lastSeenDay = today))
-        AuthStats.record(AuthStats.ok)
     }
+}
+
+private suspend fun ApplicationCall.rateLimited() {
+    AuthStats.record(AuthStats.rateLimited)
+    response.headers.append(HttpHeaders.RetryAfter, "1")
+    respond(HttpStatusCode.TooManyRequests, ErrorResponse("rate_limited"))
 }
 
 private suspend fun ApplicationCall.deny(counter: AtomicLong, error: String = "unauthorized") {

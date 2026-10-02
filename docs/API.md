@@ -44,7 +44,7 @@ The public health/policy routes and all five identity endpoints are implemented.
 
 `imageDigest` is included when configured and omitted when absent (`explicitNulls = false`). Defaults are encoded. Policy is a data class; `POLICY_*` overrides are planned. `hashDomain` currently uses the documented fallback pending inspection of the sibling contract.
 
-Typed JSON decoding rejects unknown keys. Errors use `{"error":"<code>"}` without exception text. Authentication, headers, canonical HMAC bytes, and a worked signing vector are specified in [CLIENT.md](CLIENT.md). Only the prefix derived by successful authentication is logged; `X-Install-Id-Prefix` is ignored. Full IDs, bodies, credentials, IPs, arbitrary paths, and query strings are never logged.
+Typed JSON decoding rejects unknown keys. Errors use `{"error":"<code>"}` without exception text. Authentication, headers, canonical HMAC bytes, and a worked signing vector are specified in [CLIENT.md](CLIENT.md). Only the prefix derived by successful authentication is logged; `X-Install-Id-Prefix` is ignored. Full IDs, bodies, credentials, IPs, arbitrary paths, and query strings are never logged. Exception diagnostics retain only the exception class-name chain and the outermost exception’s first three frames (`class.method:line`); exception messages and suppressed exceptions are never rendered.
 
 | Endpoint | Request | Success |
 | --- | --- | --- |
@@ -69,13 +69,15 @@ The enrollment body ID must equal the bearer's canonical lowercase UUID v4. `app
 | All identity endpoints, exhausted rate bucket | `429` | `rate_limited`, with `Retry-After` seconds |
 | Unexpected failures | `500` | `internal_error` |
 
-Before any authentication I/O, a separate admission token bucket uses the bearer’s unverified install ID string, with capacity 120 and refill 120/minute. It returns `429 rate_limited` and `Retry-After: 1` when exhausted. Its synchronized access-order LRU holds at most 10,000 IDs; no IP is used as a key.
+Before authentication reads a body or accesses the database, a global token bucket (capacity 600, refill 600/minute, configurable through `AdmissionLimiter`) runs ahead of per-ID buckets (capacity 120, refill 120/minute). Each attempt reaching the global bucket spends a token even if its per-ID check fails. A shared semaphore allows at most 32 in-flight authentication decisions, with zero wait for a permit and release in `finally`. Exhausted buckets or permits return `429 rate_limited` with `Retry-After: 1`.
+
+The synchronized access-order LRU holds at most 10,000 unverified install IDs. On reaching capacity it evicts only the least-recently-used bucket whose refilled balance is at least half capacity; otherwise it denies the new ID and increments `capacityDenials`. Exhausted IDs therefore keep their debt under churn. An attacker who knows a victim's ID can starve its 120/minute admission allowance. This fairness trade-off is accepted because IDs are 128-bit random values and the authenticated per-install quota is separate. No IP is used as a key.
 
 Subsequent rate limits use Ktor's [rate-limit plugin](https://ktor.io/docs/server-rate-limit.html): enrollment is globally shared at 120/hour per server process; authenticated routes share 60/minute per install; nonce issuance additionally permits 30/hour per install. Authenticated Ktor buckets use verified install IDs, never client IPs. The per-IP edge limiter is deferred to a custom-Caddy slice. Buckets are process-local and reset on restart.
 
 Rotation and withdrawal revalidate the current credential within their own transaction. Rotation conditionally updates the current hash; withdrawal locks and checks the parent before deleting anything. Stale credentials receive `401 unauthorized`, including after a concurrent rotation or withdrawal and re-enrollment of the same UUID. A matching revoked credential receives `401 revoked` at authentication.
 
-`GET /v1/me` captures one instant for both the ledger day and `resetInSeconds`; counters and reset therefore describe the same UTC day even at midnight.
+Authentication captures one instant in `RequestInstantKey` for admission, the signature timestamp window, the last-seen UTC day, and the route's ledger day and `resetInSeconds`. Routes fall back to the clock only when the attribute is absent. Last-seen updates are monotonic, bound to the verified credential, and exclude revoked rows; `GET /v1/me` re-reads the stored row instead of echoing the attempted day. Counters and reset describe the same UTC day even at midnight.
 
 Withdrawal deletes `trusted_envelopes`, `health_daily`, `token_sightings`, `cluster_sightings`, `ingest_ledger`, `nonces`, and `installs` in one transaction. Shared aggregate/catalog tables are retained. Deletion is synchronous; the deadline preserves a future asynchronous contract. Nonces are single-use with a 300-second validity window. HMAC signatures remain replayable within their timestamp window; S4 batch admission will use the ledger for replay protection.
 

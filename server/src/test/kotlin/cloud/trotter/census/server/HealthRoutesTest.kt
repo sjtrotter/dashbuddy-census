@@ -92,6 +92,8 @@ class HealthRoutesTest {
             assertEquals(HttpStatusCode.OK, client.get("/log-failure").status)
         }
         assertTrue(logs.list.any { it.formattedMessage == "safe request continued" })
+        val failureEvent = logs.list.single { it.formattedMessage == "safe" && it.throwableProxy != null }
+        assertTrue(renderLog(failureEvent).contains("java.lang.RuntimeException <- java.lang.IllegalStateException"))
         assertPrivateLogs(logs.list, listOf(secret, "PRIVATE_SUPPRESSED_SENTINEL"))
     }
 

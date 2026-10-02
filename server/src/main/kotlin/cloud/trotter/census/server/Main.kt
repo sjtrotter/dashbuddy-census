@@ -32,7 +32,9 @@ fun main() {
         Database.migrate(config)
         Database.connect(config)
     } catch (t: Throwable) {
-        log.error("database startup failed ({}); check DATABASE_URL/DATABASE_USER/DATABASE_PASSWORD", t.javaClass.simpleName)
+        // The throwable is attached on purpose: SafeThrowableConverter renders ONLY the exception class chain
+        // and the top frames (never a message), so the full diagnostic lineage survives without the JDBC URL.
+        log.error("database startup failed ({}); check DATABASE_URL/DATABASE_USER/DATABASE_PASSWORD", t.javaClass.simpleName, t)
         exitProcess(1)
     }
     database.use { db ->

@@ -3,7 +3,9 @@ package cloud.trotter.census.server
 import ch.qos.logback.classic.Logger
 import ch.qos.logback.classic.spi.ILoggingEvent
 import ch.qos.logback.core.read.ListAppender
+import cloud.trotter.census.server.auth.AdmissionLimiter
 import cloud.trotter.census.server.auth.AuthStats
+import cloud.trotter.census.server.auth.InstallAuth
 import cloud.trotter.census.server.auth.RequestSigner
 import cloud.trotter.census.server.auth.hashSecret
 import cloud.trotter.census.server.db.EnrolOutcome
@@ -26,6 +28,11 @@ import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.contentType
+import io.ktor.server.application.install
+import io.ktor.server.response.respond
+import io.ktor.server.routing.post
+import io.ktor.server.routing.route
+import io.ktor.server.routing.routing
 import io.ktor.server.testing.testApplication
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -239,7 +246,10 @@ class IdentityRoutesTest {
             val row = requireNotNull(store.lookup(id))
             assertEquals(oldDay, row.createdDay)
             assertEquals(oldDay, row.lastSeenDay) // Lookup has no write side effect.
-            store.touchLastSeen(id, clock.today())
+            assertTrue(store.touchLastSeen(id, hash, clock.today()))
+            assertFalse(store.touchLastSeen(id, hash, oldDay))
+            assertFalse(store.touchLastSeen(id, hash, clock.today()))
+            assertFalse(store.touchLastSeen(id, hashSecret(secret(7)), clock.today().plusDays(1)))
             assertEquals(clock.today(), requireNotNull(store.lookup(id)).lastSeenDay)
             assertNull(store.lookup(UUID.randomUUID()))
             val nonce = store.issueNonce(id)
@@ -317,6 +327,8 @@ class IdentityRoutesTest {
             assertEquals(MutationOutcome.StaleCredential, store.withdraw(id, newHash))
             assertEquals(oldHash, requireNotNull(store.lookup(id)).keyHash)
             assertTrue(store.revoke(id, clock.now()))
+            assertFalse(store.touchLastSeen(id, oldHash, clock.today().plusDays(1)))
+            assertEquals(clock.today(), requireNotNull(store.lookup(id)).lastSeenDay)
             assertEquals(MutationOutcome.StaleCredential, store.rotate(id, oldHash, newHash))
             assertEquals(MutationOutcome.StaleCredential, store.withdraw(id, oldHash))
             assertNotNull(store.lookup(id))
@@ -360,13 +372,60 @@ class IdentityRoutesTest {
     }
 
     @Test
+    fun `authentication permits reject immediately and release after every decision`() {
+        val clock = FixedClock()
+        val limiter = AdmissionLimiter(clock)
+        val id = UUID.randomUUID().toString()
+        val key = secret(18)
+        Database.connect(config()).use { db ->
+            testApplication {
+                val store = InstallStore(db, clock)
+                application {
+                    module(config(), db, clock)
+                    routing {
+                        route("/admission-test") {
+                            install(InstallAuth) {
+                                this.store = store
+                                this.clock = clock
+                                admissionLimiter = limiter
+                            }
+                            post { call.respond(HttpStatusCode.NoContent) }
+                        }
+                    }
+                }
+                store.enrol(UUID.fromString(id), hashSecret(key), "1.0")
+                repeat(32) { assertTrue(limiter.tryAcquire()) }
+                var held = 32
+                try {
+                    val lookups = AuthStats.lookups.get()
+                    val blocked = client.signed(clock, id, key, HttpMethod.Post, "/admission-test", "x".repeat(1_048_577))
+                    assertError(blocked, 429, "rate_limited")
+                    assertEquals("1", blocked.headers[HttpHeaders.RetryAfter])
+                    assertEquals(lookups, AuthStats.lookups.get())
+                    limiter.release()
+                    held--
+                    assertError(client.post("/admission-test"), 401, "unauthorized")
+                    assertError(client.signed(clock, id, key, HttpMethod.Post, "/admission-test", offset = -301), 401, "unauthorized")
+                    assertError(client.signed(clock, id, key, HttpMethod.Post, "/admission-test", "x".repeat(1_048_577)), 413, "payload_too_large")
+                    assertError(client.signed(clock, id, key, HttpMethod.Post, "/admission-test", signature = ""), 401, "unauthorized")
+                    assertEquals(HttpStatusCode.NoContent, client.signed(clock, id, key, HttpMethod.Post, "/admission-test").status)
+                    assertTrue(limiter.tryAcquire())
+                    limiter.release()
+                } finally {
+                    repeat(held) { limiter.release() }
+                }
+            }
+        }
+    }
+
+    @Test
     fun `me counters and reset use one instant across UTC midnight`() {
         val signingClock = FixedClock(Instant.parse("2026-10-02T23:59:59.500Z"))
         var reads = 0
         val clock = object : Clock {
             override fun now(): Instant {
                 reads++
-                return if (reads <= 3) signingClock.instant else signingClock.instant.plusSeconds(1)
+                return if (reads == 1) signingClock.instant else signingClock.instant.plusSeconds(1)
             }
         }
         val id = UUID.randomUUID()
@@ -375,16 +434,40 @@ class IdentityRoutesTest {
             testApplication {
                 application { module(config(), db, clock) }
                 val store = InstallStore(db, signingClock)
-                store.enrol(id, hashSecret(key), "1.0")
+                InstallStore(db, FixedClock(signingClock.instant.minusSeconds(86400))).enrol(id, hashSecret(key), "1.0")
                 store.tryConsume(id, signingClock.today(), 4, 4, null, BudgetPolicy())
                 store.tryConsume(id, signingClock.today().plusDays(1), 9, 9, null, BudgetPolicy())
                 val response = client.signed(signingClock, id.toString(), key, HttpMethod.Get, "/v1/me")
                 assertEquals(HttpStatusCode.OK, response.status)
-                val budget = Json.parseToJsonElement(response.bodyAsText()).jsonObject.getValue("budget").jsonObject
+                val view = Json.parseToJsonElement(response.bodyAsText()).jsonObject
+                assertEquals("2026-10-02", view.getValue("lastSeenDay").jsonPrimitive.content)
+                val budget = view.getValue("budget").jsonObject
                 assertEquals("296", budget.getValue("skeletonsRemainingToday").jsonPrimitive.content)
                 assertEquals("10485756", budget.getValue("bytesRemainingToday").jsonPrimitive.content)
                 assertEquals("1", budget.getValue("resetInSeconds").jsonPrimitive.content)
-                assertEquals(3, reads) // Admission, authentication, and the route each take one snapshot.
+                assertEquals(signingClock.today(), requireNotNull(store.lookup(id)).lastSeenDay)
+                assertEquals(1, reads) // Admission, authentication, and the route share one snapshot.
+            }
+        }
+    }
+
+    @Test
+    fun `me rereads persisted last seen instead of echoing an older request day`() {
+        val clock = FixedClock()
+        val id = UUID.randomUUID()
+        val key = secret(17)
+        Database.connect(config()).use { db ->
+            testApplication {
+                application { module(config(), db, clock) }
+                val store = InstallStore(db, clock)
+                store.enrol(id, hashSecret(key), "1.0")
+                val newerDay = clock.today().plusDays(1)
+                assertTrue(store.touchLastSeen(id, hashSecret(key), newerDay))
+                val response = client.signed(clock, id.toString(), key, HttpMethod.Get, "/v1/me")
+                assertEquals(HttpStatusCode.OK, response.status)
+                val view = Json.parseToJsonElement(response.bodyAsText()).jsonObject
+                assertEquals(newerDay.toString(), view.getValue("lastSeenDay").jsonPrimitive.content)
+                assertEquals(newerDay, requireNotNull(store.lookup(id)).lastSeenDay)
             }
         }
     }
