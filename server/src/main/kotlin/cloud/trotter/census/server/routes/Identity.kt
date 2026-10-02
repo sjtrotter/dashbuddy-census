@@ -119,17 +119,19 @@ fun Route.identityRoutes(store: InstallStore?, clock: Clock, policy: Policy) {
             get("/me") {
                 val now = call.attributes.getOrNull(RequestInstantKey) ?: clock.now()
                 val today = now.atOffset(ZoneOffset.UTC).toLocalDate()
-                val install = store.lookupActive(call.attributes[InstallRowKey].id, call.attributes[AuthenticatedInstallKey].secretHash)
-                if (install == null) {
+                val installId = call.attributes[InstallRowKey].id
+                // One credential-bound statement for the install AND its ledger (Astra round 4): two reads left a window
+                // in which a withdrawn-then-re-enrolled id's old credential could read the replacement's budget.
+                val me = store.meView(installId, call.attributes[AuthenticatedInstallKey].secretHash, today)
+                if (me == null) {
                     call.respond(HttpStatusCode.Unauthorized, ErrorResponse("unauthorized"))
                     return@get
                 }
-                val ledger = store.ledgerFor(install.id, today)
                 val budget = Budget(clock, BudgetPolicy(dailySkeletonBudget = policy.dailySkeletonBudget))
                 call.respond(
                     MeResponse(
-                        install.id.toString().take(8), install.createdDay.toString(), install.lastSeenDay.toString(), install.trusted,
-                        BudgetResponse(budget.remainingSkeletons(ledger), budget.remainingBytes(ledger), secondsToUtcMidnight(now)),
+                        installId.toString().take(8), me.createdDay.toString(), me.lastSeenDay.toString(), me.trusted,
+                        BudgetResponse(budget.remainingSkeletons(me.ledger), budget.remainingBytes(me.ledger), secondsToUtcMidnight(now)),
                     ),
                 )
             }

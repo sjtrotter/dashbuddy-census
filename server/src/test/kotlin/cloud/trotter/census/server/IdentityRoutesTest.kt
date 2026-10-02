@@ -593,6 +593,13 @@ class IdentityRoutesTest {
                 assertEquals(EnrolOutcome.Created, store.enrol(id, hashB, "v1"))
                 assertNull(store.lookupActive(id, hashA), "the replacement generation must be invisible to the old key")
                 assertNotNull(store.lookupActive(id, hashB))
+                // Round 4: the /me view joins the ledger under the SAME credential filter — B's spend is never A's to read.
+                assertTrue(store.tryConsume(id, clock.today(), 100, 1, "b-batch", BudgetPolicy()) is ConsumeOutcome.Consumed)
+                assertNull(store.meView(id, hashA, clock.today()))
+                val viewB = requireNotNull(store.meView(id, hashB, clock.today()))
+                assertEquals(1, viewB.ledger?.accepted)
+                assertEquals(100L, viewB.ledger?.bytes)
+                assertNull(requireNotNull(store.meView(id, hashB, clock.today().plusDays(1))).ledger, "no ledger row tomorrow")
             }
         }
     }

@@ -48,6 +48,9 @@ data class LedgerRow(
     val batchIds: List<String> = emptyList(),
 )
 
+/** What `/v1/me` may disclose: this credential generation's own dates, trust and today's ledger counters. */
+data class MeView(val createdDay: LocalDate, val lastSeenDay: LocalDate, val trusted: Boolean, val ledger: LedgerRow?)
+
 /** All database work uses the explicitly supplied pool, on IO, in an Exposed transaction. */
 class InstallStore(private val db: Database, private val clock: Clock) {
     private val random = SecureRandom()
@@ -225,6 +228,26 @@ class InstallStore(private val db: Database, private val clock: Clock) {
             installId, day, duplicate, Json.encodeToString(rejectedByReason),
         )
         Unit
+    }
+
+    /**
+     * The `/me` read as ONE credential-bound statement (Astra, round 4): the install row and its ledger row for
+     * [day] come from a single snapshot filtered on `key_hash` + `revoked_at IS NULL`, so an old credential whose
+     * id was withdrawn and re-enrolled can never see the replacement generation's budget. Null = not this generation.
+     */
+    suspend fun meView(installId: UUID, keyHash: String, day: LocalDate): MeView? = query {
+        select(
+            """SELECT i.created_day, i.last_seen_day, i.trusted, l.bytes, l.accepted
+                FROM installs i LEFT JOIN ingest_ledger l ON l.install_id = i.install_id AND l.day = ?
+                WHERE i.install_id = ? AND i.key_hash = ? AND i.revoked_at IS NULL""",
+            day, installId, keyHash,
+        ) { row ->
+            val bytes = row.getLong("bytes"); val hasLedger = !row.wasNull()
+            MeView(
+                row.getObject("created_day", LocalDate::class.java), row.getObject("last_seen_day", LocalDate::class.java),
+                row.getBoolean("trusted"), if (hasLedger) LedgerRow(bytes = bytes, accepted = row.getInt("accepted")) else null,
+            )
+        }
     }
 
     suspend fun ledgerFor(installId: UUID, day: LocalDate): LedgerRow? = query {
