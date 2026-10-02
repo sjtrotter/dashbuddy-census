@@ -167,6 +167,14 @@ class InstallStore(private val db: Database, private val clock: Clock) {
         update("DELETE FROM ingest_ledger WHERE day < ?", olderThan)
     }
 
+    suspend fun purgeTrustedEnvelopes(today: LocalDate): Int = query {
+        update("DELETE FROM trusted_envelopes WHERE purge_after < ?", today)
+    }
+
+    suspend fun purgeHealthDaily(olderThan: LocalDate): Int = query {
+        update("DELETE FROM health_daily WHERE day < ?", olderThan)
+    }
+
     /** The insert and conflict-update paths both enforce quotas in the same PostgreSQL statement. */
     suspend fun tryConsume(
         installId: UUID,
