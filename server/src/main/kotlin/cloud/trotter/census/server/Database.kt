@@ -8,6 +8,7 @@ import org.jetbrains.exposed.v1.jdbc.Database as ExposedDatabase
 /** PostgreSQL connections and startup migrations; no process-local durable state (#1157 S1). */
 class Database private constructor(
     private val dataSource: HikariDataSource,
+    internal val exposed: ExposedDatabase,
 ) : AutoCloseable {
     fun checkReady(): Boolean = dataSource.connection.use { connection ->
         connection.createStatement().use { statement ->
@@ -46,8 +47,8 @@ class Database private constructor(
                 },
             )
             try {
-                ExposedDatabase.connect(dataSource)
-                return Database(dataSource)
+                val exposed = ExposedDatabase.connect(dataSource)
+                return Database(dataSource, exposed)
             } catch (failure: Exception) {
                 dataSource.close()
                 throw failure

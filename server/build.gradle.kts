@@ -15,6 +15,7 @@ application {
 dependencies {
     implementation("cloud.trotter.census:contract:0.0.0-local")
     implementation(libs.ktor.server.core)
+    implementation(libs.ktor.server.rate.limit)
     implementation(libs.ktor.server.netty)
     implementation(libs.ktor.server.content.negotiation)
     implementation(libs.ktor.serialization.kotlinx.json)

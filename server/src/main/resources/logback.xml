@@ -8,6 +8,10 @@
     <logger name="org.flywaydb" level="WARN"/>
     <logger name="com.zaxxer.hikari" level="WARN"/>
     <logger name="org.postgresql" level="OFF"/>
+    <!-- Exposed failure diagnostics can render bound identifiers and JSON. -->
+    <logger name="Exposed" level="OFF"/>
+    <logger name="org.jetbrains.exposed" level="OFF"/>
+    <logger name="io.ktor.server.plugins.ratelimit" level="INFO"/>
     <root level="INFO">
         <appender-ref ref="STDOUT"/>
     </root>

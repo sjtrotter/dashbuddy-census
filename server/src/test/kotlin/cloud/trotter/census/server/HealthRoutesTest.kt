@@ -118,6 +118,30 @@ class HealthRoutesTest {
         assertEquals("not_found", Json.parseToJsonElement(response.bodyAsText()).jsonObject["error"]?.jsonPrimitive?.content)
     }
 
+    @Test
+    fun `identity routes require a database even without credentials`() = testApplication {
+        application { module(Config.fromEnv(testEnvironment()), db = null) }
+        listOf(
+            HttpMethod.Post to "/v1/enroll", HttpMethod.Post to "/v1/rotate", HttpMethod.Post to "/v1/nonce",
+            HttpMethod.Get to "/v1/me", HttpMethod.Delete to "/v1/installs/me",
+        ).forEach { (method, path) ->
+            val response = client.request(path) { this.method = method }
+            assertEquals(HttpStatusCode.ServiceUnavailable, response.status)
+            assertEquals("{\"error\":\"db_unavailable\"}", response.bodyAsText())
+        }
+    }
+
+    @Test
+    fun `caller supplied prefix is ignored`() = withCapturedLogs { logs ->
+        testApplication {
+            environment { log = LoggerFactory.getLogger("io.ktor.server.Application") }
+            application { module(Config.fromEnv(testEnvironment()), db = null) }
+            client.get("/healthz") { header("X-Install-Id-Prefix", "deadbeef") }.bodyAsText()
+        }
+        assertTrue(logs.list.any { it.formattedMessage.contains("install_prefix=-") })
+        assertFalse(logs.list.any { it.formattedMessage.contains("deadbeef") })
+    }
+
     private fun withCapturedLogs(test: (ListAppender<ILoggingEvent>) -> Unit) {
         val logger = LoggerFactory.getLogger("io.ktor.server.Application") as Logger
         val appender = ListAppender<ILoggingEvent>().apply { start() }
