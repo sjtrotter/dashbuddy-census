@@ -1,8 +1,12 @@
 package cloud.trotter.census.server
 
+import cloud.trotter.census.server.auth.AuthenticatedInstallKey
+import cloud.trotter.census.server.db.InstallStore
 import cloud.trotter.census.server.routes.healthRoutes
+import cloud.trotter.census.server.routes.identityRoutes
 import cloud.trotter.census.server.routes.policyRoutes
 import io.ktor.http.HttpStatusCode
+import io.ktor.serialization.kotlinx.json.json
 import io.ktor.server.application.Application
 import io.ktor.server.application.install
 import io.ktor.server.plugins.BadRequestException
@@ -10,19 +14,22 @@ import io.ktor.server.plugins.calllogging.CallLogging
 import io.ktor.server.plugins.calllogging.processingTimeMillis
 import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.server.plugins.defaultheaders.DefaultHeaders
+import io.ktor.server.plugins.ratelimit.RateLimit
+import io.ktor.server.plugins.ratelimit.RateLimitName
 import io.ktor.server.plugins.statuspages.StatusPages
 import io.ktor.server.request.httpMethod
 import io.ktor.server.request.path
 import io.ktor.server.response.respond
 import io.ktor.server.routing.routing
-import io.ktor.serialization.kotlinx.json.json
 import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import org.slf4j.event.Level
+import kotlin.time.Duration.Companion.hours
+import kotlin.time.Duration.Companion.minutes
 
-/** Wires the public S1 endpoints; a missing database keeps readiness unavailable (#1157 S1). */
-fun Application.module(config: Config, db: Database?) {
+/** Wires public and identity endpoints, with a clock seam for UTC decisions. */
+fun Application.module(config: Config, db: Database?, clock: Clock = SystemClock) {
     install(ContentNegotiation) {
         json(
             Json {
@@ -38,8 +45,8 @@ fun Application.module(config: Config, db: Database?) {
     install(CallLogging) {
         level = Level.INFO
         format { call ->
-            // Only known public paths: unknown paths can contain user-supplied secrets.
-            val path = call.request.path().takeIf { it in PUBLIC_PATHS } ?: "<unmatched>"
+            // Only known paths: unknown paths can contain user-supplied secrets.
+            val path = call.request.path().takeIf { it in LOGGABLE_PATHS } ?: "<unmatched>"
             val method = when (call.request.httpMethod.value) {
                 "GET" -> "GET"
                 "HEAD" -> "HEAD"
@@ -50,15 +57,30 @@ fun Application.module(config: Config, db: Database?) {
                 "OPTIONS" -> "OPTIONS"
                 else -> "OTHER"
             }
-            val prefix = call.request.headers["X-Install-Id-Prefix"]
-                ?.takeIf { it.length in 1..8 && it.all(Char::isHexDigit) }
-                ?.lowercase() ?: "-"
+            val prefix = call.attributes.getOrNull(AuthenticatedInstallKey)?.prefix ?: "-"
             "method=$method " +
                 "path=$path status=${call.response.status()?.value ?: 0} " +
                 "duration_ms=${call.processingTimeMillis()} install_prefix=$prefix"
         }
     }
+    install(RateLimit) {
+        register(RateLimitName("enrol")) {
+            rateLimiter(limit = 120, refillPeriod = 1.hours)
+            requestKey { "global" }
+        }
+        register(RateLimitName("install")) {
+            rateLimiter(limit = 60, refillPeriod = 1.minutes)
+            requestKey { call -> call.attributes.getOrNull(AuthenticatedInstallKey)?.id ?: "anonymous" }
+        }
+        register(RateLimitName("nonce")) {
+            rateLimiter(limit = 30, refillPeriod = 1.hours)
+            requestKey { call -> call.attributes.getOrNull(AuthenticatedInstallKey)?.id ?: "anonymous" }
+        }
+    }
     install(StatusPages) {
+        status(HttpStatusCode.TooManyRequests) { call, status ->
+            call.respond(status, ErrorResponse("rate_limited"))
+        }
         exception<BadRequestException> { call, _ ->
             call.respond(HttpStatusCode.BadRequest, ErrorResponse("bad_request"))
         }
@@ -72,11 +94,15 @@ fun Application.module(config: Config, db: Database?) {
     }
     routing {
         healthRoutes(db)
-        policyRoutes(Policy(serverVersion = config.serverVersion, imageDigest = config.imageDigest))
+        val policy = Policy(serverVersion = config.serverVersion, imageDigest = config.imageDigest)
+        policyRoutes(policy)
+        identityRoutes(db?.let { InstallStore(it, clock) }, clock, policy)
     }
 }
 
-private val PUBLIC_PATHS = setOf("/healthz", "/readyz", "/v1/policy")
+private val LOGGABLE_PATHS = setOf(
+    "/healthz", "/readyz", "/v1/policy", "/v1/enroll", "/v1/rotate", "/v1/nonce", "/v1/installs/me", "/v1/me",
+)
 
 @Serializable
-private data class ErrorResponse(val error: String)
+data class ErrorResponse(val error: String)

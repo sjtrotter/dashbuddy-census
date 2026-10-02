@@ -12,6 +12,7 @@ import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.routing.get
 import io.ktor.server.routing.routing
+import io.ktor.server.response.respond
 import io.ktor.server.testing.testApplication
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
@@ -48,12 +49,7 @@ class HealthRoutesTest {
             response.bodyAsText()
         }
         assertTrue(logs.list.any { it.formattedMessage.contains("method=GET path=/healthz") })
-        logs.list.forEach {
-            assertFalse(it.formattedMessage.contains("PRIVATE_QUERY_SENTINEL"))
-            assertFalse(it.formattedMessage.contains("PRIVATE_AUTH_SENTINEL"))
-            assertFalse(it.formattedMessage.contains("?token="))
-            assertFalse(it.formattedMessage.contains("Bearer "))
-        }
+        assertPrivateLogs(logs.list, listOf("PRIVATE_QUERY_SENTINEL", "PRIVATE_AUTH_SENTINEL", "?token=", "Bearer "))
     }
 
     @Test
@@ -73,10 +69,32 @@ class HealthRoutesTest {
             assertFalse(body.contains("PRIVATE_MESSAGE_SENTINEL"))
         }
         assertTrue(logs.list.any { it.formattedMessage.contains("status=500") })
-        logs.list.forEach {
-            assertFalse(it.formattedMessage.contains("PRIVATE_MESSAGE_SENTINEL"))
-            assertFalse(it.throwableProxy?.message?.contains("PRIVATE_MESSAGE_SENTINEL") == true)
+        assertPrivateLogs(logs.list, listOf("PRIVATE_MESSAGE_SENTINEL"))
+    }
+
+    @Test
+    fun `real request logger cannot disclose nested or suppressed exceptions`() = withCapturedLogs { logs ->
+        val secret = "PRIVATE_NESTED_SECRET_SENTINEL"
+        testApplication {
+            environment { log = LoggerFactory.getLogger("io.ktor.server.Application") }
+            application {
+                module(Config.fromEnv(testEnvironment()), db = null)
+                routing {
+                    get("/log-failure") {
+                        val failure = RuntimeException("safe", IllegalStateException(secret))
+                        failure.addSuppressed(IllegalArgumentException("PRIVATE_SUPPRESSED_SENTINEL"))
+                        call.application.environment.log.error("safe", failure)
+                        call.application.environment.log.info("safe request continued")
+                        call.respond(HttpStatusCode.OK)
+                    }
+                }
+            }
+            assertEquals(HttpStatusCode.OK, client.get("/log-failure").status)
         }
+        assertTrue(logs.list.any { it.formattedMessage == "safe request continued" })
+        val failureEvent = logs.list.single { it.formattedMessage == "safe" && it.throwableProxy != null }
+        assertTrue(renderLog(failureEvent).contains("java.lang.RuntimeException <- java.lang.IllegalStateException"))
+        assertPrivateLogs(logs.list, listOf(secret, "PRIVATE_SUPPRESSED_SENTINEL"))
     }
 
     @Test
@@ -116,6 +134,30 @@ class HealthRoutesTest {
         val response = client.get("/missing")
         assertEquals(HttpStatusCode.NotFound, response.status)
         assertEquals("not_found", Json.parseToJsonElement(response.bodyAsText()).jsonObject["error"]?.jsonPrimitive?.content)
+    }
+
+    @Test
+    fun `identity routes require a database even without credentials`() = testApplication {
+        application { module(Config.fromEnv(testEnvironment()), db = null) }
+        listOf(
+            HttpMethod.Post to "/v1/enroll", HttpMethod.Post to "/v1/rotate", HttpMethod.Post to "/v1/nonce",
+            HttpMethod.Get to "/v1/me", HttpMethod.Delete to "/v1/installs/me",
+        ).forEach { (method, path) ->
+            val response = client.request(path) { this.method = method }
+            assertEquals(HttpStatusCode.ServiceUnavailable, response.status)
+            assertEquals("{\"error\":\"db_unavailable\"}", response.bodyAsText())
+        }
+    }
+
+    @Test
+    fun `caller supplied prefix is ignored`() = withCapturedLogs { logs ->
+        testApplication {
+            environment { log = LoggerFactory.getLogger("io.ktor.server.Application") }
+            application { module(Config.fromEnv(testEnvironment()), db = null) }
+            client.get("/healthz") { header("X-Install-Id-Prefix", "deadbeef") }.bodyAsText()
+        }
+        assertTrue(logs.list.any { it.formattedMessage.contains("install_prefix=-") })
+        assertFalse(logs.list.any { it.formattedMessage.contains("deadbeef") })
     }
 
     private fun withCapturedLogs(test: (ListAppender<ILoggingEvent>) -> Unit) {

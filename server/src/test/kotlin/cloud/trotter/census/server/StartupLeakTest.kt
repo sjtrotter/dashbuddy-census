@@ -35,6 +35,10 @@ class StartupLeakTest {
                 "PRIVATE_URL_PASSWORD_SENTINEL", "PRIVATE_USER_SENTINEL", "PRIVATE_PASSWORD_SENTINEL", "127.0.0.1:1",
             ).forEach { assertFalse(captured.contains(it), "Startup output exposed a connection detail") }
             assertTrue(captured.contains("database startup failed ("), "Expected the sanitized database failure")
+            // Diagnosability survives the sanitizer: the class CHAIN renders (Flyway 13 names the top class
+            // FlywaySqlUnableToConnectToDbException; the driver cause follows), never a message.
+            assertTrue(captured.contains("FlywaySql"), "Startup failure must retain the exception class")
+            assertTrue(captured.contains("<- org.postgresql.util.PSQLException"), "Startup failure must render the cause chain")
         } finally {
             process.destroyForcibly()
             process.waitFor(5, TimeUnit.SECONDS)
