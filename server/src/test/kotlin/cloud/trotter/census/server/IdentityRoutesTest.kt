@@ -16,19 +16,14 @@ import cloud.trotter.census.server.db.MutationOutcome
 import cloud.trotter.census.server.ingest.BudgetPolicy
 import cloud.trotter.census.server.ingest.ConsumeOutcome
 import cloud.trotter.census.server.jobs.PurgeJob
-import io.ktor.client.HttpClient
 import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.post
-import io.ktor.client.request.request
-import io.ktor.client.request.setBody
 import io.ktor.client.statement.HttpResponse
 import io.ktor.client.statement.bodyAsText
-import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
-import io.ktor.http.contentType
 import io.ktor.server.application.install
 import io.ktor.server.response.respond
 import io.ktor.server.routing.post
@@ -57,7 +52,6 @@ import org.testcontainers.junit.jupiter.Container
 import org.testcontainers.junit.jupiter.Testcontainers
 import java.sql.DriverManager
 import java.time.Instant
-import java.util.Base64
 import java.util.UUID
 
 @Testcontainers
@@ -553,31 +547,6 @@ class IdentityRoutesTest {
         }
     }
 
-    private suspend fun HttpClient.enrol(id: String, secret: String, schema: String = "uinode.skeleton.v1", version: String = "1.0", bodyId: String = id): HttpResponse =
-        post("/v1/enroll") {
-            header(HttpHeaders.Authorization, "Bearer $id.$secret")
-            contentType(ContentType.Application.Json)
-            setBody("{\"installId\":\"$bodyId\",\"appVersion\":\"$version\",\"schemaIds\":[\"$schema\"]}")
-        }
-
-    private suspend fun HttpClient.signed(
-        clock: Clock, id: String, secret: String, method: HttpMethod, path: String, body: String = "",
-        offset: Long = 0, signature: String? = null, signedBody: String = body,
-    ): HttpResponse = request(path) {
-        this.method = method
-        val timestamp = (clock.now().epochSecond + offset).toString()
-        header(HttpHeaders.Authorization, "Bearer $id.$secret")
-        header("X-Census-Timestamp", timestamp)
-        header("X-Census-Signature", signature ?: RequestSigner.sign(secret, RequestSigner.canonical(method.value, path, timestamp, signedBody.toByteArray())))
-        contentType(ContentType.Application.Json)
-        if (body.isNotEmpty()) setBody(body)
-    }
-
-    private suspend fun assertError(response: HttpResponse, status: Int, error: String) {
-        assertEquals(status, response.status.value)
-        assertEquals("{\"error\":\"$error\"}", response.bodyAsText())
-    }
-
     @Test
     fun `an old credential cannot see a replacement generation of the same id (review round 3)`() {
         val clock = FixedClock()
@@ -646,8 +615,6 @@ class IdentityRoutesTest {
 
     private fun <T> sql(block: (java.sql.Connection) -> T): T =
         DriverManager.getConnection(postgres.jdbcUrl, postgres.username, postgres.password).use(block)
-
-    private fun secret(seed: Int): String = Base64.getUrlEncoder().withoutPadding().encodeToString(ByteArray(32) { (seed + it).toByte() })
 
     companion object {
         @Container

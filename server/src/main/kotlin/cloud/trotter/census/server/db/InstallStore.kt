@@ -175,33 +175,7 @@ class InstallStore(private val db: Database, private val clock: Clock) {
         items: Int,
         batchId: String?,
         policy: BudgetPolicy,
-    ): ConsumeOutcome = query {
-        require(bytes >= 0 && items >= 0)
-        val now = clock.now()
-        select(
-            """INSERT INTO ingest_ledger (install_id, day, bytes, accepted, batch_ids)
-                SELECT ?, ?, ?, ?, CASE WHEN ?::text IS NULL THEN '{}'::text[] ELSE ARRAY[?::text] END
-                WHERE ?::bigint <= ? AND ?::integer <= ? AND (CASE WHEN ?::text IS NULL THEN 0 ELSE 1 END) <= ?
-                ON CONFLICT (install_id, day) DO UPDATE SET
-                    bytes = ingest_ledger.bytes + EXCLUDED.bytes,
-                    accepted = ingest_ledger.accepted + EXCLUDED.accepted,
-                    batch_ids = CASE WHEN ?::text IS NULL OR ? = ANY(ingest_ledger.batch_ids)
-                        THEN ingest_ledger.batch_ids ELSE array_append(ingest_ledger.batch_ids, ?::text) END
-                WHERE ingest_ledger.bytes::numeric + EXCLUDED.bytes <= ?
-                    AND ingest_ledger.accepted::bigint + EXCLUDED.accepted <= ?
-                    AND cardinality(ingest_ledger.batch_ids) +
-                        (CASE WHEN ?::text IS NULL OR ? = ANY(ingest_ledger.batch_ids) THEN 0 ELSE 1 END) <= ?
-                RETURNING bytes, accepted, cardinality(batch_ids) AS batches""",
-            installId, day, bytes, items, batchId, batchId,
-            bytes, policy.dailyBytes, items, policy.dailySkeletonBudget, batchId, policy.dailyBatches,
-            batchId, batchId, batchId, policy.dailyBytes, policy.dailySkeletonBudget, batchId, batchId, policy.dailyBatches,
-        ) { row ->
-            ConsumeOutcome.Consumed(
-                policy.dailyBytes - row.getLong("bytes"), policy.dailySkeletonBudget - row.getInt("accepted"),
-                policy.dailyBatches - row.getInt("batches"),
-            )
-        } ?: ConsumeOutcome.BudgetExhausted(secondsToUtcMidnight(now))
-    }
+    ): ConsumeOutcome = query { consumeLedger(installId, day, bytes, items, batchId, policy, clock.now()) }
 
     /** Rejections and duplicates do not consume quota; accepted work must use tryConsume. */
     suspend fun recordIngest(
@@ -275,15 +249,55 @@ class InstallStore(private val db: Database, private val clock: Clock) {
     }
 }
 
+/**
+ * The ONE ledger-consume statement (atomic INSERT … ON CONFLICT with the three limits in its WHERE), callable inside a
+ * caller's transaction so that consuming the budget and storing the work it paid for commit TOGETHER
+ * (`SkeletonStore.ingest`) — a failure between the two must never leave a batch recorded as known but unstored.
+ */
+internal fun Connection.consumeLedger(
+    installId: UUID,
+    day: LocalDate,
+    bytes: Long,
+    items: Int,
+    batchId: String?,
+    policy: BudgetPolicy,
+    now: Instant,
+): ConsumeOutcome {
+    require(bytes >= 0 && items >= 0)
+    return select(
+        """INSERT INTO ingest_ledger (install_id, day, bytes, accepted, batch_ids)
+            SELECT ?, ?, ?, ?, CASE WHEN ?::text IS NULL THEN '{}'::text[] ELSE ARRAY[?::text] END
+            WHERE ?::bigint <= ? AND ?::integer <= ? AND (CASE WHEN ?::text IS NULL THEN 0 ELSE 1 END) <= ?
+            ON CONFLICT (install_id, day) DO UPDATE SET
+                bytes = ingest_ledger.bytes + EXCLUDED.bytes,
+                accepted = ingest_ledger.accepted + EXCLUDED.accepted,
+                batch_ids = CASE WHEN ?::text IS NULL OR ? = ANY(ingest_ledger.batch_ids)
+                    THEN ingest_ledger.batch_ids ELSE array_append(ingest_ledger.batch_ids, ?::text) END
+            WHERE ingest_ledger.bytes::numeric + EXCLUDED.bytes <= ?
+                AND ingest_ledger.accepted::bigint + EXCLUDED.accepted <= ?
+                AND cardinality(ingest_ledger.batch_ids) +
+                    (CASE WHEN ?::text IS NULL OR ? = ANY(ingest_ledger.batch_ids) THEN 0 ELSE 1 END) <= ?
+            RETURNING bytes, accepted, cardinality(batch_ids) AS batches""",
+        installId, day, bytes, items, batchId, batchId,
+        bytes, policy.dailyBytes, items, policy.dailySkeletonBudget, batchId, policy.dailyBatches,
+        batchId, batchId, batchId, policy.dailyBytes, policy.dailySkeletonBudget, batchId, batchId, policy.dailyBatches,
+    ) { row ->
+        ConsumeOutcome.Consumed(
+            policy.dailyBytes - row.getLong("bytes"), policy.dailySkeletonBudget - row.getInt("accepted"),
+            policy.dailyBatches - row.getInt("batches"),
+        )
+    } ?: ConsumeOutcome.BudgetExhausted(secondsToUtcMidnight(now))
+}
+
 private fun sameHash(first: String, second: String): Boolean =
     MessageDigest.isEqual(first.toByteArray(Charsets.US_ASCII), second.toByteArray(Charsets.US_ASCII))
 
-private fun Connection.update(sql: String, vararg args: Any?): Int = prepareStatement(sql).use { statement ->
+internal fun Connection.update(sql: String, vararg args: Any?): Int = prepareStatement(sql).use { statement ->
     args.forEachIndexed { index, value -> statement.setObject(index + 1, value) }
     statement.executeUpdate()
 }
 
-private fun <T> Connection.select(sql: String, vararg args: Any?, read: (ResultSet) -> T): T? =
+internal fun <T> Connection.select(sql: String, vararg args: Any?, read: (ResultSet) -> T): T? =
     prepareStatement(sql).use { statement ->
         args.forEachIndexed { index, value -> statement.setObject(index + 1, value) }
         statement.executeQuery().use { rows -> if (rows.next()) read(rows) else null }

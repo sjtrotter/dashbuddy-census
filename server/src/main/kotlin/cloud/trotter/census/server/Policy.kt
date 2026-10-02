@@ -15,6 +15,7 @@ data class Policy(
     val maxBatchItems: Int = 100,
     val maxBatchBytes: Int = 1_048_576,
     val acceptedSchemaIds: List<String> = listOf("uinode.skeleton.v1"),
+    val acceptedHashDomains: List<Int> = listOf(1),
     val retention: Retention = Retention(),
     val hashDomain: String = ContractCompatibility.HASH_DOMAIN,
 )
