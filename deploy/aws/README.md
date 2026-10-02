@@ -233,3 +233,9 @@ terraform -chdir=bootstrap validate
 ```
 
 Backend-free validation does not contact AWS, but initialization downloads providers. No account ID or secret belongs in tracked files. Commit generated provider lockfiles after reviewing them.
+
+## First-deploy notes (2026-10-02, the official instance)
+
+- **Cost Anomaly Detection:** a new account already carries a default `Default-Services-Monitor`, and AWS allows exactly one SERVICE-dimension monitor per account, so the first `apply` fails on `aws_ce_anomaly_monitor.services` with "Limit exceeded on dimensional spend monitor creation". Import it instead of creating: `terraform import aws_ce_anomaly_monitor.services $(aws ce get-anomaly-monitors --query "AnomalyMonitors[?MonitorDimension=='SERVICE'].MonitorArn | [0]" --output text)` and re-apply (it is renamed in place).
+- **First boot fails until an image exists:** the box runs `docker compose pull` on first start; before the first `v*` release the GHCR package does not exist and the pull is `denied`. Tag a release, wait for `image.yml`, then `systemctl restart census.service` through SSM. The package was public on first push here (linked to the public repo); if a pull is still denied after publishing, set the package visibility to Public in GitHub → Packages.
+- Verified end to end: data volume mounted at `/var/lib/census-data`, Parameter Store values read, all three containers healthy, `/readyz` 200, `https://census.dashbuddy.trotter.cloud/v1/policy` 200 with HSTS within a minute of the DNS record (DNS-only, not proxied, in Cloudflare).
