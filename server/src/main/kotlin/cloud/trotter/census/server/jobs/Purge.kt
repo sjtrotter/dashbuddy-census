@@ -3,6 +3,8 @@ package cloud.trotter.census.server.jobs
 import cloud.trotter.census.server.Clock
 import cloud.trotter.census.server.Policy
 import cloud.trotter.census.server.db.InstallStore
+import kotlinx.coroutines.CancellationException
+import org.slf4j.LoggerFactory
 import java.time.ZoneOffset
 
 data class PurgeReport(val nonces: Int, val ledgerRows: Int, val trustedEnvelopes: Int, val healthRows: Int)
@@ -17,12 +19,23 @@ class PurgeJob(
         val now = clock.now()
         val today = now.atOffset(ZoneOffset.UTC).toLocalDate()
         // Evaluate before retention removes the oldest available health history.
-        alarms?.evaluateSilence()
+        sweep("silence") {
+            alarms?.evaluateSilence()
+            0
+        }
         return PurgeReport(
-            store.purgeNonces(now.minusSeconds(3600)),
-            store.purgeLedger(today.minusDays(policy.retention.ingestLedgerDays.toLong())),
-            store.purgeTrustedEnvelopes(today),
-            store.purgeHealthDaily(today.minusDays(policy.retention.healthDailyDays.toLong())),
+            sweep("nonces") { store.purgeNonces(now.minusSeconds(3600)) },
+            sweep("ledger") { store.purgeLedger(today.minusDays(policy.retention.ingestLedgerDays.toLong())) },
+            sweep("envelopes") { store.purgeTrustedEnvelopes(today) },
+            sweep("health") { store.purgeHealthDaily(today.minusDays(policy.retention.healthDailyDays.toLong())) },
         )
     }
+
+    private suspend fun sweep(name: String, block: suspend () -> Int): Int = runCatching { block() }.getOrElse { failure ->
+        if (failure is CancellationException) throw failure
+        log.warn("purge sweep={} failed class={}", name, failure.javaClass.simpleName)
+        0
+    }
+
+    private val log = LoggerFactory.getLogger("Purge")
 }

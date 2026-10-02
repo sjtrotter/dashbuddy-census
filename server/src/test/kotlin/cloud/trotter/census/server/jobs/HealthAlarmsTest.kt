@@ -9,6 +9,7 @@ import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.slf4j.LoggerFactory
+import java.time.Instant
 import java.time.LocalDate
 
 class HealthAlarmsTest {
@@ -70,14 +71,19 @@ class HealthAlarmsTest {
     }
 
     @Test
-    fun `silence boundary is two UTC days and only trusted installs`() {
-        assertFalse(silence(day, day, true))
-        assertFalse(silence(day.minusDays(1), day, true))
-        assertTrue(silence(day.minusDays(2), day, true))
-        assertTrue(silence(day.minusDays(3), day, true))
-        assertFalse(silence(day.minusDays(2), day, false))
-        assertFalse(silence(null, day, true))
-        assertFalse(silence(day.plusDays(1), day, true))
+    fun `silence requires 48 elapsed hours and an old stored day for a trusted install`() {
+        val now = Instant.parse("2026-09-18T12:00:00Z")
+        val startedAt = now.minusSeconds(3 * 86400)
+        val boundary = now.minusSeconds(48 * 3600)
+        assertTrue(silence(boundary, startedAt, now, day.minusDays(2), day, true))
+        assertFalse(silence(boundary.plusSeconds(60), startedAt, now, day.minusDays(2), day, true))
+        assertFalse(silence(now, startedAt, now, day.minusDays(2), day, true))
+        assertTrue(silence(null, boundary, now, day.minusDays(2), day, true))
+        assertFalse(silence(null, boundary.plusSeconds(60), now, day.minusDays(2), day, true))
+        assertFalse(silence(null, now, now, day.minusDays(3), day, true))
+        assertFalse(silence(boundary, startedAt, now, day.minusDays(1), day, true))
+        assertFalse(silence(boundary, startedAt, now, day.minusDays(2), day, false))
+        assertFalse(silence(boundary, startedAt, now, null, day, true))
     }
 
     @Test
@@ -90,6 +96,10 @@ class HealthAlarmsTest {
             val event = logs.list.single()
             assertEquals(Level.WARN, event.level)
             assertEquals("alarm kind=silent_rule_death platform=doordash version=8.0 install_prefix=12345678 rule_ids=[$offer]", event.formattedMessage)
+            LoggingAlarmSink().raise(Alarm("trips", "doordash", "PRIVATE_CUSTOMER_JANE"))
+            assertEquals("alarm kind=trips platform=doordash version=[redacted] install_prefix=- rule_ids=[]", logs.list.last().formattedMessage)
+            LoggingAlarmSink().raise(Alarm("silent_rule_death", "PRIVATE_PLATFORM", "1.0.0", ruleIds = listOf("PRIVATE_RULE", offer)))
+            assertEquals("alarm kind=silent_rule_death platform=[redacted] version=1.0.0 install_prefix=- rule_ids=[[redacted], $offer]", logs.list.last().formattedMessage)
         } finally {
             logger.detachAppender(logs)
             logs.stop()

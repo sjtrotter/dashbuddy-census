@@ -1,5 +1,6 @@
 package cloud.trotter.census.server.ingest
 
+import cloud.trotter.census.server.Policy
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -26,7 +27,7 @@ sealed interface HealthReportVerdict {
 }
 
 object HealthReportValidator {
-    fun validate(element: JsonElement, today: LocalDate): HealthReportVerdict {
+    fun validate(element: JsonElement, today: LocalDate, policy: Policy): HealthReportVerdict {
         if (element !is JsonObject) return reject("bad_item")
         if (element.keys.any { it !in fields }) return reject("unknown_field")
         val date = element.string("day") ?: return reject("bad_day")
@@ -34,10 +35,10 @@ object HealthReportValidator {
         val day = try { LocalDate.parse(date) } catch (_: DateTimeParseException) { return reject("bad_day") }
         if (day < today.minusDays(7) || day > today.plusDays(1)) return reject("stale_day")
         val platform = element.string("platform") ?: return reject("bad_platform")
-        if (!platformPattern.matches(platform)) return reject("bad_platform")
-        val versions = listOf("platformAppVersion", "appVersion", "rulesetVersion").map { key ->
+        if (platform !in policy.acceptedPlatforms) return reject("bad_platform")
+        val versions = versionPatterns.map { (key, grammar) ->
             val version = element.string(key) ?: return reject("bad_version")
-            if (!versionPattern.matches(version)) return reject("bad_version")
+            if (!grammar.matches(version)) return reject("bad_version")
             version
         }
         val admitted = element["admitted"].count() ?: return reject("bad_count")
@@ -47,7 +48,7 @@ object HealthReportValidator {
         if (counts.size > 512) return reject("bad_count")
         val ruleCounts = linkedMapOf<String, Int>()
         for ((rule, value) in counts) {
-            if (!rulePattern.matches(rule)) return reject("bad_rule_id")
+            if (!WireGrammars.ruleId.matches(rule)) return reject("bad_rule_id")
             ruleCounts[rule] = value.count() ?: return reject("bad_count")
         }
         if (ruleCounts.values.sumOf { it.toLong() } > admitted) return reject("bad_count")
@@ -60,8 +61,9 @@ object HealthReportValidator {
     private fun JsonElement?.count(): Int? =
         (this as? JsonPrimitive)?.takeIf { !it.isString }?.intOrNull?.takeIf { it in 0..1_000_000 }
     private val fields = setOf("day", "platform", "platformAppVersion", "appVersion", "rulesetVersion", "admitted", "unknown", "trips", "ruleCounts")
+    private val versionPatterns = mapOf(
+        "platformAppVersion" to WireGrammars.platformAppVersion, "appVersion" to WireGrammars.appVersion,
+        "rulesetVersion" to WireGrammars.rulesetReleaseTag,
+    )
     private val dayPattern = Regex("[0-9]{4}-[0-9]{2}-[0-9]{2}")
-    private val platformPattern = Regex("[a-z_][a-z0-9_]{0,31}")
-    private val versionPattern = Regex("[A-Za-z0-9+._-]{1,64}")
-    private val rulePattern = Regex("""[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*){1,4}""")
 }

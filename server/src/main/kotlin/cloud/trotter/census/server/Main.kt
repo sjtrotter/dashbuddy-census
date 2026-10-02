@@ -41,7 +41,7 @@ fun main() {
     }
     database.use { db ->
         embeddedServer(Netty, host = "0.0.0.0", port = config.port) {
-            val alarms = HealthAlarms(HealthStore(db, SystemClock), SystemClock)
+            val alarms = HealthAlarms(HealthStore(db, SystemClock), SystemClock, startedAt = SystemClock.now())
             module(config, db, alarmEvaluator = alarms)
             launch {
                 val purge = PurgeJob(InstallStore(db, SystemClock), SystemClock, alarms = alarms)

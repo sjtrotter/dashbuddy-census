@@ -52,7 +52,7 @@ fun Route.envelopeRoutes(envelopes: EnvelopeStore, clock: Clock, policy: Policy)
         val accepted = mutableListOf<EnvelopeVerdict.Accepted>()
         val rejected = linkedMapOf<String, Int>()
         for (item in items) {
-            when (val verdict = EnvelopeValidator.validate(item)) {
+            when (val verdict = EnvelopeValidator.validate(item, policy)) {
                 is EnvelopeVerdict.Accepted -> accepted += verdict
                 is EnvelopeVerdict.Rejected -> {
                     rejected[verdict.reason] = rejected.getOrDefault(verdict.reason, 0) + 1

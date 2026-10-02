@@ -1,5 +1,6 @@
 package cloud.trotter.census.server.ingest
 
+import cloud.trotter.census.server.Policy
 import cloud.trotter.census.server.healthFixture
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -11,22 +12,31 @@ import org.junit.jupiter.api.Test
 import java.time.LocalDate
 
 class HealthReportValidatorTest {
+    private val policy = Policy()
     private val today = LocalDate.of(2026, 9, 18)
     private val fixture = healthFixture()
 
     @Test
     fun `valid report and inclusive boundaries are accepted`() {
-        assertTrue(HealthReportValidator.validate(fixture, today) is HealthReportVerdict.Accepted)
+        assertTrue(HealthReportValidator.validate(fixture, today, policy) is HealthReportVerdict.Accepted)
         for (day in listOf(today.minusDays(7), today.plusDays(1))) {
-            assertTrue(HealthReportValidator.validate(item("day", JsonPrimitive(day.toString())), today) is HealthReportVerdict.Accepted)
+            assertTrue(HealthReportValidator.validate(item("day", JsonPrimitive(day.toString())), today, policy) is HealthReportVerdict.Accepted)
         }
         for (key in listOf("admitted", "unknown", "trips")) {
-            assertTrue(HealthReportValidator.validate(item(key, JsonPrimitive(1_000_000)), today) is HealthReportVerdict.Accepted)
+            assertTrue(HealthReportValidator.validate(item(key, JsonPrimitive(1_000_000)), today, policy) is HealthReportVerdict.Accepted)
         }
         val empty = JsonObject(fixture + mapOf("admitted" to JsonPrimitive(0), "ruleCounts" to JsonObject(emptyMap())))
-        assertTrue(HealthReportValidator.validate(empty, today) is HealthReportVerdict.Accepted)
-        for (key in listOf("platformAppVersion", "appVersion", "rulesetVersion")) {
-            assertTrue(HealthReportValidator.validate(item(key, JsonPrimitive("a".repeat(64))), today) is HealthReportVerdict.Accepted)
+        assertTrue(HealthReportValidator.validate(empty, today, policy) is HealthReportVerdict.Accepted)
+        val versions = mapOf(
+            "platformAppVersion" to listOf("1", "12345.12345.12345.12345"),
+            "appVersion" to listOf("test", "1.2.3+abcdef0.dirty", "1.2.3+nogit"),
+            "rulesetVersion" to listOf("corpus", "dev", "v1.2.3-rc1"),
+        )
+        for ((key, values) in versions) for (value in values) {
+            assertTrue(HealthReportValidator.validate(item(key, JsonPrimitive(value)), today, policy) is HealthReportVerdict.Accepted)
+        }
+        for (platform in policy.acceptedPlatforms) {
+            assertTrue(HealthReportValidator.validate(item("platform", JsonPrimitive(platform)), today, policy) is HealthReportVerdict.Accepted)
         }
     }
 
@@ -39,9 +49,11 @@ class HealthReportValidatorTest {
         reject("stale_day", item("day", JsonPrimitive(today.minusDays(8).toString())))
         reject("stale_day", item("day", JsonPrimitive(today.plusDays(2).toString())))
         reject("bad_platform", item("platform", JsonPrimitive("Door Dash")))
+        reject("bad_platform", item("platform", JsonPrimitive("private_customer_jane")))
+        assertEquals(HealthReportVerdict.Rejected("bad_platform"), HealthReportValidator.validate(fixture, today, policy.copy(acceptedPlatforms = listOf("uber"))))
         for (key in listOf("platformAppVersion", "appVersion", "rulesetVersion")) {
             reject("bad_version", JsonObject(fixture - key))
-            for (value in listOf(JsonPrimitive(""), JsonPrimitive("a".repeat(65)), JsonPrimitive("plain text"), JsonPrimitive(1))) {
+            for (value in listOf(JsonPrimitive(""), JsonPrimitive("a".repeat(65)), JsonPrimitive("plain text"), JsonPrimitive("PRIVATE_CUSTOMER_JANE"), JsonPrimitive("a".repeat(64)), JsonPrimitive(1))) {
                 reject("bad_version", item(key, value))
             }
         }
@@ -63,6 +75,6 @@ class HealthReportValidatorTest {
 
     private fun item(key: String, value: JsonElement): JsonObject = JsonObject(fixture + (key to value))
     private fun reject(reason: String, item: JsonElement) {
-        assertEquals(HealthReportVerdict.Rejected(reason), HealthReportValidator.validate(item, today))
+        assertEquals(HealthReportVerdict.Rejected(reason), HealthReportValidator.validate(item, today, policy))
     }
 }

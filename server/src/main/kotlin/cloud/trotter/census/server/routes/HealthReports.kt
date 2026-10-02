@@ -20,10 +20,14 @@ import io.ktor.http.HttpStatusCode
 import io.ktor.server.response.respond
 import io.ktor.server.routing.Route
 import io.ktor.server.routing.post
+import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import org.slf4j.LoggerFactory
 import java.time.ZoneOffset
+
+private val alarmLog = LoggerFactory.getLogger("Alarm")
 
 fun Route.healthReportRoutes(health: HealthStore, alarms: HealthAlarms, clock: Clock, policy: Policy) {
     post("/health") {
@@ -43,7 +47,7 @@ fun Route.healthReportRoutes(health: HealthStore, alarms: HealthAlarms, clock: C
         val accepted = mutableListOf<HealthReport>()
         val rejected = linkedMapOf<String, Int>()
         for (report in reports) {
-            when (val verdict = HealthReportValidator.validate(report, today)) {
+            when (val verdict = HealthReportValidator.validate(report, today, policy)) {
                 is HealthReportVerdict.Accepted -> accepted += verdict.report
                 is HealthReportVerdict.Rejected -> rejected[verdict.reason] = rejected.getOrDefault(verdict.reason, 0) + 1
             }
@@ -61,7 +65,13 @@ fun Route.healthReportRoutes(health: HealthStore, alarms: HealthAlarms, clock: C
                 call.respond(HttpStatusCode.TooManyRequests, ErrorResponse("budget_exhausted"))
             }
             HealthOutcome.Stored -> {
-                alarms.evaluate(installId, accepted, keyHash)
+                try {
+                    alarms.evaluate(installId, accepted, keyHash)
+                } catch (failure: CancellationException) {
+                    throw failure
+                } catch (failure: Throwable) {
+                    alarmLog.warn("alarm_evaluation_failed class={}", failure.javaClass.simpleName)
+                }
                 call.respond(HealthBatchResponse(accepted = accepted.size, rejected = rejected))
             }
         }

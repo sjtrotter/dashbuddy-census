@@ -86,7 +86,7 @@ class EnvelopeRoutesTest {
                                 assertEquals(day, rows.getObject("received_day", LocalDate::class.java))
                                 assertEquals(day.plusDays(30), rows.getObject("purge_after", LocalDate::class.java))
                                 val stored = Json.parseToJsonElement(rows.getString("envelope")).jsonObject
-                                val expected = EnvelopeValidator.validate(fixture) as EnvelopeVerdict.Accepted
+                                val expected = EnvelopeValidator.validate(fixture, Policy()) as EnvelopeVerdict.Accepted
                                 assertEquals(Json.parseToJsonElement(expected.canonicalJson), stored)
                             }
                         }
@@ -133,7 +133,7 @@ class EnvelopeRoutesTest {
                     }.sorted())
                     assertEquals(6, count(id))
                     val authenticated = requireNotNull(store.lookup(id))
-                    val item = EnvelopeValidator.validate(fixture) as EnvelopeVerdict.Accepted
+                    val item = EnvelopeValidator.validate(fixture, Policy()) as EnvelopeVerdict.Accepted
                     val envelopes = EnvelopeStore(db, clock)
                     assertTrue(envelopes.ingest(id, authenticated.keyHash, day, listOf(item), emptyMap(), "no-budget", 1, BudgetPolicy(dailySkeletonBudget = 0), 30) is EnvelopeOutcome.BudgetExhausted)
                     assertEquals(6, count(id))

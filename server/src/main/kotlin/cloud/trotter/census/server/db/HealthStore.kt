@@ -125,7 +125,8 @@ class HealthStore(private val db: Database, private val clock: Clock) {
             installId, firstDay, lastDay,
         ) { rows -> buildList { do { add(rows.dayReport(prefix)) } while (rows.next()) } } ?: emptyList()
         val touched = reports.map { FleetKey(it.day, it.platform, it.platformAppVersion) }.toSet()
-        val currentReports = history.filter { FleetKey(it.day, it.platform, it.platformAppVersion) in touched }
+        val touchedDays = reports.map { it.platform to it.day }.toSet()
+        val currentReports = history.filter { (it.platform to it.day) in touchedDays }
         val fleet = mutableListOf<FleetDay>()
         val comparisons = mutableListOf<Pair<FleetDay, FleetDay>>()
         for (key in touched) {

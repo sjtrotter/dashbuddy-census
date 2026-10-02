@@ -3,9 +3,13 @@ package cloud.trotter.census.server.jobs
 import cloud.trotter.census.server.Clock
 import cloud.trotter.census.server.db.HealthStore
 import cloud.trotter.census.server.ingest.HealthReport
+import cloud.trotter.census.server.ingest.WireGrammars
 import cloud.trotter.census.server.today
 import org.slf4j.LoggerFactory
+import java.time.Duration
+import java.time.Instant
 import java.time.LocalDate
+import java.time.ZoneOffset
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
@@ -49,11 +53,14 @@ class LoggingAlarmSink : AlarmSink {
     override fun raise(alarm: Alarm) {
         log.warn(
             "alarm kind={} platform={} version={} install_prefix={} rule_ids={}",
-            alarm.kind, alarm.platform, alarm.version, alarm.installPrefix ?: "-", alarm.ruleIds,
+            alarm.kind, alarm.platform.takeIf { platformPattern.matches(it) } ?: "[redacted]",
+            alarm.version.takeIf { WireGrammars.platformAppVersion.matches(it) } ?: "[redacted]",
+            alarm.installPrefix ?: "-", alarm.ruleIds.map { it.takeIf { rule -> WireGrammars.ruleId.matches(rule) } ?: "[redacted]" },
         )
     }
 
     private val log = LoggerFactory.getLogger("Alarm")
+    private val platformPattern = Regex("^[a-z_][a-z0-9_]{0,31}$")
 }
 
 /** Process-local counters, like PipelineStats: no identities or report contents are retained. */
@@ -107,8 +114,15 @@ fun unknownSurge(
     for (clusters in newClusters) if (clusters.count >= 5) add(Alarm("new_clusters", clusters.platform, clusters.version))
 }
 
-fun silence(lastReportDay: LocalDate?, today: LocalDate, trusted: Boolean): Boolean =
-    trusted && lastReportDay != null && lastReportDay <= today.minusDays(2)
+fun silence(
+    lastReportAt: Instant?,
+    startedAt: Instant,
+    now: Instant,
+    lastReportDay: LocalDate?,
+    today: LocalDate,
+    trusted: Boolean,
+): Boolean = trusted && lastReportDay != null && lastReportDay <= today.minusDays(2) &&
+    Duration.between(lastReportAt ?: startedAt, now) >= Duration.ofHours(48)
 
 /** Reads stored counters after admission. Main shares this evaluator with the six-hour purge job. */
 class HealthAlarms(
@@ -116,15 +130,32 @@ class HealthAlarms(
     private val clock: Clock,
     private val sink: AlarmSink = LoggingAlarmSink(),
     val stats: AlarmStats = AlarmStats(),
+    /** Process start for the silence clock; null = read the clock at the FIRST silence evaluation (see [startedAt]). */
+    startedAt: Instant? = null,
 ) {
-    private data class AlarmKey(val kind: String, val install: UUID?, val version: String, val rule: String?)
+    private data class AlarmKey(val kind: String, val install: UUID?, val platform: String, val version: String, val rule: String?)
+    private val lastReportAt = ConcurrentHashMap<UUID, Instant>()
+    // Read lazily (at the first silence evaluation, not at construction): the process clock is deliberately not touched
+    // while wiring the module — a request must see exactly one clock read — and starting the 48 h window at the first
+    // purge-cadence evaluation only fails further toward NO alarm after a restart (documented in OPERATOR.md).
+    private val startedAt: Instant by lazy { startedAt ?: clock.now() }
     private var dedupeDay: LocalDate? = null
     private val raised = mutableSetOf<AlarmKey>()
 
     suspend fun evaluate(installId: UUID, reports: List<HealthReport>, keyHash: String) {
-        val today = clock.today()
+        val now = clock.now()
+        lastReportAt[installId] = now
+        val today = now.atOffset(ZoneOffset.UTC).toLocalDate()
         val inputs = store.alarmInputs(installId, keyHash, reports, today) ?: return
-        for (report in inputs.current) {
+        val currentDays = inputs.current.groupBy { it.platform to it.day }.values.map { rows ->
+            val counts = linkedMapOf<String, Long>()
+            for (row in rows) for ((rule, count) in row.ruleCounts) counts[rule] = counts.getOrDefault(rule, 0) + count
+            rows.first().copy(
+                platformAppVersion = rows.maxOf { it.platformAppVersion }, admitted = rows.sumOf { it.admitted },
+                unknown = rows.sumOf { it.unknown }, trips = rows.sumOf { it.trips }, ruleCounts = counts,
+            )
+        }
+        for (report in currentDays) {
             val rules = silentRuleDeath(inputs.history, report)
             if (rules.isNotEmpty()) emit(Alarm("silent_rule_death", report.platform, report.platformAppVersion, report.installPrefix, rules), installId)
         }
@@ -138,9 +169,10 @@ class HealthAlarms(
     }
 
     suspend fun evaluateSilence() {
-        val today = clock.today()
+        val now = clock.now()
+        val today = now.atOffset(ZoneOffset.UTC).toLocalDate()
         for (install in store.silenceInputs()) {
-            if (silence(install.lastReportDay, today, true)) {
+            if (silence(lastReportAt[install.id], startedAt, now, install.lastReportDay, today, true)) {
                 emit(Alarm("silence", install.platform, install.version, install.id.toString().take(8)), install.id)
             }
         }
@@ -155,13 +187,13 @@ class HealthAlarms(
             raised.clear()
             dedupeDay = today
         }
-        val rules = if (alarm.ruleIds.isEmpty()) {
-            if (!raised.add(AlarmKey(alarm.kind, installId, alarm.version, null))) return
-            emptyList()
+        val keys = if (alarm.ruleIds.isEmpty()) {
+            listOf(AlarmKey(alarm.kind, installId, alarm.platform, alarm.version, null))
         } else {
-            alarm.ruleIds.filter { raised.add(AlarmKey(alarm.kind, installId, alarm.version, it)) }.ifEmpty { return }
-        }
-        sink.raise(alarm.copy(ruleIds = rules))
+            alarm.ruleIds.map { AlarmKey(alarm.kind, installId, alarm.platform, alarm.version, it) }
+        }.filter { it !in raised }.ifEmpty { return }
+        sink.raise(alarm.copy(ruleIds = keys.mapNotNull { it.rule }))
+        raised.addAll(keys)
         stats.record(alarm.kind)
     }
 }
