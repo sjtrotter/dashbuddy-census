@@ -80,21 +80,29 @@ val OpsLogging = createApplicationPlugin("OpsLogging") {
     }
 }
 
-/** One process-wide token bucket for every `/ops` request, successful or not: 60 tokens, refilled at 60/minute. */
+/**
+ * One process-wide token bucket for every `/ops` request, successful or not: 60 tokens, refilled at 60/minute.
+ * Integer millitoken accounting (Astra, S6 round 2): exactly one token at T + 1 s, no floating-point undershoot; a
+ * clock that moves BACKWARDS re-bases the refill anchor instead of freezing it (the ops clock is wall time).
+ */
 class OpsBucket(private val capacity: Int = 60, private val perMinute: Int = 60) {
-    private var tokens = capacity.toDouble()
+    private var milliTokens: Long = capacity * 1_000L
     private var updatedAt: java.time.Instant? = null
 
     @Synchronized
     fun admit(now: java.time.Instant): Boolean {
         val last = updatedAt
-        if (last != null && now.isAfter(last)) {
-            val elapsed = java.time.Duration.between(last, now)
-            tokens = (tokens + (elapsed.seconds + elapsed.nano / 1_000_000_000.0) * perMinute / 60).coerceAtMost(capacity.toDouble())
+        if (last == null || now.isBefore(last)) {
+            updatedAt = now
+        } else {
+            val elapsedMillis = java.time.Duration.between(last, now).toMillis()
+            if (elapsedMillis > 0) {
+                milliTokens = (milliTokens + elapsedMillis * perMinute / 60).coerceAtMost(capacity * 1_000L)
+                updatedAt = now
+            }
         }
-        updatedAt = if (last == null || now.isAfter(last)) now else last
-        if (tokens < 1.0) return false
-        tokens -= 1.0
+        if (milliTokens < 1_000L) return false
+        milliTokens -= 1_000L
         return true
     }
 }
