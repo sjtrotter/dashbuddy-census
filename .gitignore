@@ -8,3 +8,9 @@ out/
 .DS_Store
 deploy/compose/.env
 backups/
+
+# Terraform working data and private inputs; commit .terraform.lock.hcl files.
+deploy/aws/**/.terraform/
+deploy/aws/**/*.tfstate*
+deploy/aws/**/*.tfvars
+!deploy/aws/**/*.auto.tfvars.example

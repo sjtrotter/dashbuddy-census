@@ -1,0 +1,235 @@
+# AWS deployment — #1157 S2
+
+One Ubuntu 24.04 arm64 `t4g.small` in `us-east-2` runs the committed [Compose stack](../compose/docker-compose.yml). Caddy terminates TLS; PostgreSQL lives on a separate encrypted 20 GiB gp3 data volume. The Elastic IP survives instance replacement. Shell access is SSM Session Manager only: no SSH key pair or port 22. CPU credits use **standard**, so exhausted credits throttle instead of generating unlimited-credit charges.
+
+## Prerequisites (FINAL-PLAN §F)
+
+Complete the agreed FINAL-PLAN §F account setup: root MFA, an IAM Identity Center administrator, and `aws configure sso` / `aws sso login`. Use that SSO administrator profile for Terraform, with permission to manage the resources here, pass the instance/Budgets roles, and access billing and Cost Explorer. Root is for account recovery and the deliberately root-only backup retention exception, not routine deployment. Install Terraform >= 1.10 (the project uses 1.16), AWS CLI v2, the Session Manager plugin, and OpenSSL on the operator workstation.
+
+The manually configured budgets are now codified here: delete the duplicates or import them into `aws_budgets_budget.monthly` and `aws_budgets_budget.hard_ceiling` before applying. Enable Cost Explorer. If an AWS services anomaly monitor already exists, import it into `aws_ce_anomaly_monitor.services`; AWS permits only one such dimensional monitor per account. Likewise, import an existing GitHub OIDC provider into `aws_iam_openid_connect_provider.github` instead of creating a duplicate. Review any existing multi-region CloudTrail to avoid duplicate management-event costs.
+
+The account needs a default VPC, its default subnet in the first available AZ, and an internet gateway/default route. This module reads them; it does not recreate them. Security rules include IPv4 and IPv6, but this deployment publishes only an IPv4 A record; it does not add IPv6 addressing/routing to the default VPC. The source repository and GHCR image must be publicly readable from the host. The image must include `linux/arm64`, as produced by [image.yml](../../.github/workflows/image.yml).
+
+All taggable AWS resources inherit `project = "dashbuddy-census"` and `managed_by = "terraform"` from provider `default_tags`. AWS attachment/configuration resources that do not support tags inherit their parent resource's context.
+
+## 1. Bootstrap the state bucket once
+
+From the repository root, with the SSO profile selected:
+
+```sh
+export AWS_PROFILE=<your-sso-admin-profile>
+aws sso login
+cd deploy/aws/bootstrap
+terraform init
+terraform apply
+terraform output -raw state_bucket
+```
+
+Keep bootstrap's local state in a secure backup; it is intentionally independent of the main deployment. Its versioned, SSE-S3 encrypted, private bucket is protected against accidental Terraform destruction. There is no state expiry policy.
+
+```sh
+cd ..
+terraform init \
+  -backend-config="bucket=<name-from-bootstrap>" \
+  -backend-config="key=census/terraform.tfstate" \
+  -backend-config="region=us-east-2" \
+  -backend-config="use_lockfile=true"
+```
+
+Native S3 locking uses `census/terraform.tfstate.tflock`; no DynamoDB table is needed. The operator needs `s3:ListBucket`, state `GetObject`/`PutObject`, and lockfile `GetObject`/`PutObject`/`DeleteObject`. Never put credentials in backend arguments. Commit both generated `.terraform.lock.hcl` files after initialization; state, `.terraform/`, and real `.tfvars` files are ignored. Treat the state bucket and bootstrap state as sensitive: Terraform may refresh real SecureString values into state even with `ignore_changes`.
+
+## 2. Apply
+
+```sh
+terraform apply -var='alert_email=you@example.com'
+terraform output
+```
+
+For reproducibility, set `compose_ref` to a reviewed branch/tag of **this repository** and `image_ref` to a scanned, signature-verified `ghcr.io/sjtrotter/dashbuddy-census@sha256:<digest>`. `git clone --branch` supports branches/tags, not bare commit SHAs. Persist non-secret settings in a local `.tfvars` file and supply it on later applies. `alert_email` has no default. Confirm the SNS subscription email, and review any Budgets/Cost Anomaly subscription confirmation emails.
+
+Cloud-init installs Docker from Docker's arm64 apt repository, AWS CLI v2, the CloudWatch agent, and the Compose files under `/opt/census`. Its first start intentionally fails while parameters contain `CHANGE-ME`; infrastructure creation still completes. Boot diagnostics are in `cloud-init-output.log` and `journalctl -u census`. Wait for installation to finish before restarting the service below. The CloudWatch agent emits only memory and root-filesystem metrics, aggregated by InstanceId every five minutes. The 14-day host log group is reserved: **no host or app/container logs are shipped in S2**; the instance has no CloudWatch Logs write permissions.
+
+## Data durability
+
+The encrypted gp3 data volume has `prevent_destroy = true` and mounts by UUID at `/var/lib/census-data`. PostgreSQL uses `/var/lib/census-data/pgdata`; local dumps use `/var/lib/census-data/backups`. Rebuilding the instance re-attaches this same volume in the same AZ. Terraform refuses to destroy it, and the disposable root volume holds no durable database data. Within this instance-replacement lifecycle, the only way to lose the retained volume is to delete it by hand or delete the account; backups in S3 are the second copy for recovery from database corruption or accidental data deletion.
+
+The instance ignores changes to its AMI and user data (including the base64 template attribute), so a new Canonical "current" AMI or a changed template never replaces the box by itself. Host patching uses `unattended-upgrades`. To deliberately rebuild with the current AMI and template, take and verify a fresh backup, then run from `deploy/aws` with your usual variable settings:
+
+```sh
+terraform apply -replace=aws_instance.census
+```
+
+This stops the old instance before detaching the data volume and re-attaches it to the replacement. Cloud-init formats only a volume with no filesystem, preserves existing data, and waits for attachment before starting Compose. Refresh the GitHub instance variable after the rebuild. Routine image promotion uses the workflow.
+
+## 3. Set parameters and resume startup
+
+The two SecureStrings use the AWS-managed `aws/ssm` key; the instance has scoped SSM reads and `kms:Decrypt` only on that key ARN, resolved through `alias/aws/ssm`, with no customer KMS key or broad KMS grant. Terraform creates placeholders and ignores later value changes. ACME email is an operator-owned String; `public_host` is a String continuously managed from `var.public_host`.
+
+Run on the workstation (adjust the prefix if customized; disable shell tracing):
+
+```sh
+export AWS_DEFAULT_REGION=us-east-2
+aws ssm put-parameter --name /dashbuddy-census/postgres_password \
+  --type SecureString --value "$(openssl rand -base64 32)" --overwrite
+aws ssm put-parameter --name /dashbuddy-census/acme_email \
+  --type String --value 'you@example.com' --overwrite
+```
+
+Generate a high-entropy operator token in your password manager (or use `openssl rand -hex 32` privately), and retain the **original token only in the password manager**. Store only its SHA-256 digest. The following Bash reads the retained token without displaying it or placing it in shell history:
+
+```bash
+read -r -s -p 'Operator token from password manager: ' OPERATOR_TOKEN
+printf '\n'
+TOKEN_SHA256=$(printf '%s' "$OPERATOR_TOKEN" | openssl dgst -sha256 -r | cut -d ' ' -f 1)
+aws ssm put-parameter --name /dashbuddy-census/operator_token_sha256 \
+  --type SecureString --value "$TOKEN_SHA256" --overwrite
+unset OPERATOR_TOKEN TOKEN_SHA256
+```
+
+The host writes a root-owned 0600 `.env` atomically, never logs secret values, and refuses missing/placeholder parameters. Database passwords must use the documented base64 format (letters, digits, `+ / = _ -`); token hashes must have 64 hex digits. `POSTGRES_PASSWORD` and `DATABASE_PASSWORD` get the same value. Changing the SSM database password does not rotate an existing PostgreSQL role: coordinate the database password change before recreating containers.
+
+## 4. DNS and first start
+
+Create the DNS **A** record `census.dashbuddy.trotter.cloud` pointing to `terraform output -raw elastic_ip` (or use the configured `public_host`). Allow DNS to propagate so Caddy can complete ACME validation.
+
+```sh
+aws ssm start-session --target "$(terraform output -raw instance_id)"
+```
+
+In that session:
+
+```sh
+sudo cloud-init status --wait
+# An error is expected on the first boot if CHANGE-ME was still present.
+sudo systemctl restart census.service
+sudo systemctl status census.service --no-pager
+sudo systemctl list-timers census-backup.timer
+```
+
+No cloud-init rerun or instance replacement is necessary for setting parameters. `census.service` refreshes `.env` on subsequent starts; compose image selections survive restarts. `CENSUS_IMAGE_TAG` is derived from `image_ref` (a digest uses the unused fallback `latest`). Cloud-init rewrites only the census `image:` line with `sed`, including digest form, because `@sha256:...` cannot be substituted into the original colon/tag expression.
+
+Security updates run through unattended-upgrades; required reboots occur at 04:30 UTC. The persistent backup timer runs at 03:30 UTC, executes the committed `backup.sh` with `BACKUP_BUCKET` and `BACKUPS_DIR=/var/lib/census-data/backups`, then removes local dumps older than two days. The script itself uses `./backups`; the wrapper runs in `/opt/census`, where `backups` is a symlink to the data volume. Inspect `journalctl -u census-backup` and periodically verify uploads; no backup-failure alarm is included yet.
+
+## 5. Verify
+
+```sh
+terraform output
+curl --fail https://census.dashbuddy.trotter.cloud/healthz
+curl --fail https://census.dashbuddy.trotter.cloud/readyz
+curl --fail https://census.dashbuddy.trotter.cloud/v1/policy
+```
+
+In SSM, run `sudo systemctl start census-backup.service` and inspect its journal. With the workstation SSO credentials, list the backup bucket to confirm today's object. Check that all five CloudWatch alarms receive data (memory and disk can take several minutes; the agent heartbeat alarms when memory metrics stop arriving), the SNS subscription is confirmed, CloudTrail is delivering files, and the budget stop action is enabled and targets the current instance.
+
+## 6. Deploy an image
+
+Set all three GitHub repository variables from `deploy/aws` (the `github_variables` output also exposes them as a map):
+
+```sh
+gh variable set AWS_DEPLOY_ROLE_ARN --body "$(terraform output -raw github_deploy_role_arn)"
+gh variable set CENSUS_INSTANCE_ID --body "$(terraform output -raw instance_id)"
+gh variable set AWS_REGION --body "$(terraform output -raw region)"
+```
+
+The workflow uses `AWS_REGION`, falling back to `us-east-2`. Run **Deploy AWS** manually from `main` or a `v*` tag, specifying the reviewed image digest. The role trusts only those refs and uses GitHub OIDC, with no stored AWS access key. AWS now validates GitHub using trusted root CAs, so [thumbprints are omitted](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_openid_connect_provider).
+
+This repository was created on 2026-10-01. GitHub's OIDC documentation specifies that repositories created after July 15, 2026 use `repo:OWNER@OWNER-ID/REPO@REPO-ID`; name-only subjects cannot be minted for this repository. Set `github_owner_id` and `github_repository_id` to the immutable IDs when using another repository. Find them with:
+
+```sh
+gh api repos/<owner>/<repo> --jq .id
+gh api users/<owner> --jq .id
+```
+
+The workflow serializes production deployments and acquires `/var/lib/census-data/.deploy.lock` on the host (waiting up to 600 seconds). It validates/quotes input, replaces only the census image, pulls, and runs `docker compose up -d --wait --wait-timeout 180`. Both the workflow and cloud-init then check `/readyz` for at most 60 seconds using `docker compose exec -T census wget -qO- http://127.0.0.1:8080/readyz`, since census publishes no host port. Failure prints the last 50 census log lines and exits non-zero. SSM has a 300-second delivery timeout and 900-second execution timeout; polling is bounded to 1,200 seconds and cancellation/failure cancels the command. Recheck the public endpoints after deployment to verify external routing and TLS. To roll back, dispatch an earlier compatible digest; consult the [operator migration guidance](../../docs/OPERATOR.md). Update `CENSUS_INSTANCE_ID` after every replacement. The workflow does not refresh the committed Compose files or Parameter Store values.
+
+SSM `AWS-RunShellScript` runs as root. Protect trusted repository refs and workflow edits accordingly; the narrowly scoped AWS role still has administrative access to this one host.
+
+## Restore drill / disaster recovery
+
+Run a drill on a new isolated recovery box provisioned with this cloud-init, or perform these steps on the replacement box before moving DNS. Keep the original box/data until the restored system passes verification. The host role can upload/list backups but deliberately cannot read or delete them; use the operator's SSO identity to select and download a backup. On the workstation:
+
+```sh
+aws s3 ls s3://<backup-bucket>/
+aws s3 presign s3://<backup-bucket>/census-YYYY-MM-DD.sql.gz --expires-in 600
+```
+
+Treat the short-lived URL as a credential. In an SSM session on the **recovery box**, become root with `sudo -i`. Stop the app and choose a fresh volume even if first boot already ran migrations; `restore.sh` correctly refuses initialized databases. The commands below preserve the existing volume and do not use `down -v`:
+
+```bash
+set -euo pipefail
+umask 077
+systemctl stop census-backup.timer
+systemctl stop census.service
+cd /opt/census
+/usr/local/sbin/census-configure
+docker compose down
+# A fresh directory and volume name preserve the current data for this drill.
+mountpoint -q /var/lib/census-data
+RESTORE_VOLUME="census-restored-$(date -u +%Y%m%d%H%M%S)"
+RESTORE_DIR="/var/lib/census-data/$RESTORE_VOLUME"
+mkdir -m 0700 "$RESTORE_DIR"
+chown 70:70 "$RESTORE_DIR"
+cat > docker-compose.override.yml <<YAML
+volumes:
+    pgdata:
+        name: $RESTORE_VOLUME
+        driver: local
+        driver_opts:
+            type: none
+            o: bind
+            device: $RESTORE_DIR
+YAML
+docker compose up -d --wait postgres
+read -r -s -p 'Short-lived backup URL: ' BACKUP_URL
+printf '\n'
+curl --fail --silent --show-error "$BACKUP_URL" -o /opt/census/restore.sql.gz
+unset BACKUP_URL
+./restore.sh /opt/census/restore.sql.gz
+# Type RESTORE at the prompt. Review restored data and any pending migrations.
+systemctl start census.service
+systemctl start census-backup.timer
+docker compose ps
+rm /opt/census/restore.sql.gz
+```
+
+Check readiness, policy, relevant row counts, and backup upload from the recovered database. Reapply later withdrawals when that feature exists, as described in [OPERATOR.md](../../docs/OPERATOR.md). Record the backup timestamp, recovered coverage, and elapsed recovery time. Only then move DNS/EIP for real recovery; for a drill, leave production DNS unchanged. Preserve the bind-directory and volume-name override for subsequent deployments on the recovered host; before another instance rebuild, promote the recovered directory to `/var/lib/census-data/pgdata` with the stack stopped and the prior directory retained. Refresh GitHub's instance variable after replacement. Retire recovery resources and retained volumes deliberately after verification.
+
+Backup objects expire after 14 days; overwritten/noncurrent versions expire 14 days after becoming noncurrent. This is not a strict 14-day maximum from original creation. The bucket policy denies object deletion and lifecycle changes to **every principal except the account root** (including the SSO administrator); S3 lifecycle expiration still operates. Initial apply installs lifecycle before that deny. Later retention edits or teardown require the root-controlled exception/policy procedure; ordinary administrator Terraform cannot change/delete the lifecycle. Do not expect `terraform destroy` to empty this protected bucket. The policy is not Object Lock and an administrator able to change bucket policy can remove it.
+
+## Cost and controls
+
+Planning estimate for a small workload at 730 hours/month in Ohio, before taxes and credits; verify actual regional rates before applying:
+
+| Component | Approximate monthly cost |
+| --- | ---: |
+| t4g.small Linux, standard CPU credits | $12.30 |
+| 20 GiB gp3 root + 20 GiB gp3 data | $3.20 |
+| One public IPv4 / Elastic IP | $3.65 |
+| Two custom metrics and five standard alarms | $1.10 |
+| Small S3 backups/state/audit logs, requests and notifications | $1–2 |
+| **Expected small deployment** | **About $22** |
+
+See [EC2 pricing](https://aws.amazon.com/ec2/pricing/on-demand/), [EBS pricing](https://aws.amazon.com/ebs/pricing/), [public IPv4 pricing](https://aws.amazon.com/vpc/pricing/), and [CloudWatch pricing](https://aws.amazon.com/cloudwatch/pricing/). Transfer, large backups, extra CloudTrail copies, and growing data add cost. There is no NAT gateway, load balancer, RDS, or detailed EC2 monitoring.
+
+The account-wide $25 budget emails at 50%/100% actual and 100% forecast. The account-wide $50 budget automatically invokes `AWS-StopEC2Instance` for this instance; its execution role follows the [AWS Budgets SSM role policy](https://docs.aws.amazon.com/aws-managed-policy/latest/reference/AWSBudgetsActions_RolePolicyForResourceAdministrationWithSSM.html), narrowed to stopping this instance. Billing data arrives late: **the hard-ceiling action is not a guaranteed $50 spending cap**. Storage, IPv4, and other services keep accruing charges after EC2 stops. Investigate the bill and action status before manually restarting; do not assume a restart is protected by another immediate stop. Cost Anomaly Detection monitors AWS services and emails daily for absolute impact >= $5.
+
+## What this does NOT do yet
+
+- WAF.
+- Per-IP rate limiting (S3 stage: custom Caddy build).
+- Play Integrity (S5).
+- High availability, automatic database recovery, or app/container log shipping.
+
+## Local validation
+
+After changes, with tool execution authorized:
+
+```sh
+terraform fmt -check -recursive .
+terraform init -backend=false
+terraform validate
+terraform -chdir=bootstrap init -backend=false
+terraform -chdir=bootstrap validate
+```
+
+Backend-free validation does not contact AWS, but initialization downloads providers. No account ID or secret belongs in tracked files. Commit generated provider lockfiles after reviewing them.

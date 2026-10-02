@@ -30,3 +30,20 @@ jobs:
                   java-version: "21"
             - name: Build and test (runner Docker enables MigrationTest)
               run: ./gradlew build --no-daemon -PcensusContractPath="$GITHUB_WORKSPACE/DashBuddy/census-contract"
+    terraform:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+              with:
+                  persist-credentials: false
+            - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+              with:
+                  terraform_version: "1.16.4"
+            - name: fmt
+              run: terraform fmt -recursive -check -diff deploy/aws
+            - name: validate deploy/aws
+              working-directory: deploy/aws
+              run: terraform init -backend=false -input=false && terraform validate
+            - name: validate deploy/aws/bootstrap
+              working-directory: deploy/aws/bootstrap
+              run: terraform init -backend=false -input=false && terraform validate
