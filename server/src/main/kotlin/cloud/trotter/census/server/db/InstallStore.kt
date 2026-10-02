@@ -177,6 +177,26 @@ class InstallStore(private val db: Database, private val clock: Clock) {
         policy: BudgetPolicy,
     ): ConsumeOutcome = query { consumeLedger(installId, day, bytes, items, batchId, policy, clock.now()) }
 
+    /**
+     * The credential-bound form of [recordIngest] (Astra, S4 round 2): a request authenticated under a key that has since
+     * been withdrawn (and its id re-enrolled) must not write ANY counter into the replacement generation's ledger —
+     * not even a rejection. False = not this generation; the caller answers 401 and records nothing.
+     */
+    suspend fun recordIngestIfCurrent(
+        installId: UUID,
+        keyHash: String,
+        day: LocalDate,
+        duplicate: Int,
+        rejectedByReason: Map<String, Int>,
+    ): Boolean = query {
+        val current = select(
+            "SELECT 1 FROM installs WHERE install_id = ? AND key_hash = ? AND revoked_at IS NULL FOR SHARE",
+            installId, keyHash,
+        ) { true } ?: false
+        if (current) recordIngestCounters(installId, day, duplicate, rejectedByReason)
+        current
+    }
+
     /** Rejections and duplicates do not consume quota; accepted work must use tryConsume. */
     suspend fun recordIngest(
         installId: UUID,

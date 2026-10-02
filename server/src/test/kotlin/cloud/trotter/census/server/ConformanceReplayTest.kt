@@ -289,6 +289,8 @@ class ConformanceReplayTest {
                         "stale", staleBody.toByteArray().size.toLong(), BudgetPolicy(), clock.now(),
                     ))
                     assertEquals(beforeStale, tableCounts())
+                    // Round 2 (Astra): a quality-failing stale batch may not write its rejection counters either.
+                    assertFalse(store.recordIngestIfCurrent(authenticated.id, authenticated.keyHash, day, 0, mapOf("unknown_schema" to 1)))
                     assertNull(store.ledgerFor(authenticated.id, day))
                     assertEquals(hashSecret(replacementKey), requireNotNull(store.lookup(authenticated.id)).keyHash)
                 }

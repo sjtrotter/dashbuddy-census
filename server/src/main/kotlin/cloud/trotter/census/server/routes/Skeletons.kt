@@ -57,15 +57,20 @@ fun Route.skeletonRoutes(store: InstallStore, skeletons: SkeletonStore, clock: C
                 is ItemVerdict.Rejected -> rejected[verdict.reason] = rejected.getOrDefault(verdict.reason, 0) + 1
             }
         }
+        val keyHash = call.attributes[AuthenticatedInstallKey].secretHash
         if (rejected.values.sum() * 5 > items.size) {
-            store.recordIngest(installId, today, 0, rejected)
+            // Round 2: the rejection counters are credential-bound too — a stale key writes nothing, anywhere.
+            if (!store.recordIngestIfCurrent(installId, keyHash, today, 0, rejected)) {
+                call.respond(HttpStatusCode.Unauthorized, ErrorResponse("unauthorized"))
+                return@post
+            }
             logBatch(prefix, 0, 0, rejected, rawBody.size, "batch_quality")
             call.respond(HttpStatusCode.UnprocessableEntity, BatchQualityResponse(rejected = rejected))
             return@post
         }
         val duplicate = accepted.size - accepted.map { it.item.fingerprint }.toSet().size
         val outcome = skeletons.ingest(
-            installId, call.attributes[AuthenticatedInstallKey].secretHash, today, accepted, duplicate, rejected,
+            installId, keyHash, today, accepted, duplicate, rejected,
             batchId, rawBody.size.toLong(),
             BudgetPolicy(dailySkeletonBudget = policy.dailySkeletonBudget), now,
         )
