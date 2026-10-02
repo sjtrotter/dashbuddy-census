@@ -5,7 +5,6 @@ import cloud.trotter.census.server.ErrorResponse
 import cloud.trotter.census.server.SystemClock
 import cloud.trotter.census.server.db.Install
 import cloud.trotter.census.server.db.InstallStore
-import cloud.trotter.census.server.db.RevokedInstallException
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.ApplicationCall
@@ -17,6 +16,8 @@ import io.ktor.server.request.receiveChannel
 import io.ktor.server.response.respond
 import io.ktor.util.AttributeKey
 import io.ktor.utils.io.readAvailable
+import java.security.MessageDigest
+import java.time.ZoneOffset
 import java.util.concurrent.atomic.AtomicLong
 import org.slf4j.LoggerFactory
 
@@ -34,6 +35,8 @@ object AuthStats {
     val skew = AtomicLong()
     val revoked = AtomicLong()
     val unknownInstall = AtomicLong()
+    val rateLimited = AtomicLong()
+    val lookups = AtomicLong()
     private val decisions = AtomicLong()
     private val log = LoggerFactory.getLogger("census.auth")
 
@@ -41,8 +44,9 @@ object AuthStats {
         counter.incrementAndGet()
         if (decisions.incrementAndGet() % 500L == 0L) {
             log.info(
-                "auth ok={} bad_bearer={} bad_signature={} skew={} revoked={} unknown_install={}",
+                "auth ok={} bad_bearer={} bad_signature={} skew={} revoked={} unknown_install={} rate_limited={} lookups={}",
                 ok.get(), badBearer.get(), badSignature.get(), skew.get(), revoked.get(), unknownInstall.get(),
+                rateLimited.get(), lookups.get(),
             )
         }
     }
@@ -51,6 +55,7 @@ object AuthStats {
 class InstallAuthConfig {
     var store: InstallStore? = null
     var clock: Clock = SystemClock
+    var admissionLimiter: AdmissionLimiter? = null
 }
 
 /**
@@ -60,6 +65,7 @@ class InstallAuthConfig {
 val InstallAuth = createRouteScopedPlugin("InstallAuth", ::InstallAuthConfig) {
     val store = requireNotNull(pluginConfig.store)
     val clock = pluginConfig.clock
+    val admissionLimiter = pluginConfig.admissionLimiter ?: AdmissionLimiter(clock)
     onCall { call ->
         if (call.isHandled) return@onCall
         val bearer = parseBearer(call.request.headers[HttpHeaders.Authorization])
@@ -67,21 +73,32 @@ val InstallAuth = createRouteScopedPlugin("InstallAuth", ::InstallAuthConfig) {
             call.deny(AuthStats.badBearer)
             return@onCall
         }
-        val hash = hashSecret(bearer.secret)
-        val row = try {
-            store.authenticate(bearer.installId.toUuid(), hash)
-        } catch (_: RevokedInstallException) {
-            call.deny(AuthStats.revoked, "revoked")
+        if (!admissionLimiter.admit(bearer.installId.value)) {
+            AuthStats.record(AuthStats.rateLimited)
+            call.response.headers.append(HttpHeaders.RetryAfter, "1")
+            call.respond(HttpStatusCode.TooManyRequests, ErrorResponse("rate_limited"))
             return@onCall
         }
+        val now = clock.now()
+        val timestamp = call.request.headers["X-Census-Timestamp"]
+        if (timestamp == null || !RequestSigner.timestampInWindow(timestamp, now)) {
+            call.deny(AuthStats.skew)
+            return@onCall
+        }
+        val body = call.readLimitedBody() ?: return@onCall
+        AuthStats.lookups.incrementAndGet()
+        val row = store.lookup(bearer.installId.toUuid())
         if (row == null) {
             call.deny(AuthStats.unknownInstall)
             return@onCall
         }
-        val body = call.readLimitedBody() ?: return@onCall
-        val timestamp = call.request.headers["X-Census-Timestamp"]
-        if (timestamp == null || !RequestSigner.timestampInWindow(timestamp, clock.now())) {
-            call.deny(AuthStats.skew)
+        val hash = hashSecret(bearer.secret)
+        if (!MessageDigest.isEqual(hash.toByteArray(Charsets.US_ASCII), row.keyHash.toByteArray(Charsets.US_ASCII))) {
+            call.deny(AuthStats.badBearer)
+            return@onCall
+        }
+        if (row.revokedAt != null) {
+            call.deny(AuthStats.revoked, "revoked")
             return@onCall
         }
         val canonical = RequestSigner.canonical(call.request.httpMethod.value, call.request.path(), timestamp, body)
@@ -90,10 +107,12 @@ val InstallAuth = createRouteScopedPlugin("InstallAuth", ::InstallAuthConfig) {
             call.deny(AuthStats.badSignature)
             return@onCall
         }
+        val today = now.atOffset(ZoneOffset.UTC).toLocalDate()
+        if (row.lastSeenDay != today) store.touchLastSeen(row.id, today)
         val id = bearer.installId.value
         call.attributes.put(AuthenticatedInstallKey, AuthenticatedInstall(id, id.take(8), hash))
         call.attributes.put(AuthenticatedBodyKey, body)
-        call.attributes.put(InstallRowKey, row)
+        call.attributes.put(InstallRowKey, row.copy(lastSeenDay = today))
         AuthStats.record(AuthStats.ok)
     }
 }

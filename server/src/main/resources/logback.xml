@@ -1,4 +1,5 @@
 <configuration>
+    <turboFilter class="cloud.trotter.census.server.PrivateThrowableFilter"/>
     <!-- Day precision only; no MDC, caller address, credentials, or request body. -->
     <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
         <encoder>

@@ -14,9 +14,10 @@ object SystemClock : Clock {
 
 fun Clock.today(): LocalDate = now().atOffset(ZoneOffset.UTC).toLocalDate()
 
+fun Clock.secondsToUtcMidnight(): Long = secondsToUtcMidnight(now())
+
 /** Ceiling in whole seconds, so Retry-After never precedes the next UTC day. */
-fun Clock.secondsToUtcMidnight(): Long {
-    val current = now()
+fun secondsToUtcMidnight(current: Instant): Long {
     val midnight = current.atOffset(ZoneOffset.UTC).toLocalDate().plusDays(1).atStartOfDay().toInstant(ZoneOffset.UTC)
     return midnight.epochSecond - current.epochSecond
 }

@@ -20,6 +20,11 @@ sealed interface BudgetVerdict {
     data class BudgetExhausted(val retryAfterSeconds: Long) : BudgetVerdict
 }
 
+sealed interface ConsumeOutcome {
+    data class Consumed(val bytesRemaining: Long, val skeletonsRemaining: Int, val batchesRemaining: Int) : ConsumeOutcome
+    data class BudgetExhausted(val retryAfterSeconds: Long) : ConsumeOutcome
+}
+
 class Budget(private val clock: Clock, val policy: BudgetPolicy = BudgetPolicy()) {
     fun remainingSkeletons(row: LedgerRow?): Int = (policy.dailySkeletonBudget.toLong() - (row?.accepted ?: 0))
         .coerceIn(0, policy.dailySkeletonBudget.toLong()).toInt()

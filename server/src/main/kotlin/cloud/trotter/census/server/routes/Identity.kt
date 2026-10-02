@@ -4,6 +4,7 @@ import cloud.trotter.census.server.Clock
 import cloud.trotter.census.server.ErrorResponse
 import cloud.trotter.census.server.Policy
 import cloud.trotter.census.server.auth.AuthenticatedBodyKey
+import cloud.trotter.census.server.auth.AuthenticatedInstallKey
 import cloud.trotter.census.server.auth.InstallAuth
 import cloud.trotter.census.server.auth.InstallRowKey
 import cloud.trotter.census.server.auth.hashSecret
@@ -12,6 +13,7 @@ import cloud.trotter.census.server.auth.parseBearer
 import cloud.trotter.census.server.auth.readLimitedBody
 import cloud.trotter.census.server.db.EnrolOutcome
 import cloud.trotter.census.server.db.InstallStore
+import cloud.trotter.census.server.db.MutationOutcome
 import cloud.trotter.census.server.ingest.Budget
 import cloud.trotter.census.server.ingest.BudgetPolicy
 import cloud.trotter.census.server.secondsToUtcMidnight
@@ -36,6 +38,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.jsonObject
+import java.time.ZoneOffset
 
 private val identityJson = Json { encodeDefaults = true; explicitNulls = false }
 private val appVersionPattern = Regex("[A-Za-z0-9+._-]{1,64}")
@@ -90,16 +93,21 @@ fun Route.identityRoutes(store: InstallStore?, clock: Clock, policy: Policy) {
                     call.respond(HttpStatusCode.BadRequest, ErrorResponse("bad_request"))
                     return@post
                 }
-                if (store.rotate(call.attributes[InstallRowKey].id, hashSecret(request.newSecret))) {
+                val credential = call.attributes[AuthenticatedInstallKey]
+                if (store.rotate(call.attributes[InstallRowKey].id, credential.secretHash, hashSecret(request.newSecret)) is MutationOutcome.Applied) {
                     call.respond(HttpStatusCode.NoContent)
                 } else {
                     call.respond(HttpStatusCode.Unauthorized, ErrorResponse("unauthorized"))
                 }
             }
             delete("/installs/me") {
-                val counts = store.withdraw(call.attributes[InstallRowKey].id)
-                call.application.environment.log.info("withdraw rows={}", counts.values.sum())
-                call.respond(HttpStatusCode.Accepted, WithdrawalResponse(completionDeadline = clock.today().plusDays(1).toString()))
+                when (val result = store.withdraw(call.attributes[InstallRowKey].id, call.attributes[AuthenticatedInstallKey].secretHash)) {
+                    is MutationOutcome.Applied -> {
+                        call.application.environment.log.info("withdraw rows={}", result.deletedRows.values.sum())
+                        call.respond(HttpStatusCode.Accepted, WithdrawalResponse(completionDeadline = clock.today().plusDays(1).toString()))
+                    }
+                    MutationOutcome.StaleCredential -> call.respond(HttpStatusCode.Unauthorized, ErrorResponse("unauthorized"))
+                }
             }
             rateLimit(RateLimitName("nonce")) {
                 post("/nonce") {
@@ -107,13 +115,15 @@ fun Route.identityRoutes(store: InstallStore?, clock: Clock, policy: Policy) {
                 }
             }
             get("/me") {
+                val now = clock.now()
+                val today = now.atOffset(ZoneOffset.UTC).toLocalDate()
                 val install = call.attributes[InstallRowKey]
-                val ledger = store.ledgerFor(install.id, clock.today())
+                val ledger = store.ledgerFor(install.id, today)
                 val budget = Budget(clock, BudgetPolicy(dailySkeletonBudget = policy.dailySkeletonBudget))
                 call.respond(
                     MeResponse(
                         install.id.toString().take(8), install.createdDay.toString(), install.lastSeenDay.toString(), install.trusted,
-                        BudgetResponse(budget.remainingSkeletons(ledger), budget.remainingBytes(ledger), clock.secondsToUtcMidnight()),
+                        BudgetResponse(budget.remainingSkeletons(ledger), budget.remainingBytes(ledger), secondsToUtcMidnight(now)),
                     ),
                 )
             }

@@ -30,7 +30,7 @@ fun isValidSecret(secret: String): Boolean {
     } catch (_: IllegalArgumentException) {
         return false
     }
-    return bytes.size >= 32 && Base64.getUrlEncoder().withoutPadding().encodeToString(bytes) == secret
+    return bytes.size >= 32 && Base64.getUrlEncoder().withoutPadding().encodeToString(bytes) == secret // constant-time: not credential material
 }
 
 fun parseBearer(header: String?): BearerCredential? {
@@ -61,7 +61,7 @@ object RequestSigner {
     }
 
     fun verify(secret: String, canonical: String, header: String): Boolean =
-        verify(secret, canonical, header, MessageDigest::isEqual)
+        verify(secret, canonical, header) { expected, actual -> MessageDigest.isEqual(expected, actual) }
 
     /** Test seam checks that well-formed signatures take the constant-time comparison path. */
     internal fun verify(secret: String, canonical: String, header: String, equal: (ByteArray, ByteArray) -> Boolean): Boolean {

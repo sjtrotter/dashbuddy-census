@@ -9,6 +9,9 @@ import cloud.trotter.census.server.auth.hashSecret
 import cloud.trotter.census.server.db.EnrolOutcome
 import cloud.trotter.census.server.db.InstallStore
 import cloud.trotter.census.server.db.LedgerRow
+import cloud.trotter.census.server.db.MutationOutcome
+import cloud.trotter.census.server.ingest.BudgetPolicy
+import cloud.trotter.census.server.ingest.ConsumeOutcome
 import cloud.trotter.census.server.jobs.PurgeJob
 import io.ktor.client.HttpClient
 import io.ktor.client.request.get
@@ -109,6 +112,8 @@ class IdentityRoutesTest {
                     assertError(signed(HttpMethod.Post, "/v1/rotate", "{\"newSecret\":\"short\"}"), 400, "bad_request")
                     assertEquals(HttpStatusCode.NoContent, signed(HttpMethod.Post, "/v1/rotate", "{\"newSecret\":\"$replacement\"}").status)
                     assertError(signed(HttpMethod.Get, "/v1/me"), 401, "unauthorized")
+                    assertError(signed(HttpMethod.Post, "/v1/rotate", "{\"newSecret\":\"${secret(8)}\"}"), 401, "unauthorized")
+                    assertEquals(hashSecret(replacement), requireNotNull(store.lookup(UUID.fromString(id))).keyHash)
                     assertEquals(HttpStatusCode.OK, signed(HttpMethod.Get, "/v1/me", key = replacement).status)
                     val nonceResponse = signed(HttpMethod.Post, "/v1/nonce", key = replacement)
                     assertEquals(HttpStatusCode.OK, nonceResponse.status)
@@ -116,7 +121,8 @@ class IdentityRoutesTest {
                     assertTrue(Regex("[0-9a-f]{32}").matches(nonce))
                     assertTrue(store.consumeNonce(nonce, UUID.fromString(id)))
                     assertFalse(store.consumeNonce(nonce, UUID.fromString(id)))
-                    store.recordIngest(UUID.fromString(id), clock.today(), 1024, 3, 2, mapOf("invalid" to 1), "batch")
+                    assertTrue(store.tryConsume(UUID.fromString(id), clock.today(), 1024, 3, "batch", BudgetPolicy()) is ConsumeOutcome.Consumed)
+                    store.recordIngest(UUID.fromString(id), clock.today(), 2, mapOf("invalid" to 1))
                     val budgetView = Json.parseToJsonElement(signed(HttpMethod.Get, "/v1/me", key = replacement).bodyAsText())
                         .jsonObject.getValue("budget").jsonObject
                     assertEquals("297", budgetView.getValue("skeletonsRemainingToday").jsonPrimitive.content)
@@ -129,15 +135,15 @@ class IdentityRoutesTest {
                     assertEquals("{\"status\":\"withdrawn\",\"completionDeadline\":\"2026-10-03\"}", withdrawn.bodyAsText())
                     tableCounts(id).values.forEach { assertEquals(0, it) }
                     assertError(signed(HttpMethod.Get, "/v1/me", key = replacement), 401, "unauthorized")
+                    assertEquals(HttpStatusCode.OK, client.enrol(id, secret).status)
+                    assertError(signed(HttpMethod.Delete, "/v1/installs/me", key = replacement), 401, "unauthorized")
+                    assertEquals(hashSecret(secret), requireNotNull(store.lookup(UUID.fromString(id))).keyHash)
+                    assertEquals(1, tableCounts(id).getValue("installs"))
+                    assertEquals(HttpStatusCode.Accepted, signed(HttpMethod.Delete, "/v1/installs/me").status)
                 }
             }
             val forbidden = listOf(secret, replacement, "Bearer $id.$secret", "Bearer $id.$replacement", id) + signatures
-            logs.list.forEach { event ->
-                forbidden.forEach { privateValue ->
-                    assertFalse(event.formattedMessage.contains(privateValue), "Log disclosed a credential or full ID")
-                    assertFalse(event.throwableProxy?.message?.contains(privateValue) == true)
-                }
-            }
+            assertPrivateLogs(logs.list, forbidden)
             assertTrue(logs.list.any { it.formattedMessage.contains("install_prefix=${id.take(8)}") })
         } finally {
             logger.detachAppender(logs)
@@ -169,7 +175,8 @@ class IdentityRoutesTest {
                 listOf(HttpMethod.Get to "/v1/me", HttpMethod.Post to "/v1/rotate", HttpMethod.Post to "/v1/nonce", HttpMethod.Delete to "/v1/installs/me")
                     .forEach { (method, path) -> assertError(client.signed(clock, id.toString(), secret, method, path), 401, "revoked") }
                 assertError(client.enrol(id.toString(), secret), 401, "revoked")
-                store.withdraw(id)
+                assertEquals(MutationOutcome.StaleCredential, store.withdraw(id, hashSecret(secret)))
+                assertEquals(1, tableCounts(id.toString()).getValue("installs"))
             }
         }
     }
@@ -194,8 +201,8 @@ class IdentityRoutesTest {
                 val nonceLimit = client.signed(clock, second, secret, HttpMethod.Post, "/v1/nonce")
                 assertError(nonceLimit, 429, "rate_limited")
                 assertNotNull(nonceLimit.headers[HttpHeaders.RetryAfter])
-                InstallStore(db, clock).withdraw(UUID.fromString(first))
-                InstallStore(db, clock).withdraw(UUID.fromString(second))
+                InstallStore(db, clock).withdraw(UUID.fromString(first), hashSecret(secret))
+                InstallStore(db, clock).withdraw(UUID.fromString(second), hashSecret(secret))
             }
         }
     }
@@ -229,10 +236,12 @@ class IdentityRoutesTest {
             store.enrol(other, hash, "1.0")
             val oldDay = clock.today()
             clock.instant = Instant.parse("2026-10-03T00:00:00Z")
-            val row = requireNotNull(store.authenticate(id, hash))
+            val row = requireNotNull(store.lookup(id))
             assertEquals(oldDay, row.createdDay)
-            assertEquals(clock.today(), row.lastSeenDay)
-            assertNull(store.authenticate(id, hashSecret(secret(7))))
+            assertEquals(oldDay, row.lastSeenDay) // Lookup has no write side effect.
+            store.touchLastSeen(id, clock.today())
+            assertEquals(clock.today(), requireNotNull(store.lookup(id)).lastSeenDay)
+            assertNull(store.lookup(UUID.randomUUID()))
             val nonce = store.issueNonce(id)
             assertFalse(store.consumeNonce(nonce, other))
             assertFalse(store.consumeNonce(nonce, null))
@@ -250,10 +259,14 @@ class IdentityRoutesTest {
             val day = clock.today()
             assertNull(store.ledgerFor(id, day))
             coroutineScope {
-                (1..8).map { async { store.recordIngest(id, day, 10, 1, 2, mapOf("invalid" to 3), "batch") } }.awaitAll()
+                (1..8).map { async {
+                    assertTrue(store.tryConsume(id, day, 10, 1, "batch", BudgetPolicy()) is ConsumeOutcome.Consumed)
+                    store.recordIngest(id, day, 2, mapOf("invalid" to 3))
+                } }.awaitAll()
             }
-            store.recordIngest(id, day, 5, 0, 1, mapOf("invalid" to 1, "oversize" to 2), "second")
-            store.recordIngest(id, day, 0, 0, 0, emptyMap(), null)
+            assertTrue(store.tryConsume(id, day, 5, 0, "second", BudgetPolicy()) is ConsumeOutcome.Consumed)
+            store.recordIngest(id, day, 1, mapOf("invalid" to 1, "oversize" to 2))
+            store.recordIngest(id, day, 0, emptyMap())
             assertEquals(LedgerRow(85, 8, 17, mapOf("invalid" to 25, "oversize" to 2), listOf("batch", "second")), store.ledgerFor(id, day))
             assertTrue(store.isBatchKnown(id, day, "batch"))
             assertFalse(store.isBatchKnown(id, day.plusDays(1), "batch"))
@@ -266,8 +279,8 @@ class IdentityRoutesTest {
             clock.instant = cutoff.minusSeconds(3600)
             val boundary = store.issueNonce(id)
             clock.instant = cutoff
-            store.recordIngest(id, day.minusDays(8), 1, 1, 0, emptyMap(), null)
-            store.recordIngest(id, day.minusDays(7), 1, 1, 0, emptyMap(), null)
+            store.tryConsume(id, day.minusDays(8), 1, 1, null, BudgetPolicy())
+            store.tryConsume(id, day.minusDays(7), 1, 1, null, BudgetPolicy())
             val report = PurgeJob(store, clock).runOnce()
             assertEquals(1, report.nonces)
             assertEquals(1, report.ledgerRows)
@@ -279,9 +292,180 @@ class IdentityRoutesTest {
                     statement.executeQuery().use { rows -> assertTrue(rows.next()); assertEquals(boundary, rows.getString(1)); assertFalse(rows.next()) }
                 }
             }
-            val removed = store.withdraw(id)
-            assertEquals(1, removed.getValue("installs"))
-            store.withdraw(other)
+            val removed = store.withdraw(id, hash) as MutationOutcome.Applied
+            assertEquals(1, removed.deletedRows.getValue("installs"))
+            assertTrue(store.withdraw(other, hash) is MutationOutcome.Applied)
+        }
+    }
+
+    @Test
+    fun `stale authenticated snapshots cannot rotate or withdraw replacement rows`() = runBlocking {
+        val clock = FixedClock()
+        val id = UUID.randomUUID()
+        val oldHash = hashSecret(secret(10))
+        val newHash = hashSecret(secret(11))
+        Database.connect(config()).use { db ->
+            val store = InstallStore(db, clock)
+            store.enrol(id, oldHash, "1.0")
+            val authenticated = requireNotNull(store.lookup(id))
+            assertEquals(MutationOutcome.Applied(), store.rotate(id, authenticated.keyHash, newHash))
+            assertEquals(MutationOutcome.StaleCredential, store.rotate(id, authenticated.keyHash, oldHash))
+            assertEquals(newHash, requireNotNull(store.lookup(id)).keyHash)
+            assertEquals(MutationOutcome.StaleCredential, store.withdraw(id, authenticated.keyHash))
+            assertTrue(store.withdraw(id, newHash) is MutationOutcome.Applied)
+            store.enrol(id, oldHash, "1.0")
+            assertEquals(MutationOutcome.StaleCredential, store.withdraw(id, newHash))
+            assertEquals(oldHash, requireNotNull(store.lookup(id)).keyHash)
+            assertTrue(store.revoke(id, clock.now()))
+            assertEquals(MutationOutcome.StaleCredential, store.rotate(id, oldHash, newHash))
+            assertEquals(MutationOutcome.StaleCredential, store.withdraw(id, oldHash))
+            assertNotNull(store.lookup(id))
+        }
+    }
+
+    @Test
+    fun `failed authentication never touches last seen and admission stops database lookups`() {
+        val clock = FixedClock()
+        val id = UUID.randomUUID()
+        val key = secret(12)
+        Database.connect(config()).use { db ->
+            val store = InstallStore(db, clock)
+            testApplication {
+                application { module(config(), db, clock) }
+                store.enrol(id, hashSecret(key), "1.0")
+                val enrolledDay = clock.today()
+                clock.instant = clock.instant.plusSeconds(86400)
+                val before = AuthStats.lookups.get()
+                assertError(client.get("/v1/me") { header(HttpHeaders.Authorization, "Bearer $id.$key") }, 401, "unauthorized")
+                assertEquals(before, AuthStats.lookups.get())
+                assertEquals(enrolledDay, requireNotNull(store.lookup(id)).lastSeenDay)
+                repeat(119) {
+                    assertError(client.signed(clock, id.toString(), key, HttpMethod.Get, "/v1/me", signature = ""), 401, "unauthorized")
+                }
+                assertEquals(before + 119, AuthStats.lookups.get())
+                assertEquals(enrolledDay, requireNotNull(store.lookup(id)).lastSeenDay)
+                val limitedBefore = AuthStats.rateLimited.get()
+                repeat(61) {
+                    val response = client.signed(clock, id.toString(), key, HttpMethod.Get, "/v1/me")
+                    assertError(response, 429, "rate_limited")
+                    assertEquals("1", response.headers[HttpHeaders.RetryAfter])
+                }
+                assertEquals(before + 119, AuthStats.lookups.get())
+                assertEquals(limitedBefore + 61, AuthStats.rateLimited.get())
+                clock.instant = clock.instant.plusSeconds(60)
+                assertEquals(HttpStatusCode.OK, client.signed(clock, id.toString(), key, HttpMethod.Get, "/v1/me").status)
+                assertEquals(clock.today(), requireNotNull(store.lookup(id)).lastSeenDay)
+            }
+        }
+    }
+
+    @Test
+    fun `me counters and reset use one instant across UTC midnight`() {
+        val signingClock = FixedClock(Instant.parse("2026-10-02T23:59:59.500Z"))
+        var reads = 0
+        val clock = object : Clock {
+            override fun now(): Instant {
+                reads++
+                return if (reads <= 3) signingClock.instant else signingClock.instant.plusSeconds(1)
+            }
+        }
+        val id = UUID.randomUUID()
+        val key = secret(13)
+        Database.connect(config()).use { db ->
+            testApplication {
+                application { module(config(), db, clock) }
+                val store = InstallStore(db, signingClock)
+                store.enrol(id, hashSecret(key), "1.0")
+                store.tryConsume(id, signingClock.today(), 4, 4, null, BudgetPolicy())
+                store.tryConsume(id, signingClock.today().plusDays(1), 9, 9, null, BudgetPolicy())
+                val response = client.signed(signingClock, id.toString(), key, HttpMethod.Get, "/v1/me")
+                assertEquals(HttpStatusCode.OK, response.status)
+                val budget = Json.parseToJsonElement(response.bodyAsText()).jsonObject.getValue("budget").jsonObject
+                assertEquals("296", budget.getValue("skeletonsRemainingToday").jsonPrimitive.content)
+                assertEquals("10485756", budget.getValue("bytesRemainingToday").jsonPrimitive.content)
+                assertEquals("1", budget.getValue("resetInSeconds").jsonPrimitive.content)
+                assertEquals(3, reads) // Admission, authentication, and the route each take one snapshot.
+            }
+        }
+    }
+
+    @Test
+    fun `concurrent budget consumers cannot both spend the last byte`() = runBlocking {
+        val clock = FixedClock()
+        val id = UUID.randomUUID()
+        val policy = BudgetPolicy(dailyBytes = 10, dailySkeletonBudget = 10, dailyBatches = 2)
+        Database.connect(config()).use { db ->
+            val store = InstallStore(db, clock)
+            store.enrol(id, hashSecret(secret(14)), "1.0")
+            assertEquals(ConsumeOutcome.Consumed(1, 1, 1), store.tryConsume(id, clock.today(), 9, 9, "first", policy))
+            val start = kotlinx.coroutines.CompletableDeferred<Unit>()
+            val results = coroutineScope {
+                val jobs = List(2) { async { start.await(); store.tryConsume(id, clock.today(), 1, 1, "last", policy) } }
+                start.complete(Unit)
+                jobs.awaitAll()
+            }
+            assertEquals(1, results.count { it is ConsumeOutcome.Consumed })
+            assertEquals(1, results.count { it is ConsumeOutcome.BudgetExhausted })
+            assertEquals(LedgerRow(bytes = 10, accepted = 10, batchIds = listOf("first", "last")), store.ledgerFor(id, clock.today()))
+        }
+    }
+
+    @Test
+    fun `budget insert limits null and duplicate batches and arithmetic overflow are enforced`() = runBlocking {
+        val clock = FixedClock()
+        val id = UUID.randomUUID()
+        val day = clock.today()
+        val policy = BudgetPolicy(dailyBytes = 10, dailySkeletonBudget = 2, dailyBatches = 1)
+        val exhausted = ConsumeOutcome.BudgetExhausted(43200)
+        Database.connect(config()).use { db ->
+            val store = InstallStore(db, clock)
+            store.enrol(id, hashSecret(secret(15)), "1.0")
+            assertEquals(exhausted, store.tryConsume(id, day, 11, 0, null, policy))
+            assertEquals(exhausted, store.tryConsume(id, day, 0, 3, null, policy))
+            assertEquals(exhausted, store.tryConsume(id, day, 0, 0, "a", policy.copy(dailyBatches = 0)))
+            assertNull(store.ledgerFor(id, day))
+            assertEquals(ConsumeOutcome.Consumed(9, 1, 0), store.tryConsume(id, day, 1, 1, "a", policy))
+            assertEquals(exhausted, store.tryConsume(id, day, 1, 0, "b", policy))
+            assertEquals(ConsumeOutcome.Consumed(8, 1, 0), store.tryConsume(id, day, 1, 0, "a", policy))
+            assertEquals(ConsumeOutcome.Consumed(7, 0, 0), store.tryConsume(id, day, 1, 1, null, policy))
+            assertEquals(exhausted, store.tryConsume(id, day, Long.MAX_VALUE, 0, null, policy.copy(dailyBytes = Long.MAX_VALUE)))
+            assertEquals(exhausted, store.tryConsume(id, day, 0, Int.MAX_VALUE, null, policy.copy(dailySkeletonBudget = Int.MAX_VALUE)))
+            assertEquals(LedgerRow(bytes = 3, accepted = 2, batchIds = listOf("a")), store.ledgerFor(id, day))
+        }
+    }
+
+    @Test
+    fun `SQL failure during me returns sanitized error and logs`() {
+        // A separate container keeps failure injection independent of every other test's database.
+        PostgreSQLContainer<Nothing>("postgres:16-alpine").use { failedPostgres ->
+            failedPostgres.start()
+            val failedConfig = Config.fromEnv(testEnvironment() + mapOf(
+                "DATABASE_URL" to failedPostgres.jdbcUrl, "DATABASE_USER" to failedPostgres.username,
+                "DATABASE_PASSWORD" to failedPostgres.password,
+            ))
+            Database.migrate(failedConfig)
+            val clock = FixedClock()
+            val id = UUID.randomUUID().toString()
+            val key = secret(16)
+            Database.connect(failedConfig).use { db ->
+                val logger = LoggerFactory.getLogger(Logger.ROOT_LOGGER_NAME) as Logger
+                val logs = ListAppender<ILoggingEvent>().apply { start() }
+                logger.addAppender(logs)
+                try {
+                    testApplication {
+                        environment { log = LoggerFactory.getLogger("io.ktor.server.Application") }
+                        application { module(failedConfig, db, clock) }
+                        assertEquals(HttpStatusCode.OK, client.enrol(id, key).status)
+                        failedPostgres.stop()
+                        assertError(client.signed(clock, id, key, HttpMethod.Get, "/v1/me"), 500, "internal_error")
+                    }
+                    assertTrue(logs.list.any { it.formattedMessage.contains("status=500") })
+                    assertPrivateLogs(logs.list, listOf(failedConfig.databaseUrl, key, id, "jdbc:postgresql:"))
+                } finally {
+                    logger.detachAppender(logs)
+                    logs.stop()
+                }
+            }
         }
     }
 

@@ -3,6 +3,9 @@ package cloud.trotter.census.server.db
 import cloud.trotter.census.server.Clock
 import cloud.trotter.census.server.Database
 import cloud.trotter.census.server.auth.toLowerHex
+import cloud.trotter.census.server.ingest.BudgetPolicy
+import cloud.trotter.census.server.ingest.ConsumeOutcome
+import cloud.trotter.census.server.secondsToUtcMidnight
 import cloud.trotter.census.server.today
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -19,9 +22,19 @@ import java.util.UUID
 
 enum class EnrolOutcome { Created, SameKey, KeyMismatch, Revoked }
 
-class RevokedInstallException : RuntimeException()
+sealed interface MutationOutcome {
+    data class Applied(val deletedRows: Map<String, Int> = emptyMap()) : MutationOutcome
+    data object StaleCredential : MutationOutcome
+}
 
-data class Install(val id: UUID, val createdDay: LocalDate, val lastSeenDay: LocalDate, val trusted: Boolean)
+data class Install(
+    val id: UUID,
+    val createdDay: LocalDate,
+    val lastSeenDay: LocalDate,
+    val trusted: Boolean,
+    val keyHash: String,
+    val revokedAt: Instant?,
+)
 
 data class LedgerRow(
     val bytes: Long = 0,
@@ -63,31 +76,45 @@ class InstallStore(private val db: Database, private val clock: Clock) {
         } ?: error("Concurrent withdrawal during enrolment")
     }
 
-    /** Null combines missing ID and wrong key. Revocation is distinguished only for a matching key. */
-    suspend fun authenticate(installId: UUID, keyHash: String): Install? = query {
-        select("SELECT * FROM installs WHERE install_id = ? FOR UPDATE", installId) { row ->
-            if (!sameHash(row.getString("key_hash"), keyHash)) return@select null
-            if (row.getObject("revoked_at") != null) throw RevokedInstallException()
-            val day = clock.today()
-            if (row.getObject("last_seen_day", LocalDate::class.java) != day) {
-                update("UPDATE installs SET last_seen_day = ? WHERE install_id = ?", day, installId)
-            }
-            Install(installId, row.getObject("created_day", LocalDate::class.java), day, row.getBoolean("trusted"))
+    /** Read-only, including for revoked rows; the caller verifies the credential before using it. */
+    suspend fun lookup(installId: UUID): Install? = query {
+        select("SELECT * FROM installs WHERE install_id = ?", installId) { row ->
+            Install(
+                installId, row.getObject("created_day", LocalDate::class.java),
+                row.getObject("last_seen_day", LocalDate::class.java), row.getBoolean("trusted"),
+                row.getString("key_hash"), row.getObject("revoked_at", java.time.OffsetDateTime::class.java)?.toInstant(),
+            )
         }
     }
 
-    suspend fun rotate(installId: UUID, newKeyHash: String): Boolean = query {
-        update("UPDATE installs SET key_hash = ? WHERE install_id = ? AND revoked_at IS NULL", newKeyHash, installId) == 1
+    suspend fun touchLastSeen(installId: UUID, today: LocalDate): Unit = query {
+        update(
+            "UPDATE installs SET last_seen_day = ? WHERE install_id = ? AND last_seen_day <> ? AND revoked_at IS NULL",
+            today, installId, today,
+        )
+        Unit
+    }
+
+    suspend fun rotate(installId: UUID, expectedCurrentKeyHash: String, newKeyHash: String): MutationOutcome = query {
+        val changed = update(
+            "UPDATE installs SET key_hash = ? WHERE install_id = ? AND key_hash = ? AND revoked_at IS NULL",
+            newKeyHash, installId, expectedCurrentKeyHash,
+        )
+        if (changed == 1) MutationOutcome.Applied() else MutationOutcome.StaleCredential
     }
 
     suspend fun revoke(installId: UUID, at: Instant): Boolean = query {
         update("UPDATE installs SET revoked_at = ? WHERE install_id = ?", at.atOffset(ZoneOffset.UTC), installId) == 1
     }
 
-    suspend fun withdraw(installId: UUID): Map<String, Int> = query {
+    suspend fun withdraw(installId: UUID, expectedCurrentKeyHash: String): MutationOutcome = query {
         // Lock the parent first: concurrent child inserts must finish before this lock or wait for deletion.
-        select("SELECT install_id FROM installs WHERE install_id = ? FOR UPDATE", installId) { true }
-        WITHDRAWAL_TABLES.associateWith { table -> update("DELETE FROM $table WHERE install_id = ?", installId) }
+        val current = select("SELECT key_hash, revoked_at FROM installs WHERE install_id = ? FOR UPDATE", installId) { row ->
+            val active = row.getObject("revoked_at") == null
+            active && sameHash(row.getString("key_hash"), expectedCurrentKeyHash)
+        } ?: false
+        if (!current) return@query MutationOutcome.StaleCredential
+        MutationOutcome.Applied(WITHDRAWAL_TABLES.associateWith { table -> update("DELETE FROM $table WHERE install_id = ?", installId) })
     }
 
     suspend fun issueNonce(installId: UUID?): String = query {
@@ -122,23 +149,54 @@ class InstallStore(private val db: Database, private val clock: Clock) {
         update("DELETE FROM ingest_ledger WHERE day < ?", olderThan)
     }
 
-    suspend fun recordIngest(
+    /** The insert and conflict-update paths both enforce quotas in the same PostgreSQL statement. */
+    suspend fun tryConsume(
         installId: UUID,
         day: LocalDate,
         bytes: Long,
-        accepted: Int,
-        duplicate: Int,
-        rejectedByReason: Map<String, Int>,
+        items: Int,
         batchId: String?,
-    ): Unit = query {
-        require(bytes >= 0 && accepted >= 0 && duplicate >= 0 && rejectedByReason.values.all { it >= 0 })
-        // One PostgreSQL upsert locks the row and adds counters, including concurrent first writes.
-        update(
-            """INSERT INTO ingest_ledger (install_id, day, bytes, accepted, duplicate, rejected, batch_ids)
-                VALUES (?, ?, ?, ?, ?, ?::jsonb, CASE WHEN ?::text IS NULL THEN '{}'::text[] ELSE ARRAY[?::text] END)
+        policy: BudgetPolicy,
+    ): ConsumeOutcome = query {
+        require(bytes >= 0 && items >= 0)
+        val now = clock.now()
+        select(
+            """INSERT INTO ingest_ledger (install_id, day, bytes, accepted, batch_ids)
+                SELECT ?, ?, ?, ?, CASE WHEN ?::text IS NULL THEN '{}'::text[] ELSE ARRAY[?::text] END
+                WHERE ?::bigint <= ? AND ?::integer <= ? AND (CASE WHEN ?::text IS NULL THEN 0 ELSE 1 END) <= ?
                 ON CONFLICT (install_id, day) DO UPDATE SET
                     bytes = ingest_ledger.bytes + EXCLUDED.bytes,
                     accepted = ingest_ledger.accepted + EXCLUDED.accepted,
+                    batch_ids = CASE WHEN ?::text IS NULL OR ? = ANY(ingest_ledger.batch_ids)
+                        THEN ingest_ledger.batch_ids ELSE array_append(ingest_ledger.batch_ids, ?::text) END
+                WHERE ingest_ledger.bytes::numeric + EXCLUDED.bytes <= ?
+                    AND ingest_ledger.accepted::bigint + EXCLUDED.accepted <= ?
+                    AND cardinality(ingest_ledger.batch_ids) +
+                        (CASE WHEN ?::text IS NULL OR ? = ANY(ingest_ledger.batch_ids) THEN 0 ELSE 1 END) <= ?
+                RETURNING bytes, accepted, cardinality(batch_ids) AS batches""",
+            installId, day, bytes, items, batchId, batchId,
+            bytes, policy.dailyBytes, items, policy.dailySkeletonBudget, batchId, policy.dailyBatches,
+            batchId, batchId, batchId, policy.dailyBytes, policy.dailySkeletonBudget, batchId, batchId, policy.dailyBatches,
+        ) { row ->
+            ConsumeOutcome.Consumed(
+                policy.dailyBytes - row.getLong("bytes"), policy.dailySkeletonBudget - row.getInt("accepted"),
+                policy.dailyBatches - row.getInt("batches"),
+            )
+        } ?: ConsumeOutcome.BudgetExhausted(secondsToUtcMidnight(now))
+    }
+
+    /** Rejections and duplicates do not consume quota; accepted work must use tryConsume. */
+    suspend fun recordIngest(
+        installId: UUID,
+        day: LocalDate,
+        duplicate: Int,
+        rejectedByReason: Map<String, Int>,
+    ): Unit = query {
+        require(duplicate >= 0 && rejectedByReason.values.all { it >= 0 })
+        update(
+            """INSERT INTO ingest_ledger (install_id, day, duplicate, rejected)
+                VALUES (?, ?, ?, ?::jsonb)
+                ON CONFLICT (install_id, day) DO UPDATE SET
                     duplicate = ingest_ledger.duplicate + EXCLUDED.duplicate,
                     rejected = (
                         SELECT COALESCE(jsonb_object_agg(reason, total), '{}'::jsonb) FROM (
@@ -148,11 +206,8 @@ class InstallStore(private val db: Database, private val clock: Clock) {
                                 SELECT key AS reason, value AS amount FROM jsonb_each_text(EXCLUDED.rejected)
                             ) counts GROUP BY reason
                         ) totals
-                    ),
-                    batch_ids = CASE WHEN cardinality(EXCLUDED.batch_ids) = 0
-                        OR EXCLUDED.batch_ids[1] = ANY(ingest_ledger.batch_ids) THEN ingest_ledger.batch_ids
-                        ELSE ingest_ledger.batch_ids || EXCLUDED.batch_ids END""",
-            installId, day, bytes, accepted, duplicate, Json.encodeToString(rejectedByReason), batchId, batchId,
+                    )""",
+            installId, day, duplicate, Json.encodeToString(rejectedByReason),
         )
         Unit
     }
