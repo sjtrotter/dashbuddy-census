@@ -397,6 +397,35 @@ class HealthStoreTest {
         }
     }
 
+    @Test
+    fun `a later backfill for another version never re-emits an older version's trips alarm (review round 2)`() {
+        var instant = Instant.parse("2026-10-01T12:00:00Z")
+        val clock = object : Clock { override fun now(): Instant = instant }
+        val day = LocalDate.parse("2026-10-01")
+        val id = UUID.randomUUID()
+        val key = secret(93)
+        val hash = hashSecret(key)
+        val alarms = mutableListOf<Alarm>()
+        Database.connect(config()).use { db ->
+            val installs = InstallStore(db, clock)
+            val store = HealthStore(db, clock)
+            val evaluator = HealthAlarms(store, clock, startedAt = clock.now(), sink = AlarmSink { alarms += it })
+            runBlocking {
+                installs.enrol(id, hash, "1.0.0")
+                val tripped = HealthReport(day, "doordash", "8.0.0", "1.0.0", "v1", 300, 10, 1, mapOf("a.b" to 30))
+                assertEquals(HealthOutcome.Stored, store.upsert(id, hash, day, listOf(tripped), emptyMap(), 100, BudgetPolicy()))
+                evaluator.evaluate(id, listOf(tripped), hash)
+                assertEquals(listOf("trips"), alarms.map { it.kind })
+                // Next UTC day (dedupe reset): a backfill for the SAME day under another version with trips = 0.
+                instant = Instant.parse("2026-10-02T12:00:00Z")
+                val backfill = HealthReport(day, "doordash", "9.0.0", "1.0.0", "v1", 300, 10, 0, mapOf("a.b" to 30))
+                assertEquals(HealthOutcome.Stored, store.upsert(id, hash, day.plusDays(1), listOf(backfill), emptyMap(), 100, BudgetPolicy()))
+                evaluator.evaluate(id, listOf(backfill), hash)
+                assertEquals(listOf("trips"), alarms.map { it.kind }, "the 8.0.0 trips alarm must not be re-emitted by a 9.0.0 backfill")
+            }
+        }
+    }
+
     private fun body(reports: List<JsonElement>): String = JsonObject(mapOf("reports" to JsonArray(reports))).toString()
     private fun fleet(day: LocalDate): List<Long> = sql { connection ->
         connection.prepareStatement("SELECT installs_reporting, admitted, unknown, COALESCE((rule_counts->>'a.b')::bigint, 0) FROM health_fleet_daily WHERE day = ? AND platform = 'doordash' AND platform_app_version = '8.0.0'").use { statement ->

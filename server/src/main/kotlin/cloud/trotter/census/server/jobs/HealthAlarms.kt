@@ -163,7 +163,12 @@ class HealthAlarms(
             val rules = ruleShareCliff(previous, current)
             if (rules.isNotEmpty()) emit(Alarm("rule_share_cliff", current.platform, current.platformAppVersion, ruleIds = rules), null)
         }
-        for (alarm in unknownSurge(inputs.current, inputs.fleet, inputs.newClusters)) {
+        // Round 2 (Astra): the per-report `trips` alarm is judged on the reports THIS batch accepted only — the wider
+        // `current` set (other versions already stored for the day) is for rule-death aggregation, or a backfill for a
+        // different version would re-emit an older version's trips alarm after the daily dedupe reset.
+        val acceptedKeys = reports.map { Triple(it.day, it.platform, it.platformAppVersion) }.toSet()
+        val acceptedCurrent = inputs.current.filter { Triple(it.day, it.platform, it.platformAppVersion) in acceptedKeys }
+        for (alarm in unknownSurge(acceptedCurrent, inputs.fleet, inputs.newClusters)) {
             emit(alarm, if (alarm.installPrefix == null) null else installId)
         }
     }
