@@ -43,9 +43,12 @@ resource "aws_ssm_parameter" "cloudwatch" {
       # with an [InstanceId, path] aggregation so one full filesystem can never hide inside an average.
       aggregation_dimensions = [["InstanceId"], ["InstanceId", "path"]]
       metrics_collected = {
+        # #1191: NO drop_original_metrics here. After append_dimensions the memory datum's dimension
+        # set is exactly {InstanceId} — the same set as the [InstanceId] rollup — so dropping the
+        # "original" dropped the only datum and the memory + heartbeat alarms were blind from first
+        # boot. Disk keeps it because its original also carries fstype, so its rollups differ.
         mem = {
-          measurement           = ["mem_used_percent"]
-          drop_original_metrics = ["mem_used_percent"]
+          measurement = ["mem_used_percent"]
         }
         disk = {
           measurement           = ["used_percent"]
