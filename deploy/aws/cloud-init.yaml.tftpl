@@ -179,8 +179,12 @@ write_files:
       mv /etc/wireguard/wg0.conf.tmp /etc/wireguard/wg0.conf
       systemctl enable wg-quick@wg0 >/dev/null 2>&1
       if wg show wg0 >/dev/null 2>&1; then
-        # Already up: apply the peer set in place (the address and port are constants), no tunnel flap.
-        wg syncconf wg0 <(wg-quick strip wg0)
+        # Already up: apply the peer set in place (the address and port are constants), no tunnel flap. The
+        # strip runs FIRST on its own: an empty producer under a process substitution would have synced an
+        # empty config and cleared the live peers.
+        stripped=$(wg-quick strip wg0)
+        [ -n "$stripped" ] || { echo 'CENSUS: wg-quick strip produced nothing' >&2; exit 1; }
+        wg syncconf wg0 /dev/stdin <<<"$stripped"
       else
         systemctl restart wg-quick@wg0
       fi

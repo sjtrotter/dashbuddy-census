@@ -37,10 +37,11 @@
 # the private listener below, so a stolen operator token is useless from the internet.
 {$PUBLIC_HOST} {
     import hardened
-    # path_regexp, not path: the `path` matcher runs on the CLEANED path, but the proxy forwards the ORIGINAL
-    # URI and Ktor keeps dot-segments literally, so `/ops/../healthz` would clean to /healthz here yet route
-    # into /ops upstream (review, Astra). The regexp sees the uncleaned, decoded path.
-    @ops path_regexp ops (?i)^/+ops(/|$)
+    # vars_regexp on the raw decoded path, not `path`/`path_regexp`: both of those run on the CLEANED path, but
+    # the proxy forwards the ORIGINAL URI and Ktor keeps dot-segments literally, so `/ops/../x` cleans to /x here
+    # yet routes into /ops upstream (review, Astra, two rounds). {http.request.uri.path} is req.URL.Path as
+    # received (decoded, uncleaned).
+    @ops vars_regexp ops {http.request.uri.path} (?i)^/+ops(/|$)
     handle @ops {
         respond 404
     }
