@@ -50,6 +50,14 @@ jobs:
                   severity: CRITICAL,HIGH
                   exit-code: '1'
                   format: table
+            - name: The committed Caddyfile must adapt with this binary and the plugin must be present
+              env:
+                  IMAGE: ghcr.io/sjtrotter/dashbuddy-census-caddy@${{ steps.build.outputs.digest }}
+              run: |
+                  docker run --rm "$IMAGE" caddy list-modules | grep -qx http.handlers.rate_limit
+                  docker run --rm -v "$PWD/deploy/compose/Caddyfile:/etc/caddy/Caddyfile:ro" \
+                      -e PUBLIC_HOST=census.example.test -e ACME_EMAIL=ops@example.test -e OPS_BIND_IP=127.0.0.1 \
+                      "$IMAGE" caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
             - uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
               with:
                   image: ghcr.io/sjtrotter/dashbuddy-census-caddy@${{ steps.build.outputs.digest }}

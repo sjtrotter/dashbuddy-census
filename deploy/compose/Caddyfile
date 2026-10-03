@@ -1,11 +1,13 @@
 {
     email {$ACME_EMAIL}
     # #1178: caddy-ratelimit is a non-standard directive; place it before the standard handlers.
-    order rate_limit before basicauth
+    order rate_limit before basic_auth
     # #1181: clients connecting to the operator site by IP literal send no SNI; behind Docker's port NAT the
     # connection's local address is the container's, so certificate selection needs this default.
     default_sni {$OPS_BIND_IP}
-    # ADR-0011: NO client IP is ever retained — runtime errors included; liveness is observed through /healthz probes, not proxy logs
+    # ADR-0011: NO client IP is ever retained — runtime errors included; liveness is observed through /healthz probes, not proxy logs.
+    # This DEFAULT logger also carries caddy-ratelimit's refusal line (`rate limit exceeded` with the peer address,
+    # logger http.handlers.rate_limit) — the site logs below do NOT cover it. Removing this block re-enables that line.
     log {
         output discard
     }
@@ -54,10 +56,14 @@
     # buckets are keyed by the bearer's UNVERIFIED install id, and enrol is one process-wide 120/h bucket spent
     # BEFORE credential checks). The client address is the direct TCP peer (nothing is in front of Caddy), held
     # ONLY in this plugin's in-memory zones — no access log, no retention, lost on restart (ADR-0011). Figures
-    # (review, Astra): enrol 10/min burst AND 30/h — one address can take at most a quarter of the app's hourly
-    # enrol allowance (a device enrols once); the rest of /v1 at 300/min — 100 phones behind one carrier address
-    # can each run a three-batch upload in the same minute, while one address stays below the app's 600/min
-    # global admission. Not a defence against a distributed source.
+    # (reviews, Astra + fable): enrol 10/min burst AND 20/h — one address can take at most a sixth of the app's
+    # 120/h enrol bucket (a device enrols once; a refusal is only a deferral); ALL of /v1 (the enrol request spends
+    # both zones) at 200/min — ~66 phones behind one carrier address can each run a three-batch upload in the same
+    # minute, and it takes three addresses to drain the app's 600/min global admission (the app-side scope of that
+    # bucket is the real weakness; edge limits only price the attack). Memory: a key costs ~2 KB until the sweep;
+    # the 96 MiB cgroup absorbs tens of thousands of distinct addresses per sweep window — a real IPv4 pool is the
+    # remaining DoS mode, accepted at this scale. The key is the bare peer address (/128 for IPv6): revisit before
+    # any AAAA record (the host is IPv4-only today). Not a defence against a distributed source.
     rate_limit {
         zone enroll_burst {
             match {
@@ -72,7 +78,7 @@
                 path /v1/enroll
             }
             key {http.request.remote.host}
-            events 30
+            events 20
             window 1h
         }
         zone api {
@@ -80,10 +86,11 @@
                 path /v1/*
             }
             key {http.request.remote.host}
-            events 300
+            events 200
             window 1m
         }
         jitter 0.1
+        sweep_interval 15s
     }
 }
 
