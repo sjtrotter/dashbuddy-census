@@ -141,10 +141,20 @@ class OpsRoutesTest {
                 val page = client.ops("/ops/")
                 assertEquals("default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'", page.headers["Content-Security-Policy"])
                 val html = page.bodyAsText()
-                assertTrue(html.contains("android.widget.Eligible"))
-                assertTrue(html.contains("android.widget.Trusted"))
+                assertFalse(html.contains("android.widget.Eligible"))
+                assertFalse(html.contains("android.widget.Trusted"))
                 assertFalse(html.contains("android.widget.Hidden"))
-                assertTrue(html.contains("~" + hashSecret("android.widget.Hidden").take(8)))
+                assertFalse(html.contains("~" + hashSecret("android.widget.Hidden").take(8)))
+                for ((item, label, visible) in listOf(Triple(eligible, "Eligible", true), Triple(hidden, "Hidden", false), Triple(trusted, "Trusted", true))) {
+                    val response = client.ops("/ops/clusters/${item.item.fingerprint}/view")
+                    assertEquals(200, response.status.value)
+                    assertEquals(ContentType.Text.Html, response.contentType()?.withoutParameters())
+                    assertEquals(page.headers["Content-Security-Policy"], response.headers["Content-Security-Policy"])
+                    val detail = response.bodyAsText()
+                    assertEquals(visible, detail.contains("android.widget.$label"))
+                    if (!visible) assertTrue(detail.contains("~" + hashSecret("android.widget.$label").take(8)))
+                    assertTrue(detail.contains("href=\"/ops/clusters/${item.item.fingerprint}\""))
+                }
                 assertFalse(html.contains(operatorToken))
                 val installBody = client.ops("/ops/installs").bodyAsText()
                 assertFalse(Regex("[0-9a-f]{64}").containsMatchIn(installBody))
@@ -179,6 +189,12 @@ class OpsRoutesTest {
 
                 val queue = Json.parseToJsonElement(client.ops("/ops/vocabulary/queue").bodyAsText()).jsonArray
                 assertEquals(listOf(CensusHash.of("Ready now")), queue.map { it.jsonObject.getValue("tokenHash").jsonPrimitive.content })
+                val display = ops.vocabularyQueueDisplay()
+                assertEquals(1, display.size)
+                assertEquals("words:2", display.single().kind)
+                assertEquals(10, display.single().distinctInstalls)
+                assertEquals(day.toString(), display.single().firstDay)
+                assertEquals(day.toString(), display.single().lastDay)
                 val tokenHash = CensusHash.of("Ready now")
                 assertError(client.mutate("/ops/vocabulary/resolve", """{"tokenHash":"$tokenHash","clearText":"Wrong text","source":"corpus","reject":false}"""), 422, "hash_mismatch")
                 assertEquals(204, client.mutate("/ops/vocabulary/resolve", """{"tokenHash":"$tokenHash","clearText":"Ready now","source":"corpus","reject":false}""").status.value)
@@ -328,6 +344,66 @@ class OpsRoutesTest {
                 assertTrue(html.contains("method=\"post\""))
                 assertTrue(html.contains("Log out"))
                 assertFalse(html.contains("<script"))
+            }
+        }
+    }
+
+    @Test
+    fun `cluster detail accepts bearer and cookie with HTML CSP while JSON is unchanged`() {
+        Database.connect(config()).use { db ->
+            val installs = InstallStore(db, clock)
+            val skeletons = SkeletonStore(db, clock)
+            val ops = OpsStore(db, clock, Policy())
+            val sample = fixture("Detail", "Only kind is displayed")
+            val id = UUID.randomUUID()
+            val key = secret(79)
+            testApplication {
+                application { module(config().copy(operatorTotpSecret = totpSecret), db, clock) }
+                installs.enrol(id, hashSecret(key), "1.0.0")
+                assertTrue(skeletons.ingest(id, hashSecret(key), day, listOf(sample), 0, emptyMap(), "detail-seed", 100, BudgetPolicy()) is IngestOutcome.Stored)
+                val browser = createClient { followRedirects = false }
+                val login = browser.post("/ops/login") {
+                    contentType(ContentType.Application.FormUrlEncoded)
+                    setBody(listOf("token" to operatorToken, "code" to Totp.code(totpSecret, instant.epochSecond)).formUrlEncode())
+                }
+                assertEquals(303, login.status.value)
+                val cookie = requireNotNull(login.headers[HttpHeaders.SetCookie]).substringBefore(';')
+                val path = "/ops/clusters/${sample.item.fingerprint}"
+                val jsonBefore = client.ops(path)
+                assertEquals(200, jsonBefore.status.value)
+                assertEquals(ContentType.Application.Json, jsonBefore.contentType()?.withoutParameters())
+                val expected = Json.parseToJsonElement(jsonBefore.bodyAsText()).jsonObject
+                assertEquals(sample.item.fingerprint, expected.getValue("fingerprint").jsonPrimitive.content)
+                assertEquals(1, expected.getValue("samples").jsonArray.size)
+                for (useCookie in listOf(false, true)) {
+                    for ((requestedPath, status) in listOf(
+                        "$path/view" to 200,
+                        "/ops/clusters/${"f".repeat(64)}/view" to 404,
+                        "/ops/clusters/invalid/view" to 404,
+                        "/ops/clusters/${"a".repeat(63)}/view" to 404,
+                    )) {
+                        val response = browser.get(requestedPath) {
+                            if (useCookie) header(HttpHeaders.Cookie, cookie) else header(HttpHeaders.Authorization, "Bearer $operatorToken")
+                        }
+                        assertEquals(status, response.status.value)
+                        assertEquals(ContentType.Text.Html, response.contentType()?.withoutParameters())
+                        assertEquals("default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'", response.headers["Content-Security-Policy"])
+                        assertEquals("no-store", response.headers[HttpHeaders.CacheControl])
+                        val html = response.bodyAsText()
+                        assertTrue(html.contains("href=\"/ops/#clusters\""))
+                        assertTrue(html.contains(if (status == 404) "Cluster not found" else "Skeleton samples"))
+                        assertEquals(1, Regex("<style\\b").findAll(html).count())
+                        assertFalse(html.contains(operatorToken))
+                    }
+                    val json = browser.get(path) {
+                        if (useCookie) header(HttpHeaders.Cookie, cookie) else header(HttpHeaders.Authorization, "Bearer $operatorToken")
+                    }
+                    assertEquals(ContentType.Application.Json, json.contentType()?.withoutParameters())
+                    assertEquals(expected, Json.parseToJsonElement(json.bodyAsText()))
+                }
+                assertError(browser.get("$path/view"), 401, "unauthorized")
+                val display = ops.vocabularyQueueDisplay()
+                assertTrue(display.isEmpty()) // One non-trusted install is below the vocabulary gate.
             }
         }
     }

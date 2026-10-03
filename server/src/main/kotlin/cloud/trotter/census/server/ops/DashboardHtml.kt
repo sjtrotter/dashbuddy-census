@@ -1,39 +1,68 @@
 package cloud.trotter.census.server.ops
 
+import cloud.trotter.census.server.db.OpsCluster
 import cloud.trotter.census.server.db.OpsClusterGroup
-import kotlinx.html.FormMethod
+import cloud.trotter.census.server.db.OpsVocabularyDisplay
+import cloud.trotter.census.server.ingest.WireGrammars
+import kotlinx.html.DL
 import kotlinx.html.FlowContent
+import kotlinx.html.FlowOrPhrasingContent
+import kotlinx.html.FormMethod
 import kotlinx.html.a
+import kotlinx.html.article
 import kotlinx.html.body
 import kotlinx.html.button
+import kotlinx.html.caption
+import kotlinx.html.code
+import kotlinx.html.dd
+import kotlinx.html.details
 import kotlinx.html.div
+import kotlinx.html.dl
+import kotlinx.html.dt
+import kotlinx.html.footer
 import kotlinx.html.form
 import kotlinx.html.h1
 import kotlinx.html.h2
 import kotlinx.html.h3
+import kotlinx.html.h4
 import kotlinx.html.head
+import kotlinx.html.header
 import kotlinx.html.html
+import kotlinx.html.id
+import kotlinx.html.lang
 import kotlinx.html.li
+import kotlinx.html.main
 import kotlinx.html.meta
+import kotlinx.html.nav
 import kotlinx.html.p
+import kotlinx.html.section
 import kotlinx.html.span
-import kotlinx.html.stream.createHTML
-import kotlinx.html.unsafe
+import kotlinx.html.strong
 import kotlinx.html.style
+import kotlinx.html.summary
 import kotlinx.html.table
+import kotlinx.html.tbody
 import kotlinx.html.td
 import kotlinx.html.th
+import kotlinx.html.thead
+import kotlinx.html.time
 import kotlinx.html.title
 import kotlinx.html.tr
 import kotlinx.html.ul
+import kotlinx.html.unsafe
+import kotlinx.html.stream.createHTML
 import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.boolean
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.long
 import java.time.LocalDate
-import java.time.temporal.ChronoUnit
+import java.util.Locale
 
-/** Read-only operator data with a logout control. Only cluster link destinations contain fingerprints. */
+/** Read-only operator data with a logout control. Only link destinations contain fingerprints. */
 object DashboardHtml {
     fun render(
         serverVersion: String,
@@ -45,75 +74,370 @@ object DashboardHtml {
         installs: JsonArray,
         ledger: JsonObject,
         vocabularyCount: Long,
-    ): String = "<!DOCTYPE html>" + createHTML().html {
-        head {
-            meta { charset = "utf-8" }
-            title { +"Census operator" }
-            // A constant stylesheet literal (no interpolation) — kotlinx.html requires `unsafe` for <style> content.
-            style { unsafe { raw("body{font-family:system-ui;margin:2rem;max-width:90rem}table{border-collapse:collapse}td,th{padding:.4rem;text-align:left;border-bottom:1px solid #ccc}.badge{padding:.15rem .4rem;background:#eee;border-radius:.3rem}li{margin:.4rem 0}") } }
+        vocabularyRows: List<OpsVocabularyDisplay> = emptyList(),
+    ): String = opsPage(headerContent = {
+        h1 { +"Census operator" }
+        panel("identity", "Reporting context", hiddenHeading = true) { metadata(serverVersion, k, today) }
+    }) {
+        panel("snapshot", "Snapshot", hiddenHeading = true) {
+            nav("metrics") {
+                attributes["aria-label"] = "Snapshot"
+                metric("alarms", "Alarms today") { +number(alarms.rows("today").size) }
+                metric("health", "Latest health day", date = true) {
+                    val latest = health.rows("fleet").map { it.text("day") }.maxOrNull()
+                    if (latest == null) +"No reports" else date(latest)
+                }
+                metric("ledger", "Accepted today") { +number(ledger.obj("totals").count("accepted")) }
+                metric("vocabulary", "Vocabulary queue") { +number(vocabularyCount) }
+            }
+            nav("section-nav") {
+                attributes["aria-label"] = "Sections"
+                listOf("Alarms", "Health", "Clusters", "Ledger", "Installs", "Vocabulary").forEach {
+                    a(href = "#${it.lowercase(Locale.ROOT)}") { +it }
+                }
+            }
+            p("muted") { +"Snapshot at page load. All dates UTC." }
         }
-        body {
-            form(action = "/ops/logout", method = FormMethod.post) { button { +"Log out" } }
-            h1 { +"Census operator" }
-            p { +"Server ${safe(serverVersion)} · k=$k · ${safe(today)}" }
-            h2 { +"Alarms today" }
-            rows(alarms["today"] as? JsonArray ?: JsonArray(emptyList()))
-            h2 { +"Ranked clusters" }
+        alarmSection(alarms)
+        healthSection(health, today)
+        panel("clusters", "Ranked clusters") {
+            p("muted") { +"Latest versions first; clusters ranked within each version. Up to 50 entries across groups. A cluster can appear in more than one group." }
+            val labels = linkedMapOf<String, String>()
+            if (clusters.all { it.clusters.isEmpty() }) emptyState("No clusters to review yet. Ranked groups appear when cluster sightings arrive.")
             for (group in clusters) {
-                h3 { +"Version ${safe(group.platformAppVersion)}" }
-                for (cluster in group.clusters) div {
-                    val days = ChronoUnit.DAYS.between(LocalDate.parse(cluster.firstSeenDay), LocalDate.parse(cluster.lastSeenDay)) + 1
-                    p {
-                        +"${safe(cluster.platform)} · ${safe(cluster.status)} · "
-                        +"${cluster.distinctInstalls28d} installs · ${cluster.sightings28d} sightings · ${cluster.versions.size} versions · $days days · "
-                        +"${safe(cluster.firstSeenDay)} to ${safe(cluster.lastSeenDay)} · "
-                        +"trusted=${cluster.seenByTrusted} · unblinded=${cluster.unblinded} "
-                        if (cluster.newWithVersion) span("badge") { +"new with version" }
-                        if (Regex("[0-9a-f]{64}").matches(cluster.fingerprint)) {
-                            a(href = "/ops/clusters/${cluster.fingerprint}") { +"Cluster JSON" }
+                h3 { +"Version ${version(group.platformAppVersion)} · ${number(group.clusters.size)} ${if (group.clusters.size == 1) "entry" else "entries"}" }
+                div("cluster-grid") {
+                    for (cluster in group.clusters) article("cluster-card") {
+                        val label = labels.getOrPut(cluster.fingerprint) { "Cluster ${String.format(Locale.ROOT, "%02d", labels.size + 1)}" }
+                        div("cluster-heading") {
+                            h4 {
+                                if (fingerprintPattern.matches(cluster.fingerprint)) a(href = "/ops/clusters/${cluster.fingerprint}/view", classes = "cluster-link") { +label }
+                                else +label
+                            }
+                            statusChip(cluster.status)
                         }
-                    }
-                    for (sample in cluster.samples.orEmpty()) {
-                        p { +"${safe(sample.platformAppVersion)} · ${safe(sample.receivedDay)}" }
-                        ul { li { tree(sample.skeleton) } }
+                        clusterFacts(cluster)
+                        p("muted") { +visibility(cluster, k) }
                     }
                 }
             }
-            h2 { +"Health, last 7 days" }
-            rows(health["fleet"] as? JsonArray ?: JsonArray(emptyList()))
-            h2 { +"Installs" }
-            rows(installs)
-            h2 { +"Ledger today" }
-            rows(ledger["installs"] as? JsonArray ?: JsonArray(emptyList()))
-            p { +"Totals: ${safe(ledger["totals"]?.toString() ?: "{}")}" }
-            h2 { +"Vocabulary queue ($vocabularyCount)" }
+            details {
+                summary { +"How ranking works" }
+                p { +"distinctInstalls28d × log2(1 + sightings28d) × recency" }
+                p("muted") { +"Recency is 1.0 within 7 days, 0.5 within 28 days, and 0.1 otherwise." }
+            }
+        }
+        ledgerSection(ledger, today)
+        panel("installs", "Installs") {
+            p("muted") { +"${number(installs.size)} shown · most recently seen first · maximum 50." }
+            if (installs.isEmpty()) emptyState("No installs registered yet.")
+            details {
+                summary { +"Install records · ${number(installs.size)} shown" }
+                if (installs.isNotEmpty()) dataTable("Install records · most recently seen first", listOf("Install", "Created", "Last seen", "Trusted", "Revoked", "Last app version", "Attestation verdict"), installs.map { element ->
+                    val row = element.jsonObject
+                    listOf(
+                        cell { code { +prefix(row.text("installIdPrefix")) } },
+                        cell { date(row.text("createdDay")) }, cell { date(row.text("lastSeenDay")) },
+                        cell { yesChip(row.flag("trusted"), "accent") }, cell { yesChip(row.flag("revoked"), "bad") },
+                        cell { row.optionalText("lastAppVersion")?.let { code { +version(it) } } ?: run { +"Not recorded" } },
+                        cell { +if (row.flag("attested")) "Recorded" else "Not recorded" },
+                    )
+                })
+            }
+        }
+        panel("vocabulary", "Vocabulary queue", badge = number(vocabularyCount)) {
+            p("muted") { +"Eligible entries awaiting review. Eligibility counts non-trusted installs; identifiers are withheld here." }
+            if (vocabularyRows.isEmpty()) emptyState("No vocabulary entries currently meet k and await review.")
+            details {
+                summary { +"Queue entries · ${number(vocabularyRows.size)} shown of ${number(vocabularyCount)}" }
+                if (vocabularyRows.isNotEmpty()) dataTable("Eligible vocabulary entries · maximum 50", listOf("Kind", "Non-trusted installs", "First seen", "Last seen"), vocabularyRows.map { row ->
+                    listOf(cell { chip(safe(row.kind), "neutral") }, numeric(row.distinctInstalls), cell { date(row.firstDay) }, cell { date(row.lastDay) })
+                })
+            }
         }
     }
-
-    private fun FlowContent.tree(node: RenderedSkeleton) {
-        node.className?.let { span { +safe(it) }; +" " }
-        node.id?.let { span { +safe(it) }; +" " }
-        node.kinds.forEach { span("badge") { +safe(it) }; +" " }
-        if (node.children.isNotEmpty()) ul { node.children.forEach { li { tree(it) } } }
-    }
-
-    private fun FlowContent.rows(rows: JsonArray) {
-        if (rows.isEmpty()) { p { +"None" }; return }
-        val objects = rows.mapNotNull { it as? JsonObject }
-        val columns = objects.flatMap { it.keys }.distinct()
-        table {
-            tr { columns.forEach { th { +safe(it) } } }
-            objects.forEach { row -> tr { columns.forEach { key -> td { +safe(display(row[key])) } } } }
-        }
-    }
-
-    private fun display(value: JsonElement?): String = when (value) {
-        null -> ""
-        is JsonPrimitive -> value.content
-        else -> value.toString()
-    }
-
-    private fun safe(value: String): String = value
-        .replace(Regex("(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"), "[redacted]")
-        .replace(Regex("(?i)[0-9a-f]{16,}"), "[redacted]")
 }
+
+/** Shared shell for the dashboard, detail, missing-cluster and login pages. */
+internal fun opsPage(
+    pageTitle: String = "Census operator · DashBuddy",
+    logout: Boolean = true,
+    headerContent: FlowContent.() -> Unit,
+    content: FlowContent.() -> Unit,
+): String = "<!DOCTYPE html>" + createHTML().html {
+    lang = "en"
+    head {
+        meta { charset = "utf-8" }
+        meta { name = "viewport"; this.content = "width=device-width, initial-scale=1" }
+        meta { name = "color-scheme"; this.content = "dark light" }
+        title { +pageTitle }
+        style { unsafe { raw(OpsStyles.CSS) } }
+    }
+    body {
+        a(href = "#main", classes = "skip-link") { +"Skip to content" }
+        div("shell") {
+            header("page-header") {
+                p("eyebrow") { +"DashBuddy / Census" }
+                headerContent()
+                if (logout) form(action = "/ops/logout", method = FormMethod.post) { button { +"Log out" } }
+            }
+            main { id = "main"; attributes["tabindex"] = "-1"; content() }
+            footer("page-footer") { +"Read-only operator view. Mutations use the curl recipes in docs/OPERATOR.md." }
+        }
+    }
+}
+
+internal fun FlowContent.panel(
+    key: String,
+    heading: String,
+    hiddenHeading: Boolean = false,
+    badge: String? = null,
+    headingDate: String? = null,
+    content: FlowContent.() -> Unit,
+) {
+    section("panel") {
+        id = key
+        attributes["aria-labelledby"] = "$key-heading"
+        div("section-heading") {
+            h2(classes = if (hiddenHeading) "visually-hidden" else null) {
+                id = "$key-heading"
+                +heading
+                if (headingDate != null) { +" · "; date(headingDate); +" UTC" }
+            }
+            if (badge != null) chip(badge, "neutral")
+        }
+        content()
+    }
+}
+
+internal fun FlowContent.metadata(serverVersion: String, k: Int, today: String) {
+    dl("header-meta") {
+        fact("Server") { code { +version(serverVersion) } }
+        fact("Privacy threshold") { +"k = ${number(k)}" }
+        fact("UTC date") { date(today) }
+    }
+}
+
+private fun FlowContent.metric(target: String, label: String, date: Boolean = false, value: FlowContent.() -> Unit) {
+    a(href = "#$target", classes = "metric") {
+        span("metric-label") { +label }
+        span(if (date) "metric-value date" else "metric-value") { value() }
+    }
+}
+
+internal fun DL.fact(label: String, value: FlowContent.() -> Unit) {
+    div { this@fact.dt { +label }; this@fact.dd { value() } }
+}
+
+internal fun FlowContent.clusterFacts(cluster: OpsCluster, detail: Boolean = false) {
+    dl("facts") {
+        fact("Platform") { +platform(cluster.platform) }
+        fact("Non-trusted installs · 28 d") { strong { +number(cluster.distinctInstalls28d) } }
+        fact("Sightings · 28 d") { strong { +number(cluster.sightings28d) } }
+        fact("First seen") { date(cluster.firstSeenDay) }
+        fact("Last seen") { date(cluster.lastSeenDay) }
+        fact("Seen by trusted") { +if (cluster.seenByTrusted) "Yes" else "No" }
+        fact("Versions") {
+            if (cluster.versions.isEmpty()) +"None recorded" else {
+                +"${number(cluster.versions.size)} ${if (cluster.versions.size == 1) "version" else "versions"}"
+                ul("versions") { cluster.versions.forEach { li { code { +version(it) } } } }
+            }
+        }
+        fact(if (detail) "New with newest observed version" else "New with this version") { yesChip(cluster.newWithVersion, "accent") }
+        fact("Label visibility") { chip(if (cluster.unblinded) "Visible" else "Redacted", "neutral") }
+        fact("Resolved rule") { cluster.resolvedRuleId?.let { code { +rule(it) } } ?: run { +"None" } }
+        fact("Notes") {
+            +when {
+                cluster.notesWithheld -> "Withheld below privacy gate"
+                !cluster.notes.isNullOrEmpty() -> "Present · see detail"
+                else -> "None"
+            }
+        }
+    }
+}
+
+internal fun visibility(cluster: OpsCluster, k: Int): String = when {
+    !cluster.unblinded -> "Labels redacted: ${number(cluster.distinctInstalls28d)} / ${number(k)} non-trusted installs in 28 days; no trusted sighting."
+    cluster.seenByTrusted -> "Labels visible: trusted sighting."
+    else -> "Labels visible: ${number(cluster.distinctInstalls28d)} ≥ ${number(k)} non-trusted installs in 28 days."
+}
+
+internal fun FlowContent.statusChip(status: String) {
+    val (label, tone) = when (status) {
+        "new" -> "New" to "warn"
+        "triaged" -> "Triaged" to "neutral"
+        "drafted" -> "Drafted" to "accent"
+        "resolved" -> "Resolved" to "good"
+        "ignored" -> "Ignored" to "neutral"
+        else -> "[redacted]" to "neutral"
+    }
+    chip(label, tone)
+}
+
+private data class AlarmDisplay(val kind: String, val label: String, val tone: String, val trigger: String)
+private val alarmCatalogue = listOf(
+    AlarmDisplay("silence", "Trusted install silence", "bad", "Active trusted install: at least 48 hours without a received health batch and stored health day at least two UTC days old."),
+    AlarmDisplay("silent_rule_death", "Rule death", "bad", "At least three qualifying historical days in the preceding 28 days, median rule count ≥ 5, and a reporting day with admitted ≥ 200 but zero rule count."),
+    AlarmDisplay("rule_share_cliff", "Rule share cliff", "warn", "Rule share falls by more than 80% against the previous-version comparison day; both days need at least two reporting installs."),
+    AlarmDisplay("fleet_unknown", "UNKNOWN surge", "warn", "At least two reporting installs and UNKNOWN share ≥ 50%."),
+    AlarmDisplay("trips", "Trips reported", "warn", "Stored trip count for an accepted report exceeds zero."),
+    AlarmDisplay("new_clusters", "New cluster burst", "warn", "At least five distinct clusters first seen today for a platform/version."),
+)
+
+private fun FlowContent.alarmSection(alarms: JsonObject) = panel("alarms", "Alarms today", badge = "${number(alarms.rows("today").size)} delivered") {
+    val today = alarms.rows("today")
+    val counts = alarms.obj("counts")
+    if (today.isEmpty()) emptyState("No alarms recorded today by this process. Check reporting health below; this is not an all-clear.")
+    else dataTable("Alarms delivered by this process today · newest recorded first", listOf("Alarm", "Platform", "Version", "Install", "Rules"), today.asReversed().map { row ->
+        listOf(
+            cell {
+                val display = alarmCatalogue.find { it.kind == row.text("kind") }
+                chip(display?.label ?: "[redacted]", display?.tone ?: "neutral")
+            },
+            cell { +platform(row.text("platform")) },
+            cell { code { +validated(row.text("version"), WireGrammars.platformAppVersion) } },
+            cell { row.optionalText("installPrefix")?.let { code { +prefix(it) } } ?: run { +"Not install-specific" } },
+            blockCell {
+                val rules = row["ruleIds"] as? JsonArray ?: JsonArray(emptyList())
+                if (rules.isEmpty()) +"None" else ul("rule-list") { rules.forEach { li { code { +rule(it.jsonPrimitive.content) } } } }
+            },
+        )
+    })
+    details {
+        summary { +"Alarm catalogue and counters" }
+        p("muted") { +"Today’s records and counters are process-local. Counters reset on restart. Local delivery does not confirm email delivery. Silence timing also resets after restart." }
+        dataTable("Alarm catalogue and process counters", listOf("Alarm", "Recorded today", "Since restart", "Trigger"), alarmCatalogue.map { display ->
+            val delivered = today.count { it.text("kind") == display.kind }
+            listOf(
+                cell { chip(display.label, display.tone); code { +display.kind } },
+                cell { +if (delivered == 0) "None recorded." else "${number(delivered)} delivered" },
+                numeric(counts.count(display.kind)), cell { +display.trigger },
+            )
+        })
+        val additional = counts.keys.filter { name -> alarmCatalogue.none { it.kind == name } }.sorted()
+        if (additional.isNotEmpty()) dataTable("Additional process counters", listOf("Counter", "Since restart"), additional.map { name ->
+            listOf(cell { code { +validated(name, Regex("[a-z][a-z0-9_]{0,63}")) } }, numeric(counts.count(name)))
+        })
+    }
+}
+
+private fun FlowContent.healthSection(health: JsonObject, today: String) = panel("health", "Health, last 7 days") {
+    p("muted") { date(LocalDate.parse(today).minusDays(6).toString()); +" through "; date(today); +" UTC" }
+    val fleet = health.rows("fleet")
+    if (fleet.isEmpty()) emptyState("No fleet health reports in the last 7 UTC days.")
+    else dataTable("Fleet health · last 7 UTC days", listOf("Day", "Platform", "Version", "Reporting installs", "Admitted", "UNKNOWN", "Σ rule counts"), fleet.map { row ->
+        listOf(
+            cell { date(row.text("day")) }, cell { +platform(row.text("platform")) }, cell { code { +version(row.text("platformAppVersion")) } },
+            numeric(row.count("installsReporting")), numeric(row.count("admitted")), numeric(row.count("unknown")),
+            blockCell(num = true) {
+                val rules = row.obj("ruleCounts")
+                +number(rules.values.sumOf { it.jsonPrimitive.long })
+                if (rules.isNotEmpty()) details {
+                    summary { +"Rule counts" }
+                    ul { rules.toSortedMap().forEach { (id, value) -> li { code { +rule(id) }; +": ${number(value.jsonPrimitive.long)}" } } }
+                }
+            },
+        )
+    })
+    p("muted") { +"Reporting installs are counted per row. Σ rule counts sums rule matches; it is not a distinct-install count." }
+    val installs = health.rows("installs")
+    details {
+        summary { +"Per-install health · ${number(installs.size)} rows" }
+        if (installs.isEmpty()) emptyState("No per-install health reports in this window.")
+        else dataTable("Per-install health · last 7 UTC days", listOf("Install", "Day", "Platform", "Version", "Admitted", "UNKNOWN", "Trips"), installs.map { row ->
+            listOf(
+                cell { code { +prefix(row.text("installIdPrefix")) } }, cell { date(row.text("day")) },
+                cell { +platform(row.text("platform")) }, cell { code { +version(row.text("version")) } },
+                numeric(row.count("admitted")), numeric(row.count("unknown")),
+                cell(num = true) { val trips = row.count("trips"); if (trips > 0) chip(number(trips), "warn") else +number(trips) },
+            )
+        })
+    }
+}
+
+private fun FlowContent.ledgerSection(ledger: JsonObject, today: String) = panel("ledger", "Ledger today", headingDate = today) {
+    val totals = ledger.obj("totals")
+    dl("totals") {
+        fact("Bytes") { +"${number(totals.count("bytes"))} B" }
+        fact("Accepted") { +number(totals.count("accepted")) }
+        fact("Duplicate") { +number(totals.count("duplicate")) }
+        fact("Rejected") { rejections(totals.obj("rejected")) }
+        fact("Batches") { +number(totals.count("batches")) }
+    }
+    val installs = ledger.rows("installs")
+    if (installs.isEmpty()) emptyState("No ingest ledger entries today.")
+    details {
+        summary { +"Per-install ledger · ${number(installs.size)} rows" }
+        if (installs.isNotEmpty()) dataTable("Per-install ingest ledger · today", listOf("Install", "Bytes", "Accepted", "Duplicate", "Rejected", "Batches"), installs.map { row ->
+            listOf(
+                cell { code { +prefix(row.text("installIdPrefix")) } }, cell(num = true) { +"${number(row.count("bytes"))} B" },
+                numeric(row.count("accepted")), numeric(row.count("duplicate")), blockCell(num = true) { rejections(row.obj("rejected")) }, numeric(row.count("batches")),
+            )
+        })
+    }
+}
+
+private fun FlowContent.rejections(reasons: JsonObject) {
+    val total = reasons.values.sumOf { it.jsonPrimitive.long }
+    if (total > 0) chip(number(total), "warn") else +number(total)
+    if (reasons.isEmpty()) +" · No rejections" else ul {
+        reasons.toSortedMap().forEach { (reason, count) -> li { +"${safe(reason)}: ${number(count.jsonPrimitive.long)}" } }
+    }
+}
+
+/** Columns are explicitly mapped by callers; JSON keys never define the HTML surface. */
+// kotlinx.html 0.12 types TH as inline-only and TD as block: a row-header cell renders PHRASING content, a body
+// cell may render block content (lists, disclosures) through [blockCell].
+private class DisplayCell(val num: Boolean, val inline: (FlowOrPhrasingContent.() -> Unit)? = null, val block: (FlowContent.() -> Unit)? = null)
+private fun cell(num: Boolean = false, render: FlowOrPhrasingContent.() -> Unit) = DisplayCell(num, inline = render)
+private fun blockCell(num: Boolean = false, render: FlowContent.() -> Unit) = DisplayCell(num, block = render)
+private fun numeric(value: Number) = cell(num = true) { +number(value) }
+private fun FlowContent.dataTable(description: String, columns: List<String>, rows: List<List<DisplayCell>>) {
+    table("data-table") {
+        attributes["role"] = "table"
+        caption { +description }
+        thead {
+            attributes["role"] = "rowgroup"
+            tr { attributes["role"] = "row"; columns.forEach { th { attributes["scope"] = "col"; attributes["role"] = "columnheader"; +it } } }
+        }
+        tbody {
+            attributes["role"] = "rowgroup"
+            rows.forEach { cells -> tr {
+                attributes["role"] = "row"
+                cells.forEachIndexed { index, cell ->
+                    if (index == 0) th {
+                        attributes["scope"] = "row"; attributes["role"] = "rowheader"
+                        span("cell-label") { attributes["aria-hidden"] = "true"; +columns[index] }
+                        span("cell-value") { requireNotNull(cell.inline) { "row header cells render inline content" }.invoke(this) }
+                    } else td(classes = if (cell.num) "num" else null) {
+                        attributes["role"] = "cell"
+                        span("cell-label") { attributes["aria-hidden"] = "true"; +columns[index] }
+                        cell.inline?.let { render -> span("cell-value") { render(this) } }
+                        cell.block?.let { render -> div("cell-value") { render(this) } }
+                    }
+                }
+            } }
+        }
+    }
+}
+
+internal fun FlowOrPhrasingContent.chip(label: String, tone: String) { span("chip $tone") { +label } }
+private fun FlowOrPhrasingContent.yesChip(value: Boolean, tone: String) { if (value) chip("Yes", tone) else +"No" }
+internal fun FlowContent.emptyState(copy: String) { p("empty") { +copy } }
+internal fun FlowOrPhrasingContent.date(value: String) { time { attributes["datetime"] = safe(value); +safe(value) } }
+internal fun number(value: Number): String = String.format(Locale.ROOT, "%,d", value.toLong())
+internal val fingerprintPattern = Regex("[0-9a-f]{64}")
+internal fun safe(value: String): String = value
+    .replace(Regex("(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"), "[redacted]")
+    .replace(Regex("(?i)[0-9a-f]{16,}"), "[redacted]")
+internal fun version(value: String): String = safe(value.substringBefore('+')) + if ('+' in value) "+[build withheld]" else ""
+private fun validated(value: String, pattern: Regex): String = if (pattern.matches(value)) safe(value) else "[redacted]"
+private fun platform(value: String): String = validated(value, Regex("[a-z_][a-z0-9_]{0,31}"))
+private fun prefix(value: String): String = validated(value, Regex("[a-fA-F0-9]{8}"))
+private fun rule(value: String): String = validated(value, WireGrammars.ruleId)
+private fun JsonObject.rows(key: String): List<JsonObject> = (get(key) as? JsonArray).orEmpty().map { it.jsonObject }
+private fun JsonObject.obj(key: String): JsonObject = get(key) as? JsonObject ?: JsonObject(emptyMap())
+private fun JsonObject.optionalText(key: String): String? = (get(key) as? JsonPrimitive)?.contentOrNull
+private fun JsonObject.text(key: String): String = optionalText(key) ?: "Not recorded"
+private fun JsonObject.count(key: String): Long = (get(key) as? JsonPrimitive)?.long ?: 0L
+private fun JsonObject.flag(key: String): Boolean = (get(key) as? JsonPrimitive)?.boolean ?: false
