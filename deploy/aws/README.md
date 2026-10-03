@@ -306,6 +306,47 @@ The workflow serializes production deployments and acquires `/var/lib/census-dat
 
 SSM `AWS-RunShellScript` runs as root. Protect trusted repository refs and workflow edits accordingly; the narrowly scoped AWS role still has administrative access to this one host.
 
+### Compose-only refresh (memory limits, service options)
+
+The image workflow never refreshes `docker-compose.yml`, and the host's cloud-init is frozen, so a reviewed change to the committed Compose file (for example the #1179 memory limits) is applied with one SSM command from the workstation. The S6b upgrade command above also refreshes the Compose file (and the host scripts, units and override); use this lighter one when only service options changed. It fetches the file at the reviewed ref, pins the image the **running** census container uses (not the file's, which a deploy that failed between its sed and its `up` can leave ahead of the container), validates the merged configuration against the host override under the deploy lock, and recreates every service whose definition changed — for the limits change that is all three, so Caddy's public listener blips for a second or two and census/postgres restart (the app pool reconnects); `pgdata` is a bind to the data volume and is untouched. To roll back, re-run with the previous ref; if census is not running (the command refuses before touching anything in that case), use the S6b upgrade command with the previous ref instead.
+
+Run from `deploy/aws` in a subshell (the block uses `set -e`; do not paste it bare into an interactive shell):
+
+```bash
+( set -euo pipefail
+export AWS_DEFAULT_REGION="$(terraform output -raw region)" AWS_PAGER=''
+CENSUS_COMPOSE_REF='main'   # the reviewed branch/tag
+[[ "$CENSUS_COMPOSE_REF" =~ ^[A-Za-z0-9_][A-Za-z0-9_./-]*$ ]] || { echo 'Invalid compose ref' >&2; exit 1; }
+script=$(cat <<'EOS'
+set -euo pipefail
+cd /opt/census
+mapfile -t ids < <(docker compose ps -q census)
+[[ ${#ids[@]} -eq 1 ]] || { echo "expected exactly one running census container, found ${#ids[@]}; use the S6b upgrade command" >&2; exit 1; }
+image=$(docker inspect --format '{{.Config.Image}}' "${ids[0]}")
+git -C /opt/census-src fetch --depth 1 origin -- "$CENSUS_COMPOSE_REF"
+git -C /opt/census-src show FETCH_HEAD:deploy/compose/docker-compose.yml > docker-compose.yml.new
+sed -i "/^    census:/,/^    [a-zA-Z0-9_-]*:/s#^\([[:space:]]*image:[[:space:]]*\).*#\1$image#" docker-compose.yml.new
+docker compose -f docker-compose.yml.new -f docker-compose.override.yml config --quiet
+mv docker-compose.yml.new docker-compose.yml
+docker compose up -d --wait --wait-timeout 180
+deadline=$((SECONDS + 60))
+ready=false
+while remaining=$((deadline - SECONDS)); (( remaining > 0 )); do
+    if timeout "$remaining"s docker compose exec -T census wget -qO- http://127.0.0.1:8080/readyz; then ready=true; break; fi
+    (( SECONDS < deadline )) && sleep 1
+done
+[[ "$ready" == true ]] || { echo 'CENSUS: readiness timed out' >&2; docker compose logs --tail=50 census; exit 1; }
+echo
+docker stats --no-stream --format '{{.Name}}\t{{.MemUsage}}'
+EOS
+)
+aws ssm send-command --instance-ids "$(terraform output -raw instance_id)" --document-name AWS-RunShellScript \
+  --parameters "$(python3 -c 'import json,shlex,sys; print(json.dumps({"commands":["mountpoint -q /var/lib/census-data && flock -w 600 /var/lib/census-data/.deploy.lock env CENSUS_COMPOSE_REF="+shlex.quote(sys.argv[1])+" bash -c "+shlex.quote(sys.argv[2])],"executionTimeout":["900"]}))' "$CENSUS_COMPOSE_REF" "$script")" \
+  --query Command.CommandId --output text )
+```
+
+Poll `aws ssm get-command-invocation` for the result; `docker stats` must show each container's limit (`/ 704MiB`, `/ 320MiB`, `/ 96MiB`) rather than the host total. That proves the limits are installed, not that peak usage is safe — the memory alarm is the backstop for that.
+
 ## Restore drill / disaster recovery
 
 Run a drill on a new isolated recovery box provisioned with this cloud-init, or perform these steps on the replacement box before moving DNS. Keep the original box/data until the restored system passes verification. The host role can upload/list backups but deliberately cannot read or delete them; use the operator's SSO identity to select and download a backup. On the workstation:
