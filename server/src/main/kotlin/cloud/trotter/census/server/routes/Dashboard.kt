@@ -6,6 +6,7 @@ import cloud.trotter.census.server.db.OpsStore
 import cloud.trotter.census.server.jobs.HealthAlarms
 import cloud.trotter.census.server.ops.ClusterDetailHtml
 import cloud.trotter.census.server.ops.DashboardHtml
+import cloud.trotter.census.server.ops.fingerprintPattern
 import cloud.trotter.census.server.today
 import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
@@ -25,7 +26,7 @@ fun Route.dashboardRoute(store: OpsStore, alarms: HealthAlarms, clock: Clock, po
     }
     get("/clusters/{fingerprint}/view") {
         val fingerprint = call.parameters["fingerprint"]
-        val cluster = if (fingerprint != null && Regex("[0-9a-f]{64}").matches(fingerprint)) store.cluster(fingerprint) else null
+        val cluster = if (fingerprint != null && fingerprintPattern.matches(fingerprint)) store.cluster(fingerprint) else null
         val html = ClusterDetailHtml.render(policy.serverVersion, policy.k, clock.today().toString(), cluster)
         call.response.headers.append("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'")
         call.respondText(html, ContentType.Text.Html, if (cluster == null) HttpStatusCode.NotFound else HttpStatusCode.OK)

@@ -49,6 +49,12 @@ class DashboardRenderTest {
             Regex("<section[^>]*id=\"([^\"]+)\"").findAll(page).map { it.groupValues[1] }.toList())
         val metrics = page.substringAfter("aria-label=\"Snapshot\"").substringBefore("</nav>")
         assertEquals(listOf("alarms", "health", "ledger", "vocabulary"), Regex("href=\"#([^\"]+)\"").findAll(metrics).map { it.groupValues[1] }.toList())
+        val metricValues = Regex("href=\"#([^\"]+)\" class=\"metric\">.*?<span class=\"metric-value(?: date)?\">(.*?)</span>", RegexOption.DOT_MATCHES_ALL)
+            .findAll(metrics).associate { it.groupValues[1] to it.groupValues[2] }
+        assertEquals("0", metricValues["alarms"])
+        assertEquals("No reports", metricValues["health"])
+        assertEquals("0", metricValues["ledger"])
+        assertEquals("0", metricValues["vocabulary"])
         assertEquals(2, Regex(">Cluster 01</a>").findAll(page).count())
         assertEquals(1, Regex(">Cluster 02</a>").findAll(page).count())
         assertTrue(page.contains("Labels visible: trusted sighting."))
@@ -85,12 +91,12 @@ class DashboardRenderTest {
     @Test
     fun `explicit tables retain rows rules rejection reasons counters and grouped integers`() {
         val alarms = obj("""{"today":[
-            {"kind":"silence","platform":"doordash","version":"8.0","ruleIds":[]},
+            {"kind":"silence","platform":"_unknown","version":"unknown","ruleIds":[]},
             {"kind":"trips","platform":"doordash","version":"8.10","installPrefix":"abcd1234","ruleIds":["doordash.z","doordash.a","doordash.z"]}],
             "counts":{"trips":12480,"delivery_failed":2}}""")
         val health = obj("""{"fleet":[
-            {"day":"2026-10-02","platform":"doordash","platformAppVersion":"8.10","installsReporting":2,"admitted":12480,"unknown":10,"ruleCounts":{"doordash.z":240,"doordash.a":1000}},
-            {"day":"2026-10-01","platform":"doordash","platformAppVersion":"8.0","installsReporting":1,"admitted":100,"unknown":0,"ruleCounts":{}}],
+            {"day":"2026-10-01","platform":"doordash","platformAppVersion":"8.0","installsReporting":1,"admitted":100,"unknown":0,"ruleCounts":{}},
+            {"day":"2026-10-02","platform":"doordash","platformAppVersion":"8.10","installsReporting":2,"admitted":12480,"unknown":10,"ruleCounts":{"doordash.z":240,"doordash.a":1000}}],
             "installs":[{"installIdPrefix":"abcd1234","day":"2026-10-02","platform":"doordash","version":"8.10","admitted":12480,"unknown":10,"trips":1}]}""")
         val installs = Json.parseToJsonElement("""[
             {"installIdPrefix":"abcd1234","createdDay":"2026-10-01","lastSeenDay":"2026-10-02","trusted":true,"revoked":false,"attested":true,"lastAppVersion":"1.2.3+abc1234"},
@@ -107,10 +113,33 @@ class DashboardRenderTest {
         assertTrue(page.indexOf("a_reason: 1") < page.indexOf("z_reason: 4"))
         for (copy in listOf("12,480 B", "1,240", "Queue entries · 2 shown of 12,480", "Install records · 2 shown", "delivery_failed", "Not install-specific", "1.2.3+[build withheld]")) assertTrue(page.contains(copy), copy)
         assertEquals(2, Regex(">words:2</span>").findAll(page).count())
+        val populatedMetrics = page.substringAfter("aria-label=\"Snapshot\"").substringBefore("</nav>")
+        val populatedValues = Regex("href=\"#([^\"]+)\" class=\"metric\">.*?<span class=\"metric-value(?: date)?\">(.*?)</span>", RegexOption.DOT_MATCHES_ALL)
+            .findAll(populatedMetrics).associate { it.groupValues[1] to it.groupValues[2] }
+        assertEquals("2", populatedValues["alarms"])
+        assertTrue(requireNotNull(populatedValues["health"]).contains("datetime=\"2026-10-02\""), populatedValues["health"])
+        assertEquals("1,240", populatedValues["ledger"])
+        assertEquals("12,480", populatedValues["vocabulary"])
+        assertTrue(page.contains("Not recorded"))
+        assertFalse(page.contains("[redacted]"))
+        var bodyCells = 0
         for (table in Regex("<table\\b.*?</table>", RegexOption.DOT_MATCHES_ALL).findAll(page)) {
             val html = table.value
-            for (expected in listOf("<caption>", "role=\"table\"", "scope=\"col\"", "scope=\"row\"", "class=\"cell-label\"", "class=\"cell-value\"")) assertTrue(html.contains(expected), expected)
+            for (expected in listOf("<caption>", "role=\"table\"", "scope=\"col\"", "scope=\"row\"")) assertTrue(html.contains(expected), expected)
+            val columns = Regex("<th scope=\"col\" role=\"columnheader\">(.*?)</th>").findAll(html).map { it.groupValues[1] }.toList()
+            assertTrue(columns.isNotEmpty(), "every table declares its columns")
+            val body = html.substringAfter("<tbody").substringBefore("</tbody>")
+            for (row in Regex("<tr\\b.*?</tr>", RegexOption.DOT_MATCHES_ALL).findAll(body)) {
+                val cells = Regex("<t[hd]\\b.*?</t[hd]>", RegexOption.DOT_MATCHES_ALL).findAll(row.value).toList()
+                assertEquals(columns.size, cells.size, "every body row carries one cell per column")
+                cells.forEachIndexed { index, cell ->
+                    bodyCells++
+                    assertTrue(cell.value.contains("<span class=\"cell-label\" aria-hidden=\"true\">${columns[index]}</span>"), cell.value)
+                    assertTrue(cell.value.contains("class=\"cell-value\""), cell.value)
+                }
+            }
         }
+        assertTrue(bodyCells > 20, "body cells inspected: $bodyCells")
         assertPrivate(page)
     }
 

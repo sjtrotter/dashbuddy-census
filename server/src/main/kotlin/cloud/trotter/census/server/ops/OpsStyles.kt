@@ -9,7 +9,7 @@ object OpsStyles {
   --line:rgba(255,255,255,.08); --line-strong:rgba(255,255,255,.16);
   --text:#EEF3F7; --text2:#AAB6C2; --text3:#6B7886;
   --accent:#46E0C8; --accent-dim:#1F4D49; --accent-text:#052B27;
-  --good:#3DDC84; --warn:#FFC24B; --bad:#FF5D5D; --neutral:#8B97A4;
+  --good:#3DDC84; --warn:#FFC24B; --bad:#FF6B6B; --neutral:#93A0AD;
   --good-bg:rgba(61,220,132,.14); --warn-bg:rgba(255,194,75,.14);
   --bad-bg:rgba(255,93,93,.14); --neutral-bg:rgba(139,151,164,.14);
   --body-font:system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;
@@ -137,6 +137,7 @@ caption { text-align:left; padding:0 0 .75rem; font-size:.875rem; }
   .data-table tbody tr + tr { margin-top:.75rem; }
   .data-table tbody th,.data-table tbody td { display:grid; grid-template-columns:minmax(0,2fr) minmax(0,3fr); gap:.75rem; padding:.35rem 0; border:0; text-align:left; }
   .cell-label { display:block; font-family:var(--body-font); font-size:.875rem; font-weight:400; }
+  .data-table .num .cell-label { text-align:left; }
   .data-table .num .cell-value { text-align:right; }
   .tree-wrap { padding:.5rem; }
   .node-line { max-width:100%; }

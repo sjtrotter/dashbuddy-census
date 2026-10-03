@@ -295,7 +295,12 @@ private fun FlowContent.alarmSection(alarms: JsonObject) = panel("alarms", "Alar
                 chip(display?.label ?: "[redacted]", display?.tone ?: "neutral")
             },
             cell { +platform(row.text("platform")) },
-            cell { code { +validated(row.text("version"), WireGrammars.platformAppVersion) } },
+            cell {
+                // HealthStore's silence alarm for an install that never reported carries the literal `unknown`
+                // sentinel: a missing value, not a privacy event, so it must not read as "[redacted]".
+                val version = row.text("version")
+                if (version == "unknown" || version == "_unknown") +"Not recorded" else code { +validated(version, WireGrammars.platformAppVersion) }
+            },
             cell { row.optionalText("installPrefix")?.let { code { +prefix(it) } } ?: run { +"Not install-specific" } },
             blockCell {
                 val rules = row["ruleIds"] as? JsonArray ?: JsonArray(emptyList())
