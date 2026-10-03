@@ -86,18 +86,22 @@ The silence clock uses a process-local map of install IDs to server receipt inst
 delivered alarms, ranked clusters and rendered samples, seven days of fleet health, install
 prefixes, today's ledger, and vocabulary queue count. Its only form is the logout control; it has
 no JavaScript or embedded operator credential. Its CSP is
-`default-src 'none'; style-src 'unsafe-inline'; form-action 'self'`.
+`default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'`.
 
 For a browser, open `GET /ops/login` and enter the operator token and the authenticator's
-6-digit code. The token is the same bearer value, never stored in the browser beyond the form
-submit. Success sets `census_ops` with `HttpOnly; Secure; SameSite=Strict; Path=/ops`, a 12-hour
+6-digit code. The token is the same bearer value; the server never echoes it and the cookie never carries it —
+decline the browser's offer to save it (`autocomplete=off` is only advisory). Success sets `census_ops` with `HttpOnly; Secure; SameSite=Strict; Path=/ops`, a 12-hour
 lifetime and a 1-hour idle timeout. There is ONE active session: a new login elsewhere logs the
 old browser out, and a process restart loses the session. Reads accept the cookie or
 `Authorization: Bearer <operator token>`; mutations still need a fresh `X-Census-Totp` header
 (the cookie never carries the second factor forward). `POST /ops/logout` ends the session and
 expires the cookie; it requires authentication but no TOTP. A wrong token never consumes a code.
 Login and mutations share the same 90-second replay memory, and login shares the 60/minute ops
-bucket. Login pages use the same CSP and `Cache-Control: no-store`.
+bucket. A browser `GET` under `/ops` without a valid session is redirected to
+`/ops/login` (API callers without `Accept: text/html` keep the JSON `401`). Every authenticated
+`/ops` response and both pages carry `Cache-Control: no-store`, so nothing renders from a cache after
+logout, and both pages send `frame-ancestors 'none'`; a malformed percent-escape anywhere in a query,
+cookie or form is a `400`, never a `500`.
 
 Except for `GET /ops/login` and `POST /ops/login`, `/ops/*` endpoints require a valid bearer or
 session cookie. An explicit wrong Authorization header is refused even with a valid cookie.

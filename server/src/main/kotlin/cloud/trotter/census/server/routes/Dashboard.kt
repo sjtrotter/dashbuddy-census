@@ -18,7 +18,7 @@ fun Route.dashboardRoute(store: OpsStore, alarms: HealthAlarms, clock: Clock, po
             policy.serverVersion, policy.k, clock.today().toString(), opsAlarms(alarms),
             store.clusters(includeSamples = true), store.health(), store.installs(), store.ledger(), store.vocabularyQueueCount(),
         )
-        call.response.headers.append("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'")
+        call.response.headers.append("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'")
         call.respondText(html, ContentType.Text.Html)
     }
 }

@@ -44,7 +44,7 @@ class OpsLoginTest {
         val response = client.get("/ops/login")
         assertEquals(200, response.status.value)
         assertEquals(ContentType.Text.Html, response.contentType()?.withoutParameters())
-        assertEquals("default-src 'none'; style-src 'unsafe-inline'; form-action 'self'", response.headers["Content-Security-Policy"])
+        assertEquals("default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'", response.headers["Content-Security-Policy"])
         assertEquals("no-store", response.headers[HttpHeaders.CacheControl])
         val page = response.bodyAsText()
         for (expected in listOf("<title>census · sign in</title>", "<form", "action=\"/ops/login\"", "method=\"post\"", "name=\"token\"", "name=\"code\"", "autocomplete=\"off\"", "autocomplete=\"one-time-code\"", "pattern=\"[0-9]{6}\"", "maxlength=\"256\"", "maxlength=\"6\"")) {
@@ -153,7 +153,8 @@ class OpsLoginTest {
     @Test
     fun `oversized forms invalid fields and other content types are rejected`() = testApplication {
         application { module(config(), db = null, clock = clock) }
-        for (body in listOf("x".repeat(5000), "code=123456", "token=x", "token=${"a".repeat(257)}&code=123456", "token=x&code=12345", "token=x&code=abcdef")) {
+        // "%ZZ" and a trailing "%" raise Ktor's checked URLDecodeException: a 400, never a 500 whose message embeds the body.
+        for (body in listOf("x".repeat(5000), "code=123456", "token=x", "token=${"a".repeat(257)}&code=123456", "token=x&code=12345", "token=x&code=abcdef", "token=%ZZ&code=123456", "token=abc%")) {
             assertError(client.post("/ops/login") {
                 contentType(ContentType.Application.FormUrlEncoded)
                 setBody(body)
@@ -168,10 +169,45 @@ class OpsLoginTest {
     @Test
     fun `login exemption is restricted to the exact path and GET or POST`() = testApplication {
         application { module(config(), db = null, clock = clock) }
-        for (path in listOf("/ops/login/extra", "/ops/logout", "/ops/unknown")) {
+        for (path in listOf("/ops/login/extra", "/ops/logout", "/ops/unknown", "/ops/login/", "/ops/%6Cogin")) {
             assertError(client.get(path), 401, "unauthorized")
         }
-        assertError(client.request("/ops/login") { method = HttpMethod.Put }, 401, "unauthorized")
+        for (method in listOf(HttpMethod.Put, HttpMethod.Head, HttpMethod.Options)) {
+            assertEquals(401, client.request("/ops/login") { this.method = method }.status.value, method.value)
+        }
+        // A malformed cookie value is a 400, not a 500 carrying the cookie in an exception message.
+        assertError(client.get("/ops/clusters") { header(HttpHeaders.Cookie, "census_ops=%ZZ") }, 400, "bad_request")
+    }
+
+    @Test
+    fun `a browser without a session is sent to the form while API callers get the JSON 401 and reads are never cached`() = testApplication {
+        application { module(config(), db = null, clock = clock) }
+        val browser = createClient { followRedirects = false }
+        val redirect = browser.get("/ops/") { header(HttpHeaders.Accept, "text/html,application/xhtml+xml") }
+        assertEquals(303, redirect.status.value)
+        assertEquals("/ops/login", redirect.headers[HttpHeaders.Location])
+        assertEquals("no-store", redirect.headers[HttpHeaders.CacheControl])
+        assertError(browser.get("/ops/clusters"), 401, "unauthorized")
+        // A wrong bearer is a refusal even for an HTML client: never a redirect, never a cookie (the JSON error body
+        // meets ContentNegotiation's 406 for a text/html Accept — either way, no 303 and no Location).
+        val wrongBearer = browser.get("/ops/") { header(HttpHeaders.Authorization, "Bearer WRONG"); header(HttpHeaders.Accept, "text/html") }
+        assertTrue(wrongBearer.status.value in setOf(401, 406), wrongBearer.status.toString())
+        assertNull(wrongBearer.headers[HttpHeaders.Location])
+        assertNull(wrongBearer.headers[HttpHeaders.SetCookie])
+        val cookie = assertSessionCookie(browser.login())
+        val read = browser.get("/ops/clusters") { header(HttpHeaders.Cookie, cookie) }
+        assertEquals("no-store", read.headers[HttpHeaders.CacheControl])
+        // An expired session through HTTP: the form is served, no redirect to the dashboard.
+        instant = instant.plusSeconds(61 * 60)
+        val form = browser.get("/ops/login") { header(HttpHeaders.Cookie, cookie) }
+        assertEquals(200, form.status.value)
+        assertError(browser.get("/ops/clusters") { header(HttpHeaders.Cookie, cookie) }, 401, "unauthorized")
+        // A bearer caller can revoke the browser session; the success redirect carries no-store too.
+        val fresh = browser.login()
+        assertEquals("no-store", fresh.headers[HttpHeaders.CacheControl])
+        val freshCookie = assertSessionCookie(fresh)
+        assertEquals(303, browser.post("/ops/logout") { header(HttpHeaders.Authorization, "Bearer $token") }.status.value)
+        assertError(browser.get("/ops/clusters") { header(HttpHeaders.Cookie, freshCookie) }, 401, "unauthorized")
     }
 
     @Test

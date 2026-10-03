@@ -99,6 +99,11 @@ fun Application.module(config: Config, db: Database?, clock: Clock = SystemClock
         exception<BadRequestException> { call, _ ->
             call.respond(HttpStatusCode.BadRequest, ErrorResponse("bad_request"))
         }
+        // A malformed percent-escape in a query, cookie or form raises Ktor's checked URLDecodeException, whose
+        // message embeds the whole input (an operator token in a login form): answer 400, never the generic 500.
+        exception<io.ktor.http.URLDecodeException> { call, _ ->
+            call.respond(HttpStatusCode.BadRequest, ErrorResponse("bad_request"))
+        }
         exception<Throwable> { call, failure ->
             if (failure is CancellationException) throw failure
             call.respond(HttpStatusCode.InternalServerError, ErrorResponse("internal_error"))

@@ -139,7 +139,7 @@ class OpsRoutesTest {
                     assertEquals(visible, detail.contains("android.widget.$label"))
                 }
                 val page = client.ops("/ops/")
-                assertEquals("default-src 'none'; style-src 'unsafe-inline'; form-action 'self'", page.headers["Content-Security-Policy"])
+                assertEquals("default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'", page.headers["Content-Security-Policy"])
                 val html = page.bodyAsText()
                 assertTrue(html.contains("android.widget.Eligible"))
                 assertTrue(html.contains("android.widget.Trusted"))

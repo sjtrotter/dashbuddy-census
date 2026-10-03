@@ -165,7 +165,7 @@ fun Route.opsRoutes(
 }
 
 private fun ApplicationCall.loginHeaders() {
-    response.headers.append("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'")
+    response.headers.append("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'")
     response.headers.append(HttpHeaders.CacheControl, "no-store")
 }
 

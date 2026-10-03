@@ -22,14 +22,14 @@ class OpsAuthConfig {
     var config: Config? = null
     var clock: Clock = SystemClock
     var sessions: OpsSessions? = null
-    var replay: TotpReplay = TotpReplay()
+    var replay: TotpReplay? = null
 }
 
 val OpsAuth = createRouteScopedPlugin("OpsAuth", ::OpsAuthConfig) {
     val config = requireNotNull(pluginConfig.config)
     val clock = pluginConfig.clock
     val sessions = requireNotNull(pluginConfig.sessions)
-    val replay = pluginConfig.replay
+    val replay = requireNotNull(pluginConfig.replay) { "OpsAuth needs the TotpReplay shared with the login route" }
     val bucket = OpsBucket()
     onCall { call ->
         if (call.isHandled) return@onCall
@@ -53,9 +53,18 @@ val OpsAuth = createRouteScopedPlugin("OpsAuth", ::OpsAuthConfig) {
             sessions.validate(call.request.cookies["census_ops"], clock.now())
         }
         if (!authenticated) {
-            call.respond(HttpStatusCode.Unauthorized, ErrorResponse("unauthorized"))
+            // A browser landing on /ops without a session is sent to the form; API callers keep the JSON 401.
+            if (header == null && method == HttpMethod.Get && call.request.headers[HttpHeaders.Accept]?.contains("text/html") == true) {
+                call.response.headers.append(HttpHeaders.CacheControl, "no-store")
+                call.response.headers.append(HttpHeaders.Location, "/ops/login")
+                call.respond(HttpStatusCode.SeeOther)
+            } else {
+                call.respond(HttpStatusCode.Unauthorized, ErrorResponse("unauthorized"))
+            }
             return@onCall
         }
+        // Everything an authenticated operator reads may now render in a browser: never cache it past logout.
+        call.response.headers.append(HttpHeaders.CacheControl, "no-store")
         if (method.value !in setOf("GET", "HEAD", "OPTIONS") && !(path == "/ops/logout" && method == HttpMethod.Post)) {
             val secret = config.operatorTotpSecret
             if (secret == null) {
