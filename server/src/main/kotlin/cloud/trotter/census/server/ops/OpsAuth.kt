@@ -6,6 +6,7 @@ import cloud.trotter.census.server.ErrorResponse
 import cloud.trotter.census.server.SystemClock
 import cloud.trotter.census.server.auth.hashSecret
 import io.ktor.http.HttpHeaders
+import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.createApplicationPlugin
 import io.ktor.server.application.createRouteScopedPlugin
@@ -20,12 +21,15 @@ import java.security.MessageDigest
 class OpsAuthConfig {
     var config: Config? = null
     var clock: Clock = SystemClock
+    var sessions: OpsSessions? = null
+    var replay: TotpReplay = TotpReplay()
 }
 
 val OpsAuth = createRouteScopedPlugin("OpsAuth", ::OpsAuthConfig) {
     val config = requireNotNull(pluginConfig.config)
     val clock = pluginConfig.clock
-    val replay = TotpReplay()
+    val sessions = requireNotNull(pluginConfig.sessions)
+    val replay = pluginConfig.replay
     val bucket = OpsBucket()
     onCall { call ->
         if (call.isHandled) return@onCall
@@ -37,16 +41,22 @@ val OpsAuth = createRouteScopedPlugin("OpsAuth", ::OpsAuthConfig) {
             call.respond(HttpStatusCode.TooManyRequests, ErrorResponse("rate_limited"))
             return@onCall
         }
+        val path = call.request.path()
+        val method = call.request.httpMethod
+        if (path == "/ops/login" && method in setOf(HttpMethod.Get, HttpMethod.Post)) return@onCall
         val header = call.request.headers[HttpHeaders.Authorization]
         val token = header?.takeIf { it.startsWith("Bearer ", ignoreCase = true) }?.substring(7)
-        if (token.isNullOrEmpty() || !MessageDigest.isEqual(
-                hashSecret(token).toByteArray(Charsets.US_ASCII), config.operatorTokenSha256.toByteArray(Charsets.US_ASCII),
-            )
-        ) {
+        // An explicit bad Authorization header must never fall back to a session cookie.
+        val authenticated = if (header != null) {
+            !token.isNullOrEmpty() && config.operatorTokenMatches(token)
+        } else {
+            sessions.validate(call.request.cookies["census_ops"], clock.now())
+        }
+        if (!authenticated) {
             call.respond(HttpStatusCode.Unauthorized, ErrorResponse("unauthorized"))
             return@onCall
         }
-        if (call.request.httpMethod.value !in setOf("GET", "HEAD", "OPTIONS")) {
+        if (method.value !in setOf("GET", "HEAD", "OPTIONS") && !(path == "/ops/logout" && method == HttpMethod.Post)) {
             val secret = config.operatorTotpSecret
             if (secret == null) {
                 call.respond(HttpStatusCode.ServiceUnavailable, ErrorResponse("totp_unconfigured"))
@@ -61,12 +71,17 @@ val OpsAuth = createRouteScopedPlugin("OpsAuth", ::OpsAuthConfig) {
     }
 }
 
+/** Shared constant-time token verification for bearer requests and the login form. */
+internal fun Config.operatorTokenMatches(token: String): Boolean = MessageDigest.isEqual(
+    hashSecret(token).toByteArray(Charsets.US_ASCII), operatorTokenSha256.toByteArray(Charsets.US_ASCII),
+)
+
 internal fun isOpsPath(path: String): Boolean = path == "/ops" || path.startsWith("/ops/")
 
 /** Unknown first segments are also suppressed: an arbitrary path segment can itself be a credential. */
 internal fun opsLogPath(path: String): String {
     val segment = path.removePrefix("/ops").trimStart('/').substringBefore('/')
-    return if (segment in setOf("clusters", "installs", "health", "alarms", "ledger", "vocabulary")) "/ops/$segment" else "/ops"
+    return if (segment in setOf("clusters", "installs", "health", "alarms", "ledger", "vocabulary", "login", "logout")) "/ops/$segment" else "/ops"
 }
 
 /** Application scope includes routing failures; CallLogging excludes these to produce exactly one INFO line. */

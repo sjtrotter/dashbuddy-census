@@ -8,6 +8,7 @@ import cloud.trotter.census.server.ops.SkeletonRender
 import cloud.trotter.census.server.ops.SkeletonRenderTest
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
@@ -26,7 +27,10 @@ class DashboardRenderTest {
         val withoutLinks = page.replace(Regex("href=\"/ops/clusters/[0-9a-f]{64}\""), "")
         assertFalse(Regex("[0-9a-f]{16}").containsMatchIn(withoutLinks))
         assertFalse(Regex("[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}").containsMatchIn(page))
-        for (forbidden in listOf("android.widget", "com.example:id/action", "OPERATOR_TOKEN_SENTINEL", "<form", "<script")) assertFalse(page.contains(forbidden))
+        for (forbidden in listOf("android.widget", "com.example:id/action", "OPERATOR_TOKEN_SENTINEL", "<script")) assertFalse(page.contains(forbidden))
+        assertEquals(1, Regex("<form\\b").findAll(page).count())
+        assertTrue(page.contains("action=\"/ops/logout\""))
+        assertTrue(page.contains("method=\"post\""))
         assertTrue(page.contains("9 installs"))
         assertTrue(page.contains("12 sightings"))
         assertTrue(page.contains("new with version"))

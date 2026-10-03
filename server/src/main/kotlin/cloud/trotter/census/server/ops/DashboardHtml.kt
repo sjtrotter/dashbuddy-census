@@ -1,10 +1,13 @@
 package cloud.trotter.census.server.ops
 
 import cloud.trotter.census.server.db.OpsClusterGroup
+import kotlinx.html.FormMethod
 import kotlinx.html.FlowContent
 import kotlinx.html.a
 import kotlinx.html.body
+import kotlinx.html.button
 import kotlinx.html.div
+import kotlinx.html.form
 import kotlinx.html.h1
 import kotlinx.html.h2
 import kotlinx.html.h3
@@ -30,7 +33,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import java.time.LocalDate
 import java.time.temporal.ChronoUnit
 
-/** Pure read-only HTML. Only cluster link destinations contain fingerprints. */
+/** Read-only operator data with a logout control. Only cluster link destinations contain fingerprints. */
 object DashboardHtml {
     fun render(
         serverVersion: String,
@@ -50,6 +53,7 @@ object DashboardHtml {
             style { unsafe { raw("body{font-family:system-ui;margin:2rem;max-width:90rem}table{border-collapse:collapse}td,th{padding:.4rem;text-align:left;border-bottom:1px solid #ccc}.badge{padding:.15rem .4rem;background:#eee;border-radius:.3rem}li{margin:.4rem 0}") } }
         }
         body {
+            form(action = "/ops/logout", method = FormMethod.post) { button { +"Log out" } }
             h1 { +"Census operator" }
             p { +"Server ${safe(serverVersion)} · k=$k · ${safe(today)}" }
             h2 { +"Alarms today" }
