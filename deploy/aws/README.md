@@ -51,7 +51,7 @@ Cloud-init installs Docker from Docker's arm64 apt repository, AWS CLI v2, the C
 
 ## Data durability
 
-The encrypted gp3 data volume has `prevent_destroy = true` and mounts by UUID at `/var/lib/census-data`. PostgreSQL uses `/var/lib/census-data/pgdata`; local dumps use `/var/lib/census-data/backups`. Rebuilding the instance re-attaches this same volume in the same AZ. Terraform refuses to destroy it, and the disposable root volume holds no durable database data. Within this instance-replacement lifecycle, the only way to lose the retained volume is to delete it by hand or delete the account; backups in S3 are the second copy for recovery from database corruption or accidental data deletion.
+The encrypted gp3 data volume has `prevent_destroy = true` and mounts by UUID at `/var/lib/census-data`. PostgreSQL uses `/var/lib/census-data/pgdata`; local dumps use `/var/lib/census-data/backups`; pending alarm copies use `/var/lib/census-data/alarms` (0700, uid/gid 10001). Rebuilding the instance re-attaches this same volume in the same AZ. Terraform refuses to destroy it, and the disposable root volume holds no durable database data. Within this instance-replacement lifecycle, the only way to lose the retained volume is to delete it by hand or delete the account; backups in S3 are the second copy for recovery from database corruption or accidental data deletion.
 
 The instance ignores changes to its AMI and user data (including the base64 template attribute), so a new Canonical "current" AMI or a changed template never replaces the box by itself. Host patching uses `unattended-upgrades`. To deliberately rebuild with the current AMI and template, take and verify a fresh backup, then run from `deploy/aws` with your usual variable settings:
 
@@ -63,7 +63,7 @@ This stops the old instance before detaching the data volume and re-attaches it 
 
 ## 3. Set parameters and resume startup
 
-The two SecureStrings use the AWS-managed `aws/ssm` key; the instance has scoped SSM reads and `kms:Decrypt` only on that key ARN, resolved through `alias/aws/ssm`, with no customer KMS key or broad KMS grant. Terraform creates placeholders and ignores later value changes. ACME email is an operator-owned String; `public_host` is a String continuously managed from `var.public_host`.
+The three SecureStrings use the AWS-managed `aws/ssm` key; the instance has scoped SSM reads and `kms:Decrypt` only on that key ARN, resolved through `alias/aws/ssm`, with no customer KMS key or broad KMS grant. Terraform creates placeholders and ignores later value changes. ACME email is an operator-owned String; `public_host` is a String continuously managed from `var.public_host`, and `alerts_topic_arn` is a String managed from the existing SNS topic. The optional TOTP secret is provisioned below.
 
 Run on the workstation (adjust the prefix if customized; disable shell tracing):
 
@@ -86,7 +86,169 @@ aws ssm put-parameter --name /dashbuddy-census/operator_token_sha256 \
 unset OPERATOR_TOKEN TOKEN_SHA256
 ```
 
-The host writes a root-owned 0600 `.env` atomically, never logs secret values, and refuses missing/placeholder parameters. Database passwords must use the documented base64 format (letters, digits, `+ / = _ -`); token hashes must have 64 hex digits. `POSTGRES_PASSWORD` and `DATABASE_PASSWORD` get the same value. Changing the SSM database password does not rotate an existing PostgreSQL role: coordinate the database password change before recreating containers.
+The host writes a root-owned 0600 `.env` atomically, never logs secret values, and refuses missing/placeholder **required** parameters (`public_host`, `acme_email`, `postgres_password`, `operator_token_sha256`). Database passwords must use the documented base64 format (letters, digits, `+ / = _ -`); token hashes must have 64 hex digits. `POSTGRES_PASSWORD` and `DATABASE_PASSWORD` get the same value. Changing the SSM database password does not rotate an existing PostgreSQL role: coordinate the database password change before recreating containers.
+
+## Operator second factor + alarm delivery
+
+1. Generate the TOTP secret **locally**, with shell tracing disabled. Retain it in the password manager and in `~/dashbuddy/secrets/census-operator-totp` with mode 0600. Generate only once; rotation requires enrolling the replacement and restarting the service.
+
+   ```sh
+   umask 077
+   mkdir -p ~/dashbuddy/secrets
+   (set -C; python3 -c 'import secrets,base64; print(base64.b32encode(secrets.token_bytes(20)).decode())' > ~/dashbuddy/secrets/census-operator-totp)
+   chmod 0600 ~/dashbuddy/secrets/census-operator-totp
+   ```
+
+   Enrol the retained secret in an authenticator using this URI (substitute privately; this is text, not a request to a website):
+
+   ```text
+   otpauth://totp/dashbuddy-census:operator?secret=<SECRET>&issuer=dashbuddy-census&algorithm=SHA1&digits=6&period=30
+   ```
+
+   A local QR is optional via `qrencode -t ANSIUTF8`; treat the URI and QR as the secret itself. Never paste them into tickets, logs, or an SSM command. After step 2 creates the placeholder, store the retained secret from the workstation:
+
+   ```sh
+   aws ssm put-parameter --name /dashbuddy-census/operator_totp_secret \
+     --type SecureString --value "$(cat ~/dashbuddy/secrets/census-operator-totp)" --overwrite
+   ```
+
+2. From `deploy/aws`, with the usual profile, region, and variable file, run the operator checks and apply:
+
+   ```sh
+   terraform fmt -check
+   terraform validate
+   terraform plan
+   terraform apply
+   ```
+
+   This adds the `operator_totp_secret` SecureString placeholder, the instance role's `sns:Publish` grant scoped to `aws_sns_topic.alerts.arn`, and the Terraform-managed `alerts_topic_arn` String. The existing SSM read resource `/dashbuddy-census/*` covers both names. Now run the workstation `put-parameter` above; never put the real TOTP secret in Terraform configuration. Confirm the existing SNS email subscription. Deploy the S6b app image through the usual image workflow before restarting below.
+
+   The renderer omits `OPERATOR_TOTP_SECRET` or `ALERTS_TOPIC_ARN` when its optional parameter is missing, empty, or `CHANGE-ME`; startup continues. Present values must match `^[A-Z2-7]{16,64}$` and `^arn:aws:sns:[a-z0-9-]+:[0-9]{12}:[A-Za-z0-9_-]{1,256}$` respectively. Invalid formats refuse rendering without printing values; the app also validates canonical base32. An omitted TOTP secret leaves authenticated mutations at `503 totp_unconfigured`; an omitted topic makes the host publisher exit silently; the app still logs and keeps its bounded spool. The four required parameters and their refusal are unchanged.
+
+3. **Existing host:** its cloud-init is frozen by `ignore_changes`, so applying the template edit does **not** update the host scripts or units. Run this one-time SSM command from the workstation's reviewed S6b checkout in `deploy/aws`. It installs the exact optional-parameter renderer, startup script, census service, and alarm publisher script plus its service/path/timer units from the template, with root ownership and 0700 scripts. Set `CENSUS_NAME_PREFIX` and `CENSUS_IMAGE_REF` to this deployment's non-secret template settings, and `CENSUS_COMPOSE_REF` to the reviewed branch/tag containing these fixes. Bootstrap originally cloned the repository to `/opt/census-src` and copied Compose into `/opt/census`; neither `census-start` nor the image deploy workflow refreshes those files. This command holds the deployment lock, fetches the reviewed Compose file, preserves the selected census image and existing volume bindings, creates the alarms directory owned by uid/gid 10001, initializes the root-owned 0600 budget state outside the spool (preserving any existing budget) and root-owned `/root/.aws`, and writes the alarm volume bind into the Compose override. It enables the publisher path/timer and restarts `census.service`.
+
+   ```bash
+   set -euo pipefail
+   export AWS_DEFAULT_REGION="$(terraform output -raw region)"
+   export AWS_PAGER=''
+   export CENSUS_NAME_PREFIX='dashbuddy-census'
+   export CENSUS_IMAGE_REF='ghcr.io/sjtrotter/dashbuddy-census:latest' # use your image_ref value
+   export CENSUS_COMPOSE_REF='feature/s6b-totp-sns' # reviewed branch/tag containing these fixes
+   CENSUS_INSTANCE_ID=$(terraform output -raw instance_id)
+   umask 077
+   CENSUS_RENDER_COMMAND=$(mktemp)
+   trap 'rm -f -- "$CENSUS_RENDER_COMMAND"' EXIT
+   python3 - > "$CENSUS_RENDER_COMMAND" <<'PY'
+   import base64
+   import json
+   import os
+   import re
+   import shlex
+   import textwrap
+   from pathlib import Path
+
+   template = Path('cloud-init.yaml.tftpl').read_text()
+   settings = {
+       'region': (os.environ['AWS_DEFAULT_REGION'], r'[a-z0-9-]+'),
+       'name_prefix': (os.environ['CENSUS_NAME_PREFIX'], r'[a-z0-9-]+'),
+       'image_ref': (os.environ['CENSUS_IMAGE_REF'], r'ghcr\.io/[A-Za-z0-9_./:@-]+'),
+   }
+   for name, (value, pattern) in settings.items():
+       if not re.fullmatch(pattern, value):
+           raise SystemExit('Invalid non-secret template setting: ' + name)
+   compose_ref = os.environ['CENSUS_COMPOSE_REF']
+   if not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_./-]*', compose_ref):
+       raise SystemExit('Invalid compose ref')
+   command = [
+       'set -eu',
+       'umask 077',
+       'cd /opt/census',
+       'temporary=$(mktemp -d /opt/census/.s6b-upgrade.XXXXXX)',
+       'trap \'rm -rf -- "$temporary"\' EXIT',
+       """image=$(docker compose config --format json | python3 -c 'import json,sys; print(json.load(sys.stdin)["services"]["census"]["image"])')""",
+       'git -C /opt/census-src fetch --depth 1 origin ' + shlex.quote(compose_ref),
+       'git -C /opt/census-src show FETCH_HEAD:deploy/compose/docker-compose.yml > "$temporary/docker-compose.yml"',
+       r'sed -i "/^    census:/,/^    [a-zA-Z0-9_-]*:/s#^\([[:space:]]*image:[[:space:]]*\).*#\1$image#" "$temporary/docker-compose.yml"',
+   ]
+   # Compose emits resolved volume definitions as JSON (also valid YAML). Retain
+   # pgdata, including a recovery-host override, while adding the alarm bind.
+   volume_script = (
+       'import json,sys; volumes=json.load(sys.stdin)["volumes"]; '
+       'volumes["alarm-spool"]={"driver":"local","driver_opts":'
+       '{"type":"none","o":"bind","device":"/var/lib/census-data/alarms"}}; '
+       'print(json.dumps({"volumes":volumes}))'
+   )
+   command.append('docker compose config --format json | python3 -c ' + shlex.quote(volume_script)
+                  + ' > "$temporary/docker-compose.override.yml"')
+   installs = []
+   for path, mode in [
+       ('/usr/local/sbin/census-configure', '0700'),
+       ('/usr/local/sbin/census-start', '0700'),
+       ('/usr/local/sbin/census-alarm-publish', '0700'),
+       ('/etc/systemd/system/census-alarm-publish.service', '0644'),
+       ('/etc/systemd/system/census-alarm-publish.path', '0644'),
+       ('/etc/systemd/system/census-alarm-publish.timer', '0644'),
+       ('/etc/systemd/system/census.service', '0644'),
+   ]:
+       block = template.split('  - path: ' + path + '\n', 1)[1].split('\n  - path:', 1)[0]
+       content = textwrap.dedent(block.split('    content: |\n', 1)[1]).rstrip() + '\n'
+       for name, (value, _) in settings.items():
+           content = content.replace('${' + name + '}', value)
+       if '${' in content:
+           raise SystemExit('Unresolved template setting in ' + path)
+       encoded = base64.b64encode(content.encode()).decode()
+       staged = '"$temporary/' + Path(path).name + '"'
+       command.extend([
+           'base64 --decode > ' + staged + " <<'CENSUS_FILE'",
+           encoded,
+           'CENSUS_FILE',
+       ])
+       if path == '/usr/local/sbin/census-alarm-publish':
+           command.append('python3 -c ' + shlex.quote(
+               'import ast,sys; ast.parse(open(sys.argv[1]).read())') + ' ' + staged)
+       elif mode == '0700':
+           command.append('bash -n ' + staged)
+       installs.append('install -o root -g root -m ' + mode + ' ' + staged + ' ' + path)
+   # Reuse the exact root-only initialization fragment from data setup; do not
+   # rerun its volume formatting/mount steps on an existing host.
+   setup_block = template.split('  - path: /usr/local/sbin/census-data-setup\n', 1)[1].split('\n  - path:', 1)[0]
+   setup = textwrap.dedent(setup_block.split('    content: |\n', 1)[1])
+   publisher_setup = '# Root-only publisher state;' + setup.split('# Root-only publisher state;', 1)[1]
+   command.extend([
+       'for unit in census-alarm-publish.path census-alarm-publish.timer census-alarm-publish.service; do '
+       'if systemctl cat "$unit" >/dev/null 2>&1; then systemctl stop "$unit"; fi; done',
+       *installs,
+       'install -d -m 0700 -o 10001 -g 10001 /var/lib/census-data/alarms',
+       publisher_setup,
+       'install -o root -g root -m 0600 "$temporary/docker-compose.override.yml" /opt/census/docker-compose.override.yml',
+       'install -o root -g root -m 0600 "$temporary/docker-compose.yml" /opt/census/docker-compose.yml',
+       'systemctl daemon-reload',
+       'systemctl enable --now census-alarm-publish.path census-alarm-publish.timer',
+       'systemctl restart census.service',
+   ])
+   locked = 'mountpoint -q /var/lib/census-data && flock -w 600 /var/lib/census-data/.deploy.lock sh -c ' + shlex.quote('\n'.join(command))
+   print(json.dumps({'commands': [locked], 'executionTimeout': ['900']}))
+   PY
+   CENSUS_COMMAND_ID=$(aws ssm send-command \
+     --instance-ids "$CENSUS_INSTANCE_ID" \
+     --document-name AWS-RunShellScript \
+     --parameters "file://$CENSUS_RENDER_COMMAND" \
+     --timeout-seconds 300 \
+     --query Command.CommandId --output text)
+   aws ssm wait command-executed --command-id "$CENSUS_COMMAND_ID" --instance-id "$CENSUS_INSTANCE_ID"
+   aws ssm get-command-invocation --command-id "$CENSUS_COMMAND_ID" --instance-id "$CENSUS_INSTANCE_ID" \
+     --query Status --output text
+   ```
+
+   If the CLI waiter expires before the service restart finishes, query status again before resubmitting. A **new instance gets these scripts, units, and Compose settings automatically from cloud-init**. After the one-time replacement, future parameter changes need only `systemctl restart census.service`; Compose already passes `.env` to Census via `env_file`.
+
+Application alarm delivery is WARN log + spool file → host publisher → the existing SNS email subscription. The WARN under `Alarm` is the system of record. Compose sets `ALARM_SPOOL_DIR=/var/spool/census-alarms` and mounts the `alarm-spool` named volume there; the host override binds it to `/var/lib/census-data/alarms`. `FileSpoolAlarmSink` writes exactly the validated rendering to a temporary file and atomically renames it to `.alarm`, dropping the oldest at the 64-file cap. An I/O failure increments process-local `AlarmStats.spool_failed` and produces at most one `Alarm` WARN `alarm_spool_failed class=<simple name>` per ten minutes, without failing health admission or purge. Unset `ALARM_SPOOL_DIR` selects logging only.
+
+The root Python publisher treats the spool as hostile: it opens entries relative to a pinned directory fd with `O_NOFOLLOW`, checks the opened inode is regular, uid 10001, single-link and at most 4 KiB, and strictly validates UTF-8 and the five-line grammar. Numeric `<epochMillis>-<counter>.alarm` names are required. Other names (including hidden and temporary files), directories, symlinks, hard links, wrong-owner/oversized files and malformed messages are rejected and removed without following links. It retains at most the newest 256 valid entries during each scan and attempts at most 16 oldest first per run. A persistent root-owned token bucket outside the spool has capacity 20 and refills at 20/hour; each attempt consumes a token before AWS runs, including failures. Deferred valid files remain until delivery or storage eviction. A corrupt budget state fails closed and requires operator repair; upgrades preserve it.
+
+Each AWS CLI publish has a 20-second timeout; success deletes the entry, failure retains it. The hardened service has a five-minute timeout, a read-only system except the spool, budget state and root AWS cache, private temporary storage and no new privileges. It journals only `census-alarm-publish: published=<n> failed=<n> rejected=<n> deferred=<n>` plus one `census-alarm-publish: budget exhausted, deferred=<n>` when needed, never names, bodies, exception text or AWS output. Missing topic configuration exits silently. Inspect `journalctl -u census-alarm-publish.service`; the path unit watches directory changes and the timer retries every five minutes.
+
+The subject is `census alarm: <kind>`; the body has exactly five lines: `kind=...`, `platform=...`, `version=...`, `install_prefix=...`, `rule_ids=...`. The host accepts `[redacted]` only for platform/version; the prefix must be eight lowercase hex characters or `-`, and rule IDs must match the wire grammar. Neither the application message nor its logs contain a topic ARN/account ID, full install ID, secret, token, TOTP code, payload string, or exception message. AWS's own email envelope/unsubscribe links are outside the application message. Spool overflow or write failure may lose the email copy, and a successful publish followed by a host crash before deletion can cause a duplicate. Counts of raised alarms refer to local delivery, not confirmed email delivery.
 
 ## 4. DNS and first start
 
@@ -171,6 +333,12 @@ mkdir -m 0700 "$RESTORE_DIR"
 chown 70:70 "$RESTORE_DIR"
 cat > docker-compose.override.yml <<YAML
 volumes:
+    alarm-spool:
+        driver: local
+        driver_opts:
+            type: none
+            o: bind
+            device: /var/lib/census-data/alarms
     pgdata:
         name: $RESTORE_VOLUME
         driver: local

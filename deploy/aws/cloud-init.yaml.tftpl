@@ -46,6 +46,47 @@ write_files:
       mountpoint -q /var/lib/census-data
       install -d -m 0700 -o 70 -g 70 /var/lib/census-data/pgdata
       install -d -m 0700 /var/lib/census-data/backups
+      install -d -m 0700 -o 10001 -g 10001 /var/lib/census-data/alarms
+      # Root-only publisher state; preserve the budget on upgrades/reboots.
+      install -d -m 0700 -o root -g root /root/.aws
+      python3 - <<'PY'
+      import json
+      import os
+      import stat
+
+      flags = os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+      parent = os.open('/var/lib/census-data', os.O_RDONLY | os.O_DIRECTORY | flags)
+      try:
+          info = os.fstat(parent)
+          if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+              raise SystemExit('CENSUS: unsafe publisher state directory')
+          try:
+              fd = os.open('alarm-publish-state.json', os.O_WRONLY | os.O_CREAT | os.O_EXCL | flags,
+                           0o600, dir_fd=parent)
+          except FileExistsError:
+              fd = os.open('alarm-publish-state.json', os.O_RDONLY | flags, dir_fd=parent)
+              fresh = False
+          else:
+              fresh = True
+          try:
+              info = os.fstat(fd)
+              if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_nlink != 1
+                      or stat.S_IMODE(info.st_mode) != 0o600):
+                  raise SystemExit('CENSUS: unsafe publisher state file')
+              if fresh:
+                  data = json.dumps({'tokens': 20, 'updated': 0}).encode('ascii')
+                  while data:
+                      written = os.write(fd, data)
+                      if written == 0:
+                          raise SystemExit('CENSUS: publisher state initialization failed')
+                      data = data[written:]
+                  os.fsync(fd)
+                  os.fsync(parent)
+          finally:
+              os.close(fd)
+      finally:
+          os.close(parent)
+      PY
 
   - path: /usr/local/sbin/census-start
     owner: root:root
@@ -86,9 +127,13 @@ write_files:
 
       prefix = '/${name_prefix}/'
       names = ['public_host', 'acme_email', 'postgres_password', 'operator_token_sha256']
+      optional = {
+          'operator_totp_secret': ('OPERATOR_TOTP_SECRET', r'^[A-Z2-7]{16,64}$'),
+          'alerts_topic_arn': ('ALERTS_TOPIC_ARN', r'^arn:aws:sns:[a-z0-9-]+:[0-9]{12}:[A-Za-z0-9_-]{1,256}$'),
+      }
       result = json.loads(subprocess.check_output([
           'aws', 'ssm', 'get-parameters', '--with-decryption', '--output', 'json',
-          '--names', *[prefix + name for name in names],
+          '--names', *[prefix + name for name in [*names, *optional]],
       ]))
       values = {p['Name'].removeprefix(prefix): p['Value'] for p in result['Parameters']}
       if any(not values.get(name) or values[name] == 'CHANGE-ME' for name in names):
@@ -115,6 +160,13 @@ write_files:
           'OPERATOR_TOKEN_SHA256': values['operator_token_sha256'],
           'CENSUS_IMAGE_TAG': tag,
       }
+      for name, (key, pattern) in optional.items():
+          value = values.get(name)
+          if not value or value == 'CHANGE-ME':
+              continue
+          if not re.fullmatch(pattern, value):
+              raise SystemExit('CENSUS: invalid optional parameter format: ' + name)
+          env[key] = value
       fd, temporary = tempfile.mkstemp(prefix='.env.', dir='/opt/census')
       try:
           with os.fdopen(fd, 'w') as stream:
@@ -126,6 +178,322 @@ write_files:
           if os.path.exists(temporary):
               os.unlink(temporary)
       PY
+
+  - path: /usr/local/sbin/census-alarm-publish
+    owner: root:root
+    permissions: '0700'
+    content: |
+      #!/usr/bin/python3
+      import contextlib
+      import fcntl
+      import heapq
+      import json
+      import math
+      import os
+      import re
+      import stat
+      import subprocess
+      import time
+
+      READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+      DIR_FLAGS = READ_FLAGS | os.O_DIRECTORY
+      NAME = re.compile(r'([0-9]{1,16})-([0-9]{1,9})\.alarm')
+      # A writer's in-flight temporary file (write, then atomic rename): kept while younger than 10 minutes.
+      TEMPORARY = re.compile(r'[0-9]{1,16}-[0-9]{1,9}\.alarm\.tmp')
+      TEMPORARY_GRACE_SECONDS = 600
+      # Exactly renderAlarm's contract (HealthAlarms.kt): enumerated kinds, either-case hex prefix,
+      # and every slot the renderer may redact accepts the literal [redacted].
+      KINDS = r'(?:silent_rule_death|rule_share_cliff|trips|fleet_unknown|new_clusters|silence|\[redacted\])'
+      RULE = r'(?:[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*){1,4}|\[redacted\])'
+      MESSAGE = re.compile(
+          r'kind=(' + KINDS + r')\n'
+          r'platform=(?:[a-z_][a-z0-9_]{0,31}|\[redacted\])\n'
+          r'version=(?:[0-9]{1,5}(?:\.[0-9]{1,5}){0,3}|\[redacted\])\n'
+          r'install_prefix=(?:[0-9a-fA-F]{8}|-|\[redacted\])\n'
+          r'rule_ids=\[(?:' + RULE + r'(?:, ' + RULE + r')*)?\]'
+      )
+      # Cleanup/scan work is bounded like publishing: a hostile writer cannot spend the whole run on it.
+      MAX_SCAN_ENTRIES = 4096
+      MAX_REMOVE_OPERATIONS = 64
+      MAX_REMOVE_DEPTH = 4
+
+
+      @contextlib.contextmanager
+      def opened(name, flags, parent=None):
+          fd = os.open(name, flags, dir_fd=parent)
+          try:
+              yield fd, os.fstat(fd)
+          finally:
+              os.close(fd)
+
+
+      @contextlib.contextmanager
+      def directory(path):
+          # Pin every ancestor; never resolve a symlink, including the spool itself.
+          with contextlib.ExitStack() as stack:
+              fd, info = stack.enter_context(opened('/', DIR_FLAGS))
+              for component in path.strip('/').split('/'):
+                  fd, info = stack.enter_context(opened(component, DIR_FLAGS, fd))
+                  if not stat.S_ISDIR(info.st_mode):
+                      raise ValueError('directory')
+              yield fd
+
+
+      def root_file(info):
+          return (stat.S_ISREG(info.st_mode) and info.st_uid == 0
+                  and info.st_nlink == 1 and stat.S_IMODE(info.st_mode) == 0o600)
+
+
+      def remove(parent, name, deadline=None):
+          # unlink/rmdir operate on the entry itself. A replacement is never followed.
+          # Iterative descent avoids a recursion limit on attacker-created subdirs.
+          pending = [(parent, name, None, None, None)]
+          resources = None
+          operations = 0
+          try:
+              while pending:
+                  operations += 1
+                  if (operations > MAX_REMOVE_OPERATIONS or len(pending) > MAX_REMOVE_DEPTH
+                          or (deadline is not None and time.monotonic() > deadline)):
+                      break
+                  parent, name, fd, entries, resources = pending[-1]
+                  try:
+                      if fd is None:
+                          try:
+                              os.unlink(name, dir_fd=parent)
+                          except IsADirectoryError:
+                              resources = contextlib.ExitStack()
+                              fd, info = resources.enter_context(opened(name, DIR_FLAGS, parent))
+                              if not stat.S_ISDIR(info.st_mode):
+                                  raise ValueError('directory')
+                              entries = resources.enter_context(os.scandir(fd))
+                              pending[-1] = (parent, name, fd, entries, resources)
+                          else:
+                              pending.pop()
+                              continue
+                      entry = next(entries, None)
+                      if entry is not None:
+                          pending.append((fd, entry.name, None, None, None))
+                          continue
+                      os.rmdir(name, dir_fd=parent)
+                  except (OSError, ValueError):
+                      # Concurrent writers can prevent removal; the next run retries.
+                      pass
+                  if resources is not None:
+                      resources.close()
+                  pending.pop()
+          finally:
+              if resources is not None:
+                  resources.close()
+              for _, _, _, _, resources in reversed(pending):
+                  if resources is not None:
+                      resources.close()
+
+
+      def read_message(parent, name):
+          with opened(name, READ_FLAGS, parent) as (fd, info):
+              if (not stat.S_ISREG(info.st_mode) or info.st_uid != 10001
+                      or info.st_nlink != 1 or info.st_size > 4096):
+                  raise ValueError('metadata')
+              data = bytearray()
+              while len(data) < 4097:
+                  chunk = os.read(fd, 4097 - len(data))
+                  if not chunk:
+                      break
+                  data.extend(chunk)
+              # Recheck the pinned inode after reading. Only the validated byte snapshot
+              # is used below, even if the container modifies/replaces the file later.
+              after = os.fstat(fd)
+              if (after.st_uid != 10001 or after.st_nlink != 1 or after.st_size > 4096
+                      or len(data) > 4096):
+                  raise ValueError('metadata')
+          message = data.decode('utf-8', errors='strict')
+          match = MESSAGE.fullmatch(message)
+          if match is None:
+              raise ValueError('grammar')
+          return message, match[1]
+
+
+      def save_budget(fd, tokens, updated):
+          data = json.dumps({'tokens': tokens, 'updated': updated}).encode('ascii')
+          os.lseek(fd, 0, os.SEEK_SET)
+          while data:
+              written = os.write(fd, data)
+              if written == 0:
+                  raise OSError('state write')
+              data = data[written:]
+          os.ftruncate(fd, os.lseek(fd, 0, os.SEEK_CUR))
+          os.fsync(fd)
+
+
+      def publish(arn, counts):
+          deadline = time.monotonic() + 280
+          with directory('/var/lib/census-data') as parent:
+              with opened('alarms', DIR_FLAGS, parent) as (spool, info):
+                  if not stat.S_ISDIR(info.st_mode):
+                      raise ValueError('spool')
+                  # Retain only the newest 256 validated snapshots: no unbounded sort
+                  # or list of attacker-controlled names/bodies. Order by numeric name.
+                  pending = []
+                  scanned = 0
+                  with os.scandir(spool) as entries:
+                      for entry in entries:
+                          scanned += 1
+                          if scanned > MAX_SCAN_ENTRIES or time.monotonic() + 30 > deadline:
+                              break
+                          name = entry.name
+                          if TEMPORARY.fullmatch(name):
+                              # In-flight write by the app: never deleted while young (its rename must succeed).
+                              try:
+                                  with opened(name, READ_FLAGS, spool) as (_, info):
+                                      if stat.S_ISREG(info.st_mode) and time.time() - info.st_mtime < TEMPORARY_GRACE_SECONDS:
+                                          continue
+                              except OSError:
+                                  continue
+                              remove(spool, name, deadline)
+                              counts['rejected'] += 1
+                              continue
+                          match = NAME.fullmatch(name)
+                          try:
+                              if match is None:
+                                  raise ValueError('name')
+                              message, kind = read_message(spool, name)
+                          except (OSError, ValueError):
+                              remove(spool, name, deadline)
+                              counts['rejected'] += 1
+                              continue
+                          heapq.heappush(pending, (int(match[1]), int(match[2]), name, message, kind))
+                          if len(pending) > 256:
+                              remove(spool, heapq.heappop(pending)[2], deadline)
+                  counts['deferred'] = len(pending)
+                  with opened('alarm-publish-state.json', os.O_RDWR | os.O_NOFOLLOW
+                              | os.O_NONBLOCK | os.O_CLOEXEC, parent) as (state_fd, info):
+                      if not root_file(info) or info.st_size > 4096:
+                          raise ValueError('state')
+                      fcntl.flock(state_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                      # Missing/corrupt state fails closed; only setup initializes it.
+                      state = json.loads(os.read(state_fd, 4097))
+                      tokens, updated = state['tokens'], state['updated']
+                      if (type(tokens) not in (int, float) or type(updated) not in (int, float)
+                              or not math.isfinite(tokens) or not math.isfinite(updated)
+                              or not 0 <= tokens <= 20 or updated < 0):
+                          raise ValueError('state')
+                      now = max(time.time(), updated)
+                      tokens = min(20, tokens + (now - updated) * 20 / 3600)
+                      save_budget(state_fd, tokens, now)
+                      attempts = 0
+                      for _, _, name, message, kind in sorted(pending):
+                          if tokens < 1:
+                              print('census-alarm-publish: budget exhausted, deferred=' + str(counts['deferred']))
+                              break
+                          if attempts >= 16 or time.monotonic() + 20 > deadline:
+                              break
+                          # Charge attempts durably BEFORE AWS; failure/crash never
+                          # restores a token. In-place writes support the unit's file
+                          # bind mount; an interrupted state write fails closed.
+                          tokens -= 1
+                          save_budget(state_fd, tokens, now)
+                          attempts += 1
+                          counts['deferred'] -= 1
+                          try:
+                              # Grammar starts with kind=: neither '-' nor 'file://' can
+                              # begin message, so CLI option/parameter-file expansion is impossible.
+                              result = subprocess.run(
+                                  ['aws', 'sns', 'publish', '--topic-arn', arn,
+                                   '--subject', 'census alarm: ' + kind, '--message', message],
+                                  timeout=20, check=False, stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.DEVNULL,
+                                  env={'PATH': '/usr/local/bin:/usr/bin:/bin',
+                                       'AWS_DEFAULT_REGION': os.environ.get('AWS_DEFAULT_REGION', ''),
+                                       'HOME': '/root'},
+                              )
+                              success = result.returncode == 0
+                          except (OSError, subprocess.TimeoutExpired):
+                              success = False
+                          if success:
+                              remove(spool, name, deadline)
+                              counts['published'] += 1
+                          else:
+                              counts['failed'] += 1
+
+
+      def main():
+          counts = dict(published=0, failed=0, rejected=0, deferred=0)
+          try:
+              try:
+                  with directory('/opt/census') as parent:
+                      with opened('.env', READ_FLAGS, parent) as (fd, info):
+                          if not root_file(info):
+                              raise ValueError('config')
+                          with os.fdopen(os.dup(fd), 'r', encoding='utf-8', newline='\n') as stream:
+                              # Same anchored, single-quoted assignment as the old sed.
+                              arn = '\n'.join(match[1] for line in stream
+                                              if (match := re.fullmatch("ALERTS_TOPIC_ARN='([^']*)'", line.removesuffix('\n'))))
+              except FileNotFoundError:
+                  return
+              if not arn:
+                  return
+              publish(arn, counts)
+          except Exception:
+              # Never emit exception text, paths, names, file contents or CLI output.
+              counts['failed'] += 1
+          print('census-alarm-publish: ' + ' '.join(key + '=' + str(value) for key, value in counts.items()))
+
+
+      if __name__ == '__main__':
+          main()
+
+  - path: /etc/systemd/system/census-alarm-publish.service
+    owner: root:root
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Publish census alarm spool to SNS
+      RequiresMountsFor=/var/lib/census-data
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      Type=oneshot
+      Environment=AWS_DEFAULT_REGION=${region}
+      Environment=AWS_PAGER=
+      ExecStart=/usr/bin/python3 /usr/local/sbin/census-alarm-publish
+      TimeoutStartSec=5min
+      ProtectSystem=strict
+      ReadWritePaths=/var/lib/census-data/alarms /var/lib/census-data/alarm-publish-state.json /root/.aws
+      PrivateTmp=yes
+      NoNewPrivileges=yes
+      UMask=0077
+
+  - path: /etc/systemd/system/census-alarm-publish.path
+    owner: root:root
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Watch census alarm spool
+      RequiresMountsFor=/var/lib/census-data
+
+      [Path]
+      PathChanged=/var/lib/census-data/alarms
+      Unit=census-alarm-publish.service
+
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /etc/systemd/system/census-alarm-publish.timer
+    owner: root:root
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Retry census alarm publishing every five minutes
+
+      [Timer]
+      OnBootSec=5min
+      OnUnitActiveSec=5min
+      Unit=census-alarm-publish.service
+
+      [Install]
+      WantedBy=timers.target
 
   - path: /usr/local/sbin/census-backup
     owner: root:root
@@ -248,6 +616,12 @@ write_files:
       cp -a /opt/census-src/deploy/compose/. /opt/census/
       cat > /opt/census/docker-compose.override.yml <<'YAML'
       volumes:
+          alarm-spool:
+              driver: local
+              driver_opts:
+                  type: none
+                  o: bind
+                  device: /var/lib/census-data/alarms
           pgdata:
               driver: local
               driver_opts:
@@ -262,6 +636,7 @@ write_files:
       # expression. Rewrite only census, preserving postgres and caddy images.
       sed -i "/^    census:/,/^    [a-zA-Z0-9_-]*:/s#^\([[:space:]]*image:[[:space:]]*\).*#\1$image#" /opt/census/docker-compose.yml
       systemctl daemon-reload
+      systemctl enable --now census-alarm-publish.path census-alarm-publish.timer
       systemctl enable census.service
       systemctl enable --now census-backup.timer unattended-upgrades.service
       # All setup is complete before this expected first-boot failure on CHANGE-ME.

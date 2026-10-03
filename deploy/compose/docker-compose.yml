@@ -3,6 +3,10 @@ services:
         # production pins @sha256:<digest>; replace the tag expression when promoting.
         image: ghcr.io/sjtrotter/dashbuddy-census:${CENSUS_IMAGE_TAG:-latest}
         env_file: .env
+        environment:
+            ALARM_SPOOL_DIR: /var/spool/census-alarms
+        volumes:
+            - alarm-spool:/var/spool/census-alarms
         read_only: true
         tmpfs:
             - /tmp
@@ -54,6 +58,7 @@ networks:
         internal: true
 
 volumes:
+    alarm-spool:
     pgdata:
     caddy_data:
     caddy_config:

@@ -2,7 +2,11 @@ package cloud.trotter.census.server
 
 import cloud.trotter.census.server.db.HealthStore
 import cloud.trotter.census.server.db.InstallStore
+import cloud.trotter.census.server.jobs.AlarmSink
+import cloud.trotter.census.server.jobs.AlarmStats
+import cloud.trotter.census.server.jobs.FileSpoolAlarmSink
 import cloud.trotter.census.server.jobs.HealthAlarms
+import cloud.trotter.census.server.jobs.LoggingAlarmSink
 import cloud.trotter.census.server.jobs.PurgeJob
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.netty.Netty
@@ -11,6 +15,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.slf4j.LoggerFactory
 import org.slf4j.bridge.SLF4JBridgeHandler
+import java.nio.file.Path
 import kotlin.system.exitProcess
 import kotlin.time.Duration.Companion.hours
 import kotlin.time.Duration.Companion.minutes
@@ -41,7 +46,10 @@ fun main() {
     }
     database.use { db ->
         embeddedServer(Netty, host = "0.0.0.0", port = config.port) {
-            val alarms = HealthAlarms(HealthStore(db, SystemClock), SystemClock, startedAt = SystemClock.now())
+            val spool = config.alarmSpoolDir?.let { FileSpoolAlarmSink(Path.of(it), clock = SystemClock) }
+            val sink: AlarmSink = spool ?: LoggingAlarmSink()
+            val stats = spool?.stats ?: AlarmStats()
+            val alarms = HealthAlarms(HealthStore(db, SystemClock), SystemClock, sink, stats, startedAt = SystemClock.now())
             module(config, db, alarmEvaluator = alarms)
             launch {
                 val purge = PurgeJob(InstallStore(db, SystemClock), SystemClock, alarms = alarms)
