@@ -1,5 +1,6 @@
 package cloud.trotter.census.server.ops
 
+import cloud.trotter.census.server.db.CLUSTER_STATUSES
 import cloud.trotter.census.server.db.OpsCluster
 import kotlinx.html.FlowContent
 import kotlinx.html.a
@@ -7,37 +8,38 @@ import kotlinx.html.article
 import kotlinx.html.code
 import kotlinx.html.div
 import kotlinx.html.dl
-import kotlinx.html.h4
+import kotlinx.html.h2
 import kotlinx.html.li
 import kotlinx.html.p
 import kotlinx.html.strong
 import kotlinx.html.ul
 import java.util.Locale
 
-internal fun FlowContent.clusterCards(clusters: List<OpsCluster>, k: Int, labels: LinkedHashMap<String, String>) {
+internal fun FlowContent.clusterCards(clusters: List<OpsCluster>, k: Int, showGroupFacts: Boolean = true) {
+    val labels = linkedMapOf<String, String>()
     for (cluster in clusters) article("cluster-card") {
         val label = labels.getOrPut(cluster.fingerprint) { "Cluster ${String.format(Locale.ROOT, "%02d", labels.size + 1)}" }
         div("cluster-heading") {
-            h4 {
+            h2 {
                 if (fingerprintPattern.matches(cluster.fingerprint)) a(href = "/ops/clusters/${cluster.fingerprint}/view", classes = "cluster-link") { +label }
                 else +label
             }
             statusChip(cluster.status)
         }
-        clusterFacts(cluster)
+        clusterFacts(cluster, showGroupFacts = showGroupFacts)
         p("muted") { +visibility(cluster, k) }
     }
 }
 
-internal fun FlowContent.clusterFacts(cluster: OpsCluster, detail: Boolean = false) {
+internal fun FlowContent.clusterFacts(cluster: OpsCluster, detail: Boolean = false, showGroupFacts: Boolean = true) {
     dl("facts") {
-        fact("Platform") { +platform(cluster.platform) }
+        if (showGroupFacts) fact("Platform") { +platform(cluster.platform) }
         fact("Non-trusted installs · 28 d") { strong { +number(cluster.distinctInstalls28d) } }
         fact("Sightings · 28 d") { strong { +number(cluster.sightings28d) } }
         fact("First seen") { date(cluster.firstSeenDay) }
         fact("Last seen") { date(cluster.lastSeenDay) }
         fact("Seen by trusted") { +if (cluster.seenByTrusted) "Yes" else "No" }
-        fact("Versions") {
+        if (showGroupFacts) fact("Versions") {
             if (cluster.versions.isEmpty()) +"None recorded" else {
                 +"${number(cluster.versions.size)} ${if (cluster.versions.size == 1) "version" else "versions"}"
                 ul("versions") { cluster.versions.forEach { li { code { +version(it) } } } }
@@ -63,13 +65,7 @@ internal fun visibility(cluster: OpsCluster, k: Int): String = when {
 }
 
 internal fun FlowContent.statusChip(status: String) {
-    val (label, tone) = when (status) {
-        "new" -> "New" to "warn"
-        "triaged" -> "Triaged" to "neutral"
-        "drafted" -> "Drafted" to "accent"
-        "resolved" -> "Resolved" to "good"
-        "ignored" -> "Ignored" to "neutral"
-        else -> "[redacted]" to "neutral"
-    }
-    chip(label, tone)
+    val label = if (status in CLUSTER_STATUSES) status.replaceFirstChar { it.uppercase() } else "[redacted]"
+    val tones = mapOf("new" to "warn", "triaged" to "accent", "drafted" to "accent", "resolved" to "good", "ignored" to "neutral")
+    chip(label, tones[status] ?: "neutral")
 }

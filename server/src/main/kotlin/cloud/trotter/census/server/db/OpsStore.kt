@@ -104,8 +104,7 @@ class OpsStore(private val db: Database, private val clock: Clock, private val p
 
     suspend fun clusterSummary(): List<OpsClusterSummaryRow> = query {
         clusterRows(clock.today()).flatMap { row ->
-            val versions: List<String?> = row.versions.ifEmpty { listOf(null) }
-            versions.map { (row.platform to it) to row }
+            displayVersions(row).map { (row.platform to it) to row }
         }.groupBy({ it.first }, { it.second }).map { (key, rows) ->
             OpsClusterSummaryRow(key.first, key.second, rows.size, CLUSTER_STATUSES.associateWith { status -> rows.count { it.status == status } })
         }.sortedWith(compareBy<OpsClusterSummaryRow> { it.platform }
@@ -116,7 +115,7 @@ class OpsStore(private val db: Database, private val clock: Clock, private val p
         require(pageSize > 0)
         val today = clock.today()
         val rows = clusterRows(today, status = status).filter { row ->
-            row.platform == platform && (if (version == null) row.versions.isEmpty() else version in row.versions)
+            row.platform == platform && version in displayVersions(row)
         }.sortedWith(compareBy<OpsCluster> { CLUSTER_STATUSES.indexOf(it.status).takeIf { rank -> rank >= 0 } ?: Int.MAX_VALUE }
             .thenByDescending { score(it, today) }.thenBy { it.fingerprint })
         val pageCount = if (rows.isEmpty()) 1 else (rows.size - 1) / pageSize + 1
@@ -127,6 +126,9 @@ class OpsStore(private val db: Database, private val clock: Clock, private val p
         }
         OpsClusterPage(platform, version, status, rows.size, currentPage, pageSize, pageCount, clusters)
     }
+
+    private fun displayVersions(row: OpsCluster): List<String?> =
+        row.versions.map { it.takeUnless { version -> version == "unknown" } }.ifEmpty { listOf(null) }
 
     suspend fun cluster(fingerprint: String): OpsCluster? = query {
         val row = clusterRows(clock.today(), fingerprint = fingerprint).singleOrNull() ?: return@query null

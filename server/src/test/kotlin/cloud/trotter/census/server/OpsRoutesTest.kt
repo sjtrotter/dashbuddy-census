@@ -35,6 +35,9 @@ import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpMethod
 import io.ktor.http.contentType
 import io.ktor.http.formUrlEncode
+import io.ktor.server.application.ApplicationCallPipeline
+import io.ktor.server.application.call
+import io.ktor.server.testing.TestApplicationRequest
 import io.ktor.server.testing.testApplication
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -290,6 +293,9 @@ class OpsRoutesTest {
                 assertTrue(ops.status(old.item.fingerprint, "new", null, null))
                 assertTrue(ops.status(fresh.item.fingerprint, "resolved", null, null))
                 val noVersion = "e".repeat(64)
+                val omittedVersion = fixture("Versionless", "No version", version = null)
+                assertNull(omittedVersion.item.platformAppVersion)
+                assertTrue(skeletons.ingest(first, keyHash, day, listOf(omittedVersion), 0, emptyMap(), "versionless", 100, BudgetPolicy()) is IngestOutcome.Stored)
                 val uber = "f".repeat(64)
                 sql { connection ->
                     connection.update("INSERT INTO clusters (fingerprint, platform, first_seen_day, last_seen_day) VALUES (?, 'doordash', ?, ?)", noVersion, day, day)
@@ -299,8 +305,8 @@ class OpsRoutesTest {
                 val summary = ops.clusterSummary()
                 assertEquals(listOf("doordash" to "8.10", "doordash" to "8.9", "doordash" to null, "uber" to "1.2"),
                     summary.map { it.platform to it.platformAppVersion })
-                assertEquals(listOf(2, 1, 1, 1), summary.map { it.total })
-                assertEquals(listOf(listOf(1, 0, 0, 1, 0), listOf(1, 0, 0, 0, 0), listOf(1, 0, 0, 0, 0), listOf(0, 0, 0, 0, 1)),
+                assertEquals(listOf(2, 1, 2, 1), summary.map { it.total })
+                assertEquals(listOf(listOf(1, 0, 0, 1, 0), listOf(1, 0, 0, 0, 0), listOf(2, 0, 0, 0, 0), listOf(0, 0, 0, 0, 1)),
                     summary.map { row -> CLUSTER_STATUSES.map { row.byStatus.getValue(it) } })
                 summary.forEach { assertEquals(CLUSTER_STATUSES.toSet(), it.byStatus.keys) }
                 val review = ops.clustersPage("doordash", "8.10", null, 1)
@@ -325,14 +331,122 @@ class OpsRoutesTest {
                 assertEquals(1, filtered.page)
                 assertEquals(listOf(fresh.item.fingerprint), filtered.clusters.map { it.fingerprint })
                 val missingVersion = ops.clustersPage("doordash", null, null, 1)
-                assertEquals(listOf(noVersion), missingVersion.clusters.map { it.fingerprint })
-                assertFalse(missingVersion.clusters.single().newWithVersion)
-                assertNull(missingVersion.clusters.single().samples)
+                assertEquals(listOf(omittedVersion.item.fingerprint, noVersion), missingVersion.clusters.map { it.fingerprint })
+                missingVersion.clusters.forEach {
+                    assertFalse(it.newWithVersion)
+                    assertNull(it.samples)
+                }
+                assertEquals(listOf("unknown"), missingVersion.clusters.first().versions)
+                assertEquals(listOf(omittedVersion.item.fingerprint), ops.clusters().single { it.platformAppVersion == "unknown" }.clusters.map { it.fingerprint })
+                val versionlessPage = client.ops("/ops/clusters/view?platform=doordash&version=none")
+                assertEquals(200, versionlessPage.status.value)
+                val versionlessHtml = versionlessPage.bodyAsText()
+                assertTrue(versionlessHtml.contains("No version recorded"))
+                assertTrue(versionlessHtml.contains("href=\"/ops/clusters/${omittedVersion.item.fingerprint}/view\""))
+                assertTrue(versionlessHtml.contains("href=\"/ops/clusters/$noVersion/view\""))
+                assertPrivate(versionlessHtml)
+                val home = client.ops("/ops/").bodyAsText()
+                assertTrue(home.contains("Not recorded"))
+                assertTrue(home.contains("href=\"/ops/clusters/view?platform=doordash&amp;version=none\""))
+                assertFalse(home.contains("Unavailable"))
+                assertFalse(home.contains("version=unknown"))
+                assertPrivate(home)
                 val emptyPage = ops.clustersPage("uber", null, null, 99)
                 assertTrue(emptyPage.clusters.isEmpty())
                 assertEquals(0, emptyPage.total)
                 assertEquals(1, emptyPage.page)
                 assertEquals(1, emptyPage.pageCount)
+            }
+        }
+    }
+
+    @Test
+    fun `review ordering uses status score and fingerprint across a page boundary`() {
+        Database.connect(config()).use { db ->
+            val installs = InstallStore(db, clock)
+            val skeletons = SkeletonStore(db, clock)
+            val ops = OpsStore(db, clock, Policy())
+            val rankedFixtures = listOf("RankA", "RankB", "RankC", "RankD").map { fixture(it, "Rank sample", "8.10") }
+                .sortedBy { it.item.fingerprint }
+            val tied = rankedFixtures.take(2)
+            val resolved = rankedFixtures[2]
+            val high = rankedFixtures[3] // Score must outrank fingerprint order within the new status.
+            val id = UUID.randomUUID()
+            val keyHash = hashSecret(secret(75))
+            testApplication {
+                application { module(config(), db, clock) }
+                installs.enrol(id, keyHash, "1.0.0")
+                val items = List(3) { high } + tied.flatMap { item -> List(2) { item } } + List(5) { resolved }
+                assertTrue(skeletons.ingest(id, keyHash, day, items, 0, emptyMap(), "ordered", 100, BudgetPolicy()) is IngestOutcome.Stored)
+                assertTrue(ops.status(resolved.item.fingerprint, "resolved", null, null))
+                val firstPage = ops.clustersPage("doordash", "8.10", null, 1, pageSize = 2)
+                val secondPage = ops.clustersPage("doordash", "8.10", null, 2, pageSize = 2)
+                assertEquals(listOf(high.item.fingerprint, tied[0].item.fingerprint), firstPage.clusters.map { it.fingerprint })
+                assertEquals(listOf(tied[1].item.fingerprint, resolved.item.fingerprint), secondPage.clusters.map { it.fingerprint })
+                assertEquals(listOf(3L, 2L, 2L, 5L), (firstPage.clusters + secondPage.clusters).map { it.sightings28d })
+                assertEquals(listOf("new", "new", "new", "resolved"), (firstPage.clusters + secondPage.clusters).map { it.status })
+                for (page in listOf(firstPage, secondPage)) {
+                    assertEquals(4, page.total)
+                    assertEquals(2, page.pageSize)
+                    assertEquals(2, page.pageCount)
+                }
+                assertEquals(1, firstPage.page)
+                assertEquals(2, secondPage.page)
+            }
+        }
+    }
+
+    @Test
+    fun `review route clamps any positive integer page to the last of two pages`() {
+        Database.connect(config()).use { db ->
+            val installs = InstallStore(db, clock)
+            val skeletons = SkeletonStore(db, clock)
+            val ops = OpsStore(db, clock, Policy())
+            val id = UUID.randomUUID()
+            val keyHash = hashSecret(secret(75))
+            testApplication {
+                application { module(config(), db, clock) }
+                installs.enrol(id, keyHash, "1.0.0")
+                val items = (1..26).map { fixture("Paged$it", "Page sample", "8.10") }
+                assertTrue(skeletons.ingest(id, keyHash, day, items, 0, emptyMap(), "paged", 100, BudgetPolicy()) is IngestOutcome.Stored)
+                val last = ops.clustersPage("doordash", "8.10", null, 2)
+                assertEquals(2, last.pageCount)
+                assertEquals(1, last.clusters.size)
+                for (page in listOf("99", "10001", Int.MAX_VALUE.toString())) {
+                    val response = client.ops("/ops/clusters/view?platform=doordash&version=8.10&page=$page")
+                    assertEquals(200, response.status.value)
+                    assertEquals(ContentType.Text.Html, response.contentType()?.withoutParameters())
+                    val html = response.bodyAsText()
+                    assertTrue(html.contains("Page 2 of 2"))
+                    assertTrue(html.contains("href=\"/ops/clusters/${last.clusters.single().fingerprint}/view\""))
+                    assertTrue(html.contains(">Previous</a>"))
+                    assertFalse(html.contains(">Next</a>"))
+                    assertPrivate(html)
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `malformed raw query encoding returns the invalid filter HTML shell with CSP`() {
+        Database.connect(config()).use { db ->
+            testApplication {
+                application {
+                    // The HTTP client decodes URLs eagerly; supply the raw URI on the engine request before routing.
+                    intercept(ApplicationCallPipeline.Setup) {
+                        (call.request as TestApplicationRequest).uri = "/ops/clusters/view?platform=%ZZ&version=1.0.0"
+                    }
+                    module(config(), db, clock)
+                }
+                val response = client.ops("/ops/clusters/view")
+                assertEquals(400, response.status.value)
+                assertEquals(ContentType.Text.Html, response.contentType()?.withoutParameters())
+                assertEquals("default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'", response.headers["Content-Security-Policy"])
+                assertEquals("no-store", response.headers[HttpHeaders.CacheControl])
+                val html = response.bodyAsText()
+                assertTrue(html.contains("<h1>Invalid request</h1>"))
+                assertTrue(html.contains("href=\"/ops/#clusters\""))
+                assertPrivate(html)
             }
         }
     }
@@ -450,7 +564,10 @@ class OpsRoutesTest {
                         "platform=doordash&version=1.0.0.0.0" to 400,
                         "platform=doordash&version=1.0.0&status=bogus" to 400,
                         "platform=doordash&version=1.0.0&page=0" to 400,
-                        "platform=doordash&version=1.0.0&page=10001" to 400,
+                        "platform=doordash&version=1.0.0&page=10001" to 200,
+                        "platform=doordash&version=1.0.0&page=2147483647" to 200,
+                        "platform=doordash&version=1.0.0&page=2147483648" to 400,
+                        "platform=doordash&version=1.0.0&page=x" to 400,
                         "platform=doordash&version=1.0.0&page=oops" to 400,
                         "platform=doordash&version=1.0.0&page=" to 400,
                         "version=1.0.0" to 400,
@@ -513,9 +630,10 @@ class OpsRoutesTest {
         if (body != null) { contentType(ContentType.Application.Json); setBody(body) }
     }
 
-    private fun fixture(name: String, text: String, version: String = "8.0"): ItemVerdict.Accepted {
+    private fun fixture(name: String, text: String, version: String? = "8.0"): ItemVerdict.Accepted {
+        val versionField = version?.let { "\"platformAppVersion\":\"$it\"," } ?: ""
         val raw = """{"schemaId":"uinode.skeleton.v1","hashDomain":1,"filterRev":1,"fingerprint":"${"0".repeat(64)}",
-            "platform":"doordash","platformAppVersion":"$version","engineVersion":1,"day":"$day",
+            "platform":"doordash",${versionField}"engineVersion":1,"day":"$day",
             "root":{"class":"android.widget.$name","id":"com.example:id/$name","text":{"text":{"h":"${CensusHash.of(text)}","kind":"words:2"}}}}"""
         val decoded = SkeletonSchema.deserialize(raw)
         val canonical = SkeletonSchema.serialize(decoded.copy(fingerprint = requireNotNull(CensusFingerprint.of(decoded.root))))

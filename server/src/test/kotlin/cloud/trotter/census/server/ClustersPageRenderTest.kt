@@ -30,7 +30,11 @@ class ClustersPageRenderTest {
         assertEquals(clusters.map { "/ops/clusters/${it.fingerprint}/view" }, links.map { it.groupValues[1] })
         assertEquals(listOf("Cluster 01", "Cluster 02", "Cluster 03", "Cluster 04"), links.map { it.groupValues[2] })
         assertTrue(html.contains("Clusters · doordash · Version 8.10"))
-        assertTrue(html.contains("54 clusters · untriaged first, then by rank · page 1 of 3"))
+        assertTrue(html.contains("<p class=\"muted\">54 clusters · by rank</p>"))
+        assertEquals(clusters.size, Regex("<h2>\\s*<a[^>]*class=\"cluster-link\"").findAll(html).count())
+        assertFalse(html.contains("<h4"))
+        assertFalse(html.contains("<dt>Platform</dt>"))
+        assertFalse(html.contains("<dt>Versions</dt>"))
         assertTrue(html.contains("How ranking works"))
         for (copy in listOf("Non-trusted installs · 28 d", "12,480", "New with this version",
             "Labels redacted: 9 / 10 non-trusted installs in 28 days; no trusted sighting.", "Withheld below privacy gate")) assertTrue(html.contains(copy), copy)
@@ -53,6 +57,8 @@ class ClustersPageRenderTest {
     fun `six status links keep platform and version reset paging and mark only the current filter`() {
         for (status in listOf(null) + CLUSTER_STATUSES) {
             val html = render(page.copy(page = 2, status = status))
+            val order = if (status == null) "untriaged first, then by rank" else "by rank"
+            assertTrue(html.contains("<p class=\"muted\">54 clusters · $order</p>"))
             val nav = html.substringAfter("aria-label=\"Status filter\"").substringBefore("</nav>")
             val links = Regex("<a\\b.*?</a>").findAll(nav).map { it.value }.toList()
             assertEquals(6, links.size)
@@ -81,6 +87,12 @@ class ClustersPageRenderTest {
             assertTrue(nav.contains("Page $current of 3"))
             assertPrivate(html)
         }
+        val large = render(page.copy(page = 10_001, pageCount = 10_002))
+        val nav = large.substringAfter("aria-label=\"Pages\"").substringBefore("</nav>")
+        assertTrue(nav.contains("&amp;page=10000\""))
+        assertTrue(nav.contains("&amp;page=10002\""))
+        assertTrue(nav.contains("Page 10,001 of 10,002"))
+        assertPrivate(large)
     }
 
     @Test
@@ -90,6 +102,8 @@ class ClustersPageRenderTest {
         assertTrue(empty.contains("Clusters · doordash · No version recorded"))
         assertTrue(empty.contains("href=\"/ops/clusters/view?platform=doordash&amp;version=none\""))
         assertFalse(empty.contains("class=\"cluster-card\""))
+        assertFalse(empty.contains("aria-label=\"Pages\""))
+        assertFalse(render(page.copy(pageCount = 1)).contains("aria-label=\"Pages\""))
         assertPrivate(empty)
         val invalid = ClustersPageHtml.renderInvalid("dev", 10, "2026-10-02")
         assertTrue(invalid.contains("<title>Invalid cluster filter</title>"))
@@ -108,6 +122,19 @@ class ClustersPageRenderTest {
         val invalidFingerprint = render(page.copy(clusters = listOf(clusters.first().copy(fingerprint = "bad!"))))
         assertFalse(invalidFingerprint.contains("class=\"cluster-link\""))
         assertTrue(invalidFingerprint.contains("Cluster 01"))
+    }
+
+    @Test
+    fun `status chips label every known status and redact unknown values`() {
+        val tones = mapOf("new" to "warn", "triaged" to "accent", "drafted" to "accent", "resolved" to "good", "ignored" to "neutral")
+        for (status in CLUSTER_STATUSES + "STATUS_SENTINEL") {
+            val html = render(page.copy(clusters = listOf(clusters.first().copy(status = status))))
+            val card = html.substringAfter("<article class=\"cluster-card\">").substringBefore("</article>")
+            val label = if (status in CLUSTER_STATUSES) status.replaceFirstChar { it.uppercase() } else "[redacted]"
+            assertTrue(card.contains("<span class=\"chip ${tones[status] ?: "neutral"}\">$label</span>"))
+            assertFalse(html.contains("STATUS_SENTINEL"))
+            assertPrivate(html)
+        }
     }
 
     private fun render(value: OpsClusterPage = page): String = ClustersPageHtml.render("dev", 10, "2026-10-02", value)

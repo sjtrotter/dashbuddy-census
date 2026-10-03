@@ -194,7 +194,7 @@ object SkeletonValidator {
     private val slotFields = mapOf("h" to Shape.OPTIONAL_STRING, "kind" to Shape.STRING)
     // The app's wire token for a platform it could not resolve is `_unknown` (the conformance golden carries 471 of
     // them), so a leading underscore is part of the grammar; everything else is lowercase ASCII, ≤ 32 chars.
-    private val platformPattern = Regex("[a-z_][a-z0-9_]{0,31}")
+    private val platformPattern = WireGrammars.platform
     private val dayPattern = Regex("[0-9]{4}-[0-9]{2}-[0-9]{2}")
     private val versionPatterns = mapOf(
         "platformAppVersion" to WireGrammars.platformAppVersion,

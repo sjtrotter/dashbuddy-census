@@ -163,6 +163,7 @@ class DashboardRenderTest {
             assertEquals(expectedCounts[index].map { it.toString() }, values.subList(2, 8))
             assertTrue(row.contains("<th scope=\"row\""))
             assertTrue(row.contains("href=\"/ops/clusters/view?platform=${expected.platform}&amp;version=${expected.platformAppVersion ?: "none"}\""))
+            assertTrue(row.contains("aria-label=\"Review ${expected.platform} ${expected.platformAppVersion ?: "no version"}\""))
         }
         assertPrivate(page)
         for (invalid in listOf(summaries.first().copy(platform = "Bad!"), summaries.first().copy(platformAppVersion = "1.0.0.0.0"))) {

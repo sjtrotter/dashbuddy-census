@@ -87,6 +87,12 @@ internal fun Config.operatorTokenMatches(token: String): Boolean = MessageDigest
 
 internal fun isOpsPath(path: String): Boolean = path == "/ops" || path.startsWith("/ops/")
 
+/** The ops paths that answer a browser page rather than JSON: a request-level failure on them must answer HTML too. */
+internal fun isOpsHtmlPath(path: String): Boolean =
+    path == "/ops" || path == "/ops/" || path == "/ops/clusters/view" ||
+        (path.startsWith("/ops/clusters/") && path.endsWith("/view"))
+// `/ops/login` deliberately stays out: its form rejections answer the JSON envelope (pinned by OpsLoginTest).
+
 /** Unknown first segments are also suppressed: an arbitrary path segment can itself be a credential. */
 internal fun opsLogPath(path: String): String {
     val segment = path.removePrefix("/ops").trimStart('/').substringBefore('/')

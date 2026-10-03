@@ -2,15 +2,13 @@ package cloud.trotter.census.server.routes
 
 import cloud.trotter.census.server.Clock
 import cloud.trotter.census.server.Policy
-import cloud.trotter.census.server.db.CLUSTER_STATUSES
 import cloud.trotter.census.server.db.OpsStore
-import cloud.trotter.census.server.ingest.WireGrammars
 import cloud.trotter.census.server.jobs.HealthAlarms
 import cloud.trotter.census.server.ops.ClusterDetailHtml
+import cloud.trotter.census.server.ops.ClusterFilter
 import cloud.trotter.census.server.ops.ClustersPageHtml
 import cloud.trotter.census.server.ops.DashboardHtml
 import cloud.trotter.census.server.ops.fingerprintPattern
-import cloud.trotter.census.server.ops.platformPattern
 import cloud.trotter.census.server.today
 import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
@@ -29,20 +27,16 @@ fun Route.dashboardRoute(store: OpsStore, alarms: HealthAlarms, clock: Clock, po
         call.respondText(html, ContentType.Text.Html)
     }
     get("/clusters/view") {
-        val platform = call.request.queryParameters["platform"]
-        val version = call.request.queryParameters["version"]
-        val status = call.request.queryParameters["status"]
-        val pageInput = call.request.queryParameters["page"]
-        val page = if (pageInput == null) 1 else pageInput.toIntOrNull()
-        val today = clock.today().toString()
         call.response.headers.append("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'")
-        if (platform == null || !platformPattern.matches(platform) ||
-            version == null || (version != "none" && !WireGrammars.platformAppVersion.matches(version)) ||
-            (status != null && status !in CLUSTER_STATUSES) || page == null || page !in 1..10_000
-        ) {
+        // A malformed percent-escape never reaches here: routing decodes the query first and the module's
+        // bad-request handler answers the HTML shell for ops pages.
+        val parameters = call.request.queryParameters
+        val filter = ClusterFilter.parse(parameters["platform"], parameters["version"], parameters["status"], parameters["page"])
+        val today = clock.today().toString()
+        if (filter == null) {
             call.respondText(ClustersPageHtml.renderInvalid(policy.serverVersion, policy.k, today), ContentType.Text.Html, HttpStatusCode.BadRequest)
         } else {
-            val result = store.clustersPage(platform, version.takeUnless { it == "none" }, status, page)
+            val result = store.clustersPage(filter.platform, filter.version, filter.status, filter.page)
             call.respondText(ClustersPageHtml.render(policy.serverVersion, policy.k, today, result), ContentType.Text.Html)
         }
     }

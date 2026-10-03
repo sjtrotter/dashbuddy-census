@@ -7,7 +7,9 @@ import cloud.trotter.census.server.db.InstallStore
 import cloud.trotter.census.server.db.OpsStore
 import cloud.trotter.census.server.db.SkeletonStore
 import cloud.trotter.census.server.jobs.HealthAlarms
+import cloud.trotter.census.server.ops.ClustersPageHtml
 import cloud.trotter.census.server.ops.OpsLogging
+import cloud.trotter.census.server.ops.isOpsHtmlPath
 import cloud.trotter.census.server.ops.isOpsPath
 import cloud.trotter.census.server.routes.envelopeRoutes
 import cloud.trotter.census.server.routes.healthReportRoutes
@@ -17,6 +19,7 @@ import cloud.trotter.census.server.routes.opsRoutes
 import cloud.trotter.census.server.routes.policyRoutes
 import cloud.trotter.census.server.routes.skeletonRoutes
 import io.ktor.http.ContentType
+import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.content.OutgoingContent
 import io.ktor.serialization.kotlinx.json.json
@@ -32,6 +35,7 @@ import io.ktor.server.plugins.ratelimit.RateLimitName
 import io.ktor.server.plugins.statuspages.StatusPages
 import io.ktor.server.request.httpMethod
 import io.ktor.server.request.path
+import io.ktor.server.response.respondText
 import io.ktor.server.response.respond
 import io.ktor.server.routing.routing
 import kotlinx.coroutines.CancellationException
@@ -92,13 +96,26 @@ fun Application.module(config: Config, db: Database?, clock: Clock = SystemClock
             requestKey { call -> call.attributes.getOrNull(AuthenticatedInstallKey)?.id ?: "anonymous" }
         }
     }
+    val policy = Policy(serverVersion = config.serverVersion, imageDigest = config.imageDigest)
     install(StatusPages) {
         status(HttpStatusCode.TooManyRequests) { status ->
             // RateLimit sends an empty status; preserve explicit errors such as budget_exhausted.
             if (content is OutgoingContent.NoContent) call.respond(status, ErrorResponse("rate_limited"))
         }
         exception<BadRequestException> { call, _ ->
-            call.respond(HttpStatusCode.BadRequest, ErrorResponse("bad_request"))
+            // Routing decodes the query before any handler runs, so a malformed percent-escape on a browser page
+            // lands here: answer the page's own shell (nothing from the request is echoed), JSON everywhere else.
+            if (isOpsHtmlPath(call.request.path())) {
+                // The route-scoped OpsAuth plugin (which adds no-store) never ran: routing threw first.
+                call.response.headers.append(HttpHeaders.CacheControl, "no-store")
+                call.response.headers.append("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'")
+                call.respondText(
+                    ClustersPageHtml.renderBadRequest(policy.serverVersion, policy.k, clock.today().toString()),
+                    ContentType.Text.Html, HttpStatusCode.BadRequest,
+                )
+            } else {
+                call.respond(HttpStatusCode.BadRequest, ErrorResponse("bad_request"))
+            }
         }
         // A malformed percent-escape in a query, cookie or form raises Ktor's checked URLDecodeException, whose
         // message embeds the whole input (an operator token in a login form): answer 400, never the generic 500.
@@ -122,7 +139,6 @@ fun Application.module(config: Config, db: Database?, clock: Clock = SystemClock
     }
     routing {
         healthRoutes(db)
-        val policy = Policy(serverVersion = config.serverVersion, imageDigest = config.imageDigest)
         policyRoutes(policy)
         val store = db?.let { InstallStore(it, clock) }
         val skeletons = db?.let { SkeletonStore(it, clock) }

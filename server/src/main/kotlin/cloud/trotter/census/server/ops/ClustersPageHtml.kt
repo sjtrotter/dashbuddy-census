@@ -2,7 +2,6 @@ package cloud.trotter.census.server.ops
 
 import cloud.trotter.census.server.db.CLUSTER_STATUSES
 import cloud.trotter.census.server.db.OpsClusterPage
-import cloud.trotter.census.server.ingest.WireGrammars
 import kotlinx.html.a
 import kotlinx.html.details
 import kotlinx.html.div
@@ -21,15 +20,16 @@ object ClustersPageHtml {
             a(href = "/ops/#clusters", classes = "action") { +"Back to the dashboard" }
         },
     ) {
+        val filter = ClusterFilter.parse(page.platform, page.platformAppVersion ?: "none", page.status, page.page.toString())
         h1 {
             +"Clusters · ${platform(page.platform)} · "
             +if (page.platformAppVersion == null) "No version recorded" else "Version ${version(page.platformAppVersion)}"
         }
-        p("muted") { +"${number(page.total)} clusters · untriaged first, then by rank · page ${number(page.page)} of ${number(page.pageCount)}" }
+        p("muted") { +"${number(page.total)} clusters · ${if (page.status == null) "untriaged first, then by rank" else "by rank"}" }
         nav("status-filter") {
             attributes["aria-label"] = "Status filter"
             (listOf(null) + CLUSTER_STATUSES).forEach { status ->
-                val href = clustersPageHref(page.platform, page.platformAppVersion, status)
+                val href = filter?.href(status = status)
                 val label = status?.replaceFirstChar { it.titlecase(Locale.ROOT) } ?: "All"
                 if (href == null) span { +"Unavailable" } else a(href = href, classes = if (page.status == status) "action current" else "action") {
                     if (page.status == status) attributes["aria-current"] = "page"
@@ -38,14 +38,14 @@ object ClustersPageHtml {
             }
         }
         if (page.clusters.isEmpty()) emptyState("No clusters match this filter.")
-        else div("cluster-grid") { clusterCards(page.clusters, k, linkedMapOf()) }
-        nav("pager") {
+        else div("cluster-grid") { clusterCards(page.clusters, k, showGroupFacts = false) }
+        if (page.pageCount > 1) nav("pager") {
             attributes["aria-label"] = "Pages"
-            if (page.page > 1) clustersPageHref(page.platform, page.platformAppVersion, page.status, page.page - 1)?.let {
+            if (page.page > 1) filter?.href(page = page.page - 1)?.let {
                 a(href = it, classes = "action") { +"Previous" }
             }
             span { +"Page ${number(page.page)} of ${number(page.pageCount)}" }
-            if (page.page < page.pageCount) clustersPageHref(page.platform, page.platformAppVersion, page.status, page.page + 1)?.let {
+            if (page.page < page.pageCount) filter?.href(page = page.page + 1)?.let {
                 a(href = it, classes = "action") { +"Next" }
             }
         }
@@ -56,22 +56,21 @@ object ClustersPageHtml {
         }
     }
 
-    fun renderInvalid(serverVersion: String, k: Int, today: String): String = opsPage(
-        pageTitle = "Invalid cluster filter",
+    fun renderInvalid(serverVersion: String, k: Int, today: String): String = errorPage("Invalid cluster filter", serverVersion, k, today)
+
+    /**
+     * The shell for a request Ktor refused before any dashboard route ran (a malformed percent-escape in the query is
+     * decoded by routing itself). Echoes nothing from the request.
+     */
+    fun renderBadRequest(serverVersion: String, k: Int, today: String): String = errorPage("Invalid request", serverVersion, k, today)
+
+    private fun errorPage(title: String, serverVersion: String, k: Int, today: String): String = opsPage(
+        pageTitle = title,
         headerContent = {
             metadata(serverVersion, k, today)
             a(href = "/ops/#clusters", classes = "action") { +"Back to the dashboard" }
         },
     ) {
-        h1 { +"Invalid cluster filter" }
+        h1 { +title }
     }
-}
-
-/** Every token is checked here even when supplied by an already-validated route. */
-internal fun clustersPageHref(platform: String, version: String?, status: String? = null, page: Int? = null): String? {
-    if (!platformPattern.matches(platform) || (version != null && !WireGrammars.platformAppVersion.matches(version)) ||
-        (status != null && status !in CLUSTER_STATUSES) || (page != null && page !in 1..10_000)
-    ) return null
-    return "/ops/clusters/view?platform=$platform&version=${version ?: "none"}" +
-        (status?.let { "&status=$it" } ?: "") + (page?.let { "&page=$it" } ?: "")
 }

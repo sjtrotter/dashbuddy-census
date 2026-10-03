@@ -106,8 +106,11 @@ object DashboardHtml {
                         cell { row.platformAppVersion?.let { code { +version(it) } } ?: run { +"Not recorded" } },
                         numeric(row.total),
                     ) + CLUSTER_STATUSES.map { numeric(row.byStatus[it] ?: 0) } + cell {
-                        val href = clustersPageHref(row.platform, row.platformAppVersion)
-                        if (href == null) +"Unavailable" else a(href = href, classes = "action") { +"Review" }
+                        val filter = ClusterFilter.parse(row.platform, row.platformAppVersion ?: "none", null, null)
+                        if (filter == null) +"Unavailable" else a(href = filter.href(), classes = "action") {
+                            attributes["aria-label"] = "Review ${platform(row.platform)} ${row.platformAppVersion?.let { version(it) } ?: "no version"}"
+                            +"Review"
+                        }
                     }
                 })
         }
@@ -371,13 +374,12 @@ internal fun FlowContent.emptyState(copy: String) { p("empty") { +copy } }
 internal fun FlowOrPhrasingContent.date(value: String) { time { attributes["datetime"] = safe(value); +safe(value) } }
 internal fun number(value: Number): String = String.format(Locale.ROOT, "%,d", value.toLong())
 internal val fingerprintPattern = Regex("[0-9a-f]{64}")
-internal val platformPattern = Regex("[a-z_][a-z0-9_]{0,31}")
 internal fun safe(value: String): String = value
     .replace(Regex("(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"), "[redacted]")
     .replace(Regex("(?i)[0-9a-f]{16,}"), "[redacted]")
 internal fun version(value: String): String = safe(value.substringBefore('+')) + if ('+' in value) "+[build withheld]" else ""
 private fun validated(value: String, pattern: Regex): String = if (pattern.matches(value)) safe(value) else "[redacted]"
-internal fun platform(value: String): String = validated(value, platformPattern)
+internal fun platform(value: String): String = validated(value, WireGrammars.platform)
 private fun prefix(value: String): String = validated(value, Regex("[a-fA-F0-9]{8}"))
 internal fun rule(value: String): String = validated(value, WireGrammars.ruleId)
 private fun JsonObject.rows(key: String): List<JsonObject> = (get(key) as? JsonArray).orEmpty().map { it.jsonObject }
