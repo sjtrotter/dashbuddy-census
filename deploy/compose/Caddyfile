@@ -1,5 +1,8 @@
 {
     email {$ACME_EMAIL}
+    # #1181: clients connecting to the operator site by IP literal send no SNI; behind Docker's port NAT the
+    # connection's local address is the container's, so certificate selection needs this default.
+    default_sni {$OPS_BIND_IP}
     # ADR-0011: NO client IP is ever retained — runtime errors included; liveness is observed through /healthz probes, not proxy logs
     log {
         output discard

@@ -127,7 +127,9 @@ write_files:
         wg genkey > /etc/wireguard/server.key
       fi
       wg pubkey < /etc/wireguard/server.key > /etc/wireguard/server.pub
-      peers=$(aws ssm get-parameter --name '/${name_prefix}/wireguard_peers' --query Parameter.Value --output text 2>/dev/null || true)
+      # A FETCH failure fails the start loudly (like census-configure); only an explicit empty/CHANGE-ME value
+      # means "no peers" — an API blip must never tear a working tunnel down.
+      peers=$(aws ssm get-parameter --name '/${name_prefix}/wireguard_peers' --query Parameter.Value --output text)
       if [ -z "$peers" ] || [ "$peers" = CHANGE-ME ]; then
         systemctl disable --now wg-quick@wg0 >/dev/null 2>&1 || true
         rm -f /etc/wireguard/wg0.conf
@@ -154,7 +156,10 @@ write_files:
               raise SystemExit('CENSUS: invalid WireGuard peer key')
           if len(decoded) != 32 or base64.b64encode(decoded).decode() != key:
               raise SystemExit('CENSUS: invalid WireGuard peer key')
-          ip = ipaddress.ip_address(address)
+          try:
+              ip = ipaddress.ip_address(address)
+          except ValueError:
+              raise SystemExit('CENSUS: invalid WireGuard peer address')
           if ip not in ipaddress.ip_network('10.8.0.0/24') or ip.packed[-1] in (0, 1, 255):
               raise SystemExit('CENSUS: WireGuard peer address must be 10.8.0.2-10.8.0.254')
           if address in seen_ips or key in seen_keys:
@@ -173,7 +178,12 @@ write_files:
       chmod 0600 /etc/wireguard/wg0.conf.tmp
       mv /etc/wireguard/wg0.conf.tmp /etc/wireguard/wg0.conf
       systemctl enable wg-quick@wg0 >/dev/null 2>&1
-      systemctl restart wg-quick@wg0
+      if wg show wg0 >/dev/null 2>&1; then
+        # Already up: apply the peer set in place (the address and port are constants), no tunnel flap.
+        wg syncconf wg0 <(wg-quick strip wg0)
+      else
+        systemctl restart wg-quick@wg0
+      fi
       echo "CENSUS: WireGuard up with $(grep -c '^\[Peer\]' /etc/wireguard/wg0.conf) peer(s)"
 
   - path: /usr/local/sbin/census-configure
