@@ -50,13 +50,16 @@
     handle {
         import upstream
     }
-    # #1178: per-IP admission at the edge, so one curl with invented install ids cannot starve every driver's
-    # enrol/ingest (the app's buckets are keyed by the bearer's install id and shared). The client address is the
-    # direct TCP peer (nothing is in front of Caddy), held ONLY in this plugin's in-memory zones — no access log,
-    # no retention, lost on restart (ADR-0011). Figures: enrol 10/min (a device enrols once), the rest of /v1 at
-    # 120/min (a phone's hourly batches and health posts are a handful), both far above honest use.
+    # #1178: per-address admission at the edge, so one source cannot starve every driver's enrol/ingest (the app's
+    # buckets are keyed by the bearer's UNVERIFIED install id, and enrol is one process-wide 120/h bucket spent
+    # BEFORE credential checks). The client address is the direct TCP peer (nothing is in front of Caddy), held
+    # ONLY in this plugin's in-memory zones — no access log, no retention, lost on restart (ADR-0011). Figures
+    # (review, Astra): enrol 10/min burst AND 30/h — one address can take at most a quarter of the app's hourly
+    # enrol allowance (a device enrols once); the rest of /v1 at 300/min — 100 phones behind one carrier address
+    # can each run a three-batch upload in the same minute, while one address stays below the app's 600/min
+    # global admission. Not a defence against a distributed source.
     rate_limit {
-        zone enroll {
+        zone enroll_burst {
             match {
                 path /v1/enroll
             }
@@ -64,12 +67,20 @@
             events 10
             window 1m
         }
+        zone enroll_hourly {
+            match {
+                path /v1/enroll
+            }
+            key {http.request.remote.host}
+            events 30
+            window 1h
+        }
         zone api {
             match {
                 path /v1/*
             }
             key {http.request.remote.host}
-            events 120
+            events 300
             window 1m
         }
         jitter 0.1

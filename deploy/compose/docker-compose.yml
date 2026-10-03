@@ -61,8 +61,10 @@ services:
         restart: unless-stopped
         networks: [db]
     caddy:
-        # #1178: upstream Caddy + caddy-ratelimit, built by .github/workflows/caddy-image.yml (pin, bump deliberately).
-        image: ghcr.io/sjtrotter/dashbuddy-census-caddy:${CADDY_IMAGE_TAG:-caddy-v0.1.0}
+        # #1178: upstream Caddy + caddy-ratelimit, built by .github/workflows/caddy-image.yml. Production pins the
+        # whole reference BY DIGEST in this committed file (@sha256:…, like the census image) once a caddy-v* tag
+        # has published; the image deploy workflow never touches this line (its sed is scoped to the census service).
+        image: ${CADDY_IMAGE_REF:-ghcr.io/sjtrotter/dashbuddy-census-caddy:caddy-v0.1.0}
         environment:
             PUBLIC_HOST: ${PUBLIC_HOST:?Set PUBLIC_HOST in .env}
             ACME_EMAIL: ${ACME_EMAIL:-}

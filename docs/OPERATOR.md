@@ -39,10 +39,12 @@ Schedule a restore drill; copying a dump alone does not prove recovery.
 ## Edge rate limiting (#1178)
 
 The public site runs `caddy-ratelimit` zones keyed by the direct client address: `/v1/enroll` 10 per
-minute, `/v1/*` 120 per minute (sliding windows, 10 % jitter on the `Retry-After`). A refused request
-is `429` with `Retry-After` from Caddy and never reaches the application, so it spends none of the
-application's shared buckets — one curl with invented install ids can no longer starve every driver's
-enrol or ingest. The client address exists only inside the Caddy process for the window; nothing is
+minute AND 30 per hour, `/v1/*` 300 per minute (sliding windows, 10 % jitter on the `Retry-After`). A
+refused request is `429` with `Retry-After` from Caddy and never reaches the application, so it spends
+none of the application's shared buckets. One address can therefore take at most a quarter of the
+application's hourly enrol allowance (120/h, spent before credential checks) and stays under its global
+600/min admission; starving every driver now needs many addresses, not one curl. 300/min per address
+lets 100 phones behind one carrier address each run a three-batch upload in the same minute. The client address exists only inside the Caddy process for the window; nothing is
 logged (both sites discard their logs) and nothing is stored, which is how ADR-0011's "no IP ever"
 posture is kept while still refusing abuse at the edge. The limits reset on a Caddy restart. The
 operator listener has no per-IP zone: it is reachable only through the VPN from registered peers and
