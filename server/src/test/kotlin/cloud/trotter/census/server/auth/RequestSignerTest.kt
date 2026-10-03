@@ -15,6 +15,7 @@ class RequestSignerTest {
         val actual = RequestSigner.canonical("POST", "/v1/nonce?ignored=yes", "1790899200")
         assertArrayEquals(expected.toByteArray(Charsets.UTF_8), actual.toByteArray(Charsets.UTF_8))
         assertEquals(SIGNATURE, RequestSigner.sign(SECRET, actual))
+        assertEquals(cloud.trotter.census.contract.auth.RequestSigner.sign(SECRET, actual), RequestSigner.sign(SECRET, actual))
         assertTrue(RequestSigner.verify(SECRET, actual, SIGNATURE))
         assertTrue(RequestSigner.verify(SECRET, actual, SIGNATURE)) // signatures are not replay prevention
     }

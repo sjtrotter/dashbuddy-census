@@ -5,6 +5,8 @@ on:
         branches: [main]
 permissions:
     contents: read
+env:
+    DASHBUDDY_CONTRACT_SHA: 3275ad6b6dad827155d1b4cf8b33fbcef8bc64d0
 jobs:
     build:
         runs-on: ubuntu-latest
@@ -17,11 +19,11 @@ jobs:
                   path: census
                   persist-credentials: false
             # The wire contract is an included build of the app repo, pinned to a reviewed SHA
-            # (repository variable DASHBUDDY_CONTRACT_SHA — bump deliberately).
+            # (workflow pin DASHBUDDY_CONTRACT_SHA — bump deliberately).
             - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
               with:
                   repository: sjtrotter/DashBuddy
-                  ref: ${{ vars.DASHBUDDY_CONTRACT_SHA }}
+                  ref: ${{ env.DASHBUDDY_CONTRACT_SHA }}
                   path: DashBuddy
                   persist-credentials: false
             - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1

@@ -11,7 +11,7 @@ Every request to an authenticated route includes the bearer plus:
 | `X-Census-Timestamp` | Unix seconds as a decimal integer, with no `+`, leading zeroes, whitespace, or fractions |
 | `X-Census-Signature` | `v1=` followed by 64 lowercase hex characters |
 
-The shared `RequestSigner` object defines the byte-exact algorithm. Construct this string, with exactly three single LF bytes (`0a`), no CR bytes, and **no trailing newline**:
+The client signer is the contract's `cloud.trotter.census.contract.auth.RequestSigner`. Construct this string, with exactly three single LF bytes (`0a`), no CR bytes, and **no trailing newline**:
 
 ```text
 METHOD + "\n" + PATH + "\n" + TIMESTAMP + "\n" + SHA256_HEX(RAW_BODY)
