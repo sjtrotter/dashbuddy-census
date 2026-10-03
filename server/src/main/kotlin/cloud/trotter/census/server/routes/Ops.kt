@@ -7,6 +7,7 @@ import cloud.trotter.census.server.ErrorResponse
 import cloud.trotter.census.server.Policy
 import cloud.trotter.census.server.auth.InstallId
 import cloud.trotter.census.server.auth.readLimitedBody
+import cloud.trotter.census.server.db.CLUSTER_STATUSES
 import cloud.trotter.census.server.db.OpsStore
 import cloud.trotter.census.server.ingest.WireGrammars
 import cloud.trotter.census.server.ingest.parseBounded
@@ -17,6 +18,7 @@ import cloud.trotter.census.server.ops.OpsSessions
 import cloud.trotter.census.server.ops.TotpDecision
 import cloud.trotter.census.server.ops.TotpReplay
 import cloud.trotter.census.server.ops.fingerprintPattern
+import cloud.trotter.census.server.ops.platformPattern
 import cloud.trotter.census.server.ops.operatorTokenMatches
 import cloud.trotter.census.server.today
 import io.ktor.http.ContentType
@@ -48,7 +50,7 @@ import java.time.format.DateTimeParseException
 private val opsJson = Json { explicitNulls = false; encodeDefaults = true }
 /** The form's bound on the operator token (the bearer header has none); the login page's maxlength mirrors it. */
 internal const val MAX_TOKEN_LENGTH = 1024
-private val clusterStatuses = setOf("new", "triaged", "drafted", "resolved", "ignored")
+private val clusterStatuses = CLUSTER_STATUSES.toSet()
 
 fun Route.opsRoutes(
     config: Config,
@@ -115,10 +117,12 @@ fun Route.opsRoutes(
             }
             dashboardRoute(store, alarms, clock, policy)
             get("/clusters") {
+                val platform = call.request.queryParameters["platform"]
+                if (platform != null && !platformPattern.matches(platform)) badRequest()
                 val version = call.request.queryParameters["version"]
                 val status = call.request.queryParameters["status"]
                 if (version != null && !WireGrammars.platformAppVersion.matches(version) || status != null && status !in clusterStatuses) badRequest()
-                call.respond(store.clusters(version, status, call.bound("limit", 50, 200)))
+                call.respond(store.clusters(version, status, call.bound("limit", 50, 200), platform = platform))
             }
             get("/clusters/{fingerprint}") {
                 val row = store.cluster(call.fingerprint())

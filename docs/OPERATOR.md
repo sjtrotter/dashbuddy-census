@@ -104,7 +104,9 @@ The silence clock uses a process-local map of install IDs to server receipt inst
 
 ## S6a operator surface
 
-`GET /ops/` is a read-only, server-rendered dashboard with identity and snapshot sections followed by alarms, seven days of health, ranked clusters, today's ledger, installs, and the hash-free vocabulary queue.
+`GET /ops/` is a read-only, server-rendered dashboard with identity and snapshot sections followed by alarms, seven days of health, a cluster summary table, today's ledger, installs, and the hash-free vocabulary queue.
+The cluster table has one row per platform and app version, with total and per-status counts. Platforms sort alphabetically, numeric versions newest first, and “Not recorded” last within each platform. A cluster observed in multiple versions contributes to each corresponding row.
+Each Review link opens `GET /ops/clusters/view?platform=doordash&version=8.10`. This authenticated child page shows 25 clusters per page, untriaged (`new`) first, followed by `triaged`, `drafted`, `resolved`, and `ignored`; within each status, rank descends. It has status filters, Previous/Next links, and the ranking explanation. Required `platform` matches `[a-z_][a-z0-9_]{0,31}`; required `version` is a platform app version or `none` for clusters with no recorded version. Optional `status` uses those five statuses, and optional `page` is an integer from 1 to 10,000 (default 1, clamped to the last available page). Invalid or missing filters return an HTML 400 page. Status links reset paging.
 `GET /ops/clusters/{fingerprint}/view` is the authenticated HTML cluster detail page with gated notes and skeleton samples. Its only form is the logout control; it has
 no JavaScript or embedded operator credential. Its CSP is
 `default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'`.
@@ -165,7 +167,7 @@ Vocabulary hashes are available only on the dedicated JSON vocabulary surface.
 
 | Endpoint | Result |
 | --- | --- |
-| `GET /ops/clusters?version=&status=&limit=` | Array of `{platformAppVersion, clusters}` groups, numeric versions newest first; optional filters must be valid when supplied. Default 50 rows, maximum 200 across groups. Rows include dates, counts, trust/gate flags, versions, `newWithVersion`, status, resolved rule, and notes. |
+| `GET /ops/clusters?platform=&version=&status=&limit=` | Array of `{platformAppVersion, clusters}` groups, numeric versions newest first; optional filters must be valid when supplied. The additive `platform` filter uses `[a-z_][a-z0-9_]{0,31}` and restricts clusters before version grouping; the JSON shape is unchanged. Default 50 rows, maximum 200 across groups. Rows include dates, counts, trust/gate flags, versions, `newWithVersion`, status, resolved rule, and notes. |
 | `GET /ops/clusters/{fingerprint}` | Cluster row and `{platformAppVersion, receivedDay, skeleton}` samples; `newWithVersion` refers to its newest observed version. |
 | `GET /ops/installs?limit=` | Prefixes, dates, trust/revocation flags, last app version, and whether an attestation verdict exists. Default 50, maximum 200. |
 | `GET /ops/health?days=7` | `fleet` rows and per-install prefix/day/platform/version counters; maximum 90 days. |

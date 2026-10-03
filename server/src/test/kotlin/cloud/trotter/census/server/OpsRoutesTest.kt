@@ -8,6 +8,7 @@ import cloud.trotter.census.contract.CensusFingerprint
 import cloud.trotter.census.contract.CensusHash
 import cloud.trotter.census.contract.SkeletonSchema
 import cloud.trotter.census.server.auth.hashSecret
+import cloud.trotter.census.server.db.CLUSTER_STATUSES
 import cloud.trotter.census.server.db.HealthStore
 import cloud.trotter.census.server.db.IngestOutcome
 import cloud.trotter.census.server.db.InstallStore
@@ -20,6 +21,7 @@ import cloud.trotter.census.server.ingest.SkeletonValidator
 import cloud.trotter.census.server.jobs.AlarmSink
 import cloud.trotter.census.server.jobs.HealthAlarms
 import cloud.trotter.census.server.ops.Totp
+import cloud.trotter.census.server.ops.opsLogPath
 import io.ktor.client.HttpClient
 import io.ktor.client.request.get
 import io.ktor.client.request.header
@@ -285,6 +287,52 @@ class OpsRoutesTest {
                 assertNull(below.notes)
                 assertTrue(below.notesWithheld)
                 assertEquals(listOf(fresh.item.fingerprint), ops.clusters(status = "ignored").flatMap { it.clusters }.map { it.fingerprint })
+                assertTrue(ops.status(old.item.fingerprint, "new", null, null))
+                assertTrue(ops.status(fresh.item.fingerprint, "resolved", null, null))
+                val noVersion = "e".repeat(64)
+                val uber = "f".repeat(64)
+                sql { connection ->
+                    connection.update("INSERT INTO clusters (fingerprint, platform, first_seen_day, last_seen_day) VALUES (?, 'doordash', ?, ?)", noVersion, day, day)
+                    connection.update("INSERT INTO clusters (fingerprint, platform, first_seen_day, last_seen_day, status) VALUES (?, 'uber', ?, ?, 'ignored')", uber, day, day)
+                    connection.update("INSERT INTO cluster_sightings (fingerprint, install_id, day, platform_app_version) VALUES (?, ?, ?, '1.2')", uber, first, day)
+                }
+                val summary = ops.clusterSummary()
+                assertEquals(listOf("doordash" to "8.10", "doordash" to "8.9", "doordash" to null, "uber" to "1.2"),
+                    summary.map { it.platform to it.platformAppVersion })
+                assertEquals(listOf(2, 1, 1, 1), summary.map { it.total })
+                assertEquals(listOf(listOf(1, 0, 0, 1, 0), listOf(1, 0, 0, 0, 0), listOf(1, 0, 0, 0, 0), listOf(0, 0, 0, 0, 1)),
+                    summary.map { row -> CLUSTER_STATUSES.map { row.byStatus.getValue(it) } })
+                summary.forEach { assertEquals(CLUSTER_STATUSES.toSet(), it.byStatus.keys) }
+                val review = ops.clustersPage("doordash", "8.10", null, 1)
+                assertEquals(listOf(old.item.fingerprint, fresh.item.fingerprint), review.clusters.map { it.fingerprint })
+                assertEquals(listOf(false, true), review.clusters.map { it.newWithVersion })
+                assertTrue(review.clusters.all { it.samples == null })
+                assertEquals(2, review.total)
+                assertEquals(25, review.pageSize)
+                assertEquals(1, review.pageCount)
+                // JSON still ranks by score, even though review puts the lower-scoring new cluster first.
+                assertEquals(fresh.item.fingerprint, ops.clusters(platform = "doordash").first().clusters.first().fingerprint)
+                val lastPage = ops.clustersPage("doordash", "8.10", null, 99, pageSize = 1)
+                assertEquals(2, lastPage.page)
+                assertEquals(2, lastPage.pageCount)
+                assertEquals(2, lastPage.total)
+                assertEquals(1, lastPage.pageSize)
+                assertEquals(listOf(fresh.item.fingerprint), lastPage.clusters.map { it.fingerprint })
+                assertEquals(1, ops.clustersPage("doordash", "8.10", null, 0, pageSize = 1).page)
+                val filtered = ops.clustersPage("doordash", "8.10", "resolved", 99)
+                assertEquals("resolved", filtered.status)
+                assertEquals(1, filtered.total)
+                assertEquals(1, filtered.page)
+                assertEquals(listOf(fresh.item.fingerprint), filtered.clusters.map { it.fingerprint })
+                val missingVersion = ops.clustersPage("doordash", null, null, 1)
+                assertEquals(listOf(noVersion), missingVersion.clusters.map { it.fingerprint })
+                assertFalse(missingVersion.clusters.single().newWithVersion)
+                assertNull(missingVersion.clusters.single().samples)
+                val emptyPage = ops.clustersPage("uber", null, null, 99)
+                assertTrue(emptyPage.clusters.isEmpty())
+                assertEquals(0, emptyPage.total)
+                assertEquals(1, emptyPage.page)
+                assertEquals(1, emptyPage.pageCount)
             }
         }
     }
@@ -354,7 +402,7 @@ class OpsRoutesTest {
             val installs = InstallStore(db, clock)
             val skeletons = SkeletonStore(db, clock)
             val ops = OpsStore(db, clock, Policy())
-            val sample = fixture("Detail", "Only kind is displayed")
+            val sample = fixture("Detail", "Only kind is displayed", "1.0.0")
             val id = UUID.randomUUID()
             val key = secret(79)
             testApplication {
@@ -395,12 +443,57 @@ class OpsRoutesTest {
                         assertEquals(1, Regex("<style\\b").findAll(html).count())
                         assertFalse(html.contains(operatorToken))
                     }
+                    for ((query, status) in listOf(
+                        "platform=doordash&version=1.0.0" to 200,
+                        "platform=doordash&version=none" to 200,
+                        "platform=Bad!&version=1.0.0" to 400,
+                        "platform=doordash&version=1.0.0.0.0" to 400,
+                        "platform=doordash&version=1.0.0&status=bogus" to 400,
+                        "platform=doordash&version=1.0.0&page=0" to 400,
+                        "platform=doordash&version=1.0.0&page=10001" to 400,
+                        "platform=doordash&version=1.0.0&page=oops" to 400,
+                        "platform=doordash&version=1.0.0&page=" to 400,
+                        "version=1.0.0" to 400,
+                        "platform=doordash" to 400,
+                    )) {
+                        val response = browser.get("/ops/clusters/view?$query") {
+                            if (useCookie) header(HttpHeaders.Cookie, cookie) else header(HttpHeaders.Authorization, "Bearer $operatorToken")
+                        }
+                        assertEquals(status, response.status.value, query)
+                        assertEquals(ContentType.Text.Html, response.contentType()?.withoutParameters())
+                        assertEquals("default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'", response.headers["Content-Security-Policy"])
+                        assertEquals("no-store", response.headers[HttpHeaders.CacheControl])
+                        val html = response.bodyAsText()
+                        when {
+                            status == 400 -> assertTrue(html.contains("Invalid cluster filter"))
+                            query.endsWith("none") -> assertTrue(html.contains("No clusters match this filter."))
+                            else -> {
+                                assertTrue(html.contains("Cluster 01"))
+                                assertTrue(html.contains("href=\"$path/view\""))
+                            }
+                        }
+                        assertPrivate(html)
+                    }
                     val json = browser.get(path) {
                         if (useCookie) header(HttpHeaders.Cookie, cookie) else header(HttpHeaders.Authorization, "Bearer $operatorToken")
                     }
                     assertEquals(ContentType.Application.Json, json.contentType()?.withoutParameters())
                     assertEquals(expected, Json.parseToJsonElement(json.bodyAsText()))
                 }
+                val allGroups = Json.parseToJsonElement(client.ops("/ops/clusters").bodyAsText()).jsonArray
+                val platformResponse = client.ops("/ops/clusters?platform=doordash")
+                assertEquals(200, platformResponse.status.value)
+                assertEquals(ContentType.Application.Json, platformResponse.contentType()?.withoutParameters())
+                val platformGroups = Json.parseToJsonElement(platformResponse.bodyAsText()).jsonArray
+                assertEquals(allGroups, platformGroups)
+                assertEquals(setOf("platformAppVersion", "clusters"), platformGroups.single().jsonObject.keys)
+                assertEquals(sample.item.fingerprint, platformGroups.single().jsonObject.getValue("clusters").jsonArray.single().jsonObject.getValue("fingerprint").jsonPrimitive.content)
+                val uberResponse = client.ops("/ops/clusters?platform=uber")
+                assertEquals(200, uberResponse.status.value)
+                assertTrue(Json.parseToJsonElement(uberResponse.bodyAsText()).jsonArray.isEmpty())
+                val invalidPlatform = client.ops("/ops/clusters?platform=Bad!")
+                assertEquals(ContentType.Application.Json, invalidPlatform.contentType()?.withoutParameters())
+                assertError(invalidPlatform, 400, "bad_request")
                 assertError(browser.get("$path/view"), 401, "unauthorized")
                 val display = ops.vocabularyQueueDisplay()
                 assertTrue(display.isEmpty()) // One non-trusted install is below the vocabulary gate.
@@ -446,5 +539,14 @@ class OpsRoutesTest {
         fun migrate() { Database.migrate(config()) }
         @JvmStatic
         fun dockerAvailable(): Boolean = System.getenv("CI") == "true" || runCatching { DockerClientFactory.instance().isDockerAvailable }.getOrDefault(false)
+    }
+}
+
+class OpsLogPathTest {
+    @Test
+    fun `cluster review log path excludes details and query parameters`() {
+        // The caller uses request.path(), so /ops/clusters/view?platform=doordash&version=1.0.0
+        // arrives here as the path only; the query string never reaches opsLogPath.
+        assertEquals("/ops/clusters", opsLogPath("/ops/clusters/view"))
     }
 }

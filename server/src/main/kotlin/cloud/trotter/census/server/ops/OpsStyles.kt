@@ -63,6 +63,9 @@ main { display:grid; gap:1.5rem; min-width:0; }
 .section-nav { display:flex; flex-wrap:wrap; gap:.25rem .75rem; }
 .section-nav a,.action,.cluster-link { display:inline-flex; align-items:center; min-height:44px; }
 .section-nav a { padding:.25rem .5rem; }
+.status-filter { display:flex; flex-wrap:wrap; gap:.5rem; }
+.status-filter a.current { background:var(--accent-dim); color:var(--accent); }
+.pager { display:flex; gap:1rem; align-items:center; flex-wrap:wrap; }
 .panel { min-width:0; padding:1.5rem; background:var(--surface); border:1px solid var(--line); border-radius:1rem; }
 .panel > * + * { margin-top:1rem; }
 .section-heading,.cluster-heading { display:flex; align-items:center; flex-wrap:wrap; gap:.5rem 1rem; }

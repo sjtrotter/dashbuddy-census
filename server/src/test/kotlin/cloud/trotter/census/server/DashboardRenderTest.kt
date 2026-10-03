@@ -1,12 +1,8 @@
 package cloud.trotter.census.server
 
-import cloud.trotter.census.server.db.OpsCluster
-import cloud.trotter.census.server.db.OpsClusterGroup
-import cloud.trotter.census.server.db.OpsSample
+import cloud.trotter.census.server.db.OpsClusterSummaryRow
 import cloud.trotter.census.server.db.OpsVocabularyDisplay
 import cloud.trotter.census.server.ops.DashboardHtml
-import cloud.trotter.census.server.ops.SkeletonRender
-import cloud.trotter.census.server.ops.SkeletonRenderTest
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -19,32 +15,29 @@ import org.junit.jupiter.api.Test
 
 class DashboardRenderTest {
     private val empty = JsonObject(emptyMap())
-    private val cluster = OpsCluster(
-        "a".repeat(64), "doordash", "new", "2026-10-01", "2026-10-02", 9, false, 12480,
-        listOf("8.10", "8.0"), true, false, notesWithheld = true,
-        samples = listOf(OpsSample("8.0", "2026-10-02", SkeletonRender.render(SkeletonRenderTest.sample, false))),
+    private val summaries = listOf(
+        OpsClusterSummaryRow("doordash", "8.10", 3, mapOf("new" to 2, "triaged" to 1)),
+        OpsClusterSummaryRow("doordash", "8.0", 1, mapOf("resolved" to 1)),
+        OpsClusterSummaryRow("doordash", null, 1, mapOf("new" to 1)),
+        OpsClusterSummaryRow("uber", "1.2", 1, mapOf("ignored" to 1)),
     )
 
     @Test
     fun `read only page has no raw hashes identities secrets or home samples`() {
-        val page = render(listOf(OpsClusterGroup("8.10", listOf(cluster))))
-        assertTrue(page.contains("href=\"/ops/clusters/${cluster.fingerprint}/view\""))
+        val page = render(summaries)
+        assertFalse(page.contains("class=\"cluster-card\""))
+        assertFalse(Regex("/ops/clusters/[0-9a-f]{64}/view").containsMatchIn(page))
+        assertFalse(page.contains("How ranking works"))
         assertPrivate(page)
         for (forbidden in listOf("android.widget", "com.example:id/action", "OPERATOR_TOKEN_SENTINEL", "<script", "tree-wrap\"", "~")) assertFalse(page.contains(forbidden), forbidden)
         assertEquals(1, Regex("<form\\b").findAll(page).count())
         assertTrue(page.substringBefore("</header>").contains("action=\"/ops/logout\""))
         assertTrue(page.contains("method=\"post\""))
-        assertTrue(page.contains("Non-trusted installs · 28 d"))
-        assertTrue(page.contains("12,480"))
-        assertTrue(page.contains("New with this version"))
-        assertTrue(page.contains("Labels redacted: 9 / 10 non-trusted installs in 28 days; no trusted sighting."))
-        assertTrue(page.contains("Withheld below privacy gate"))
     }
 
     @Test
-    fun `sections metrics local labels gate explanations and shared shell follow the design`() {
-        val other = cluster.copy(fingerprint = "b".repeat(64), seenByTrusted = true, unblinded = true)
-        val page = render(listOf(OpsClusterGroup("8.10", listOf(cluster, other)), OpsClusterGroup("8.0", listOf(cluster))))
+    fun `sections metrics and shared shell follow the design`() {
+        val page = render(summaries)
         assertEquals(listOf("identity", "snapshot", "alarms", "health", "clusters", "ledger", "installs", "vocabulary"),
             Regex("<section[^>]*id=\"([^\"]+)\"").findAll(page).map { it.groupValues[1] }.toList())
         val metrics = page.substringAfter("aria-label=\"Snapshot\"").substringBefore("</nav>")
@@ -55,10 +48,6 @@ class DashboardRenderTest {
         assertEquals("No reports", metricValues["health"])
         assertEquals("0", metricValues["ledger"])
         assertEquals("0", metricValues["vocabulary"])
-        assertEquals(2, Regex(">Cluster 01</a>").findAll(page).count())
-        assertEquals(1, Regex(">Cluster 02</a>").findAll(page).count())
-        assertTrue(page.contains("Labels visible: trusted sighting."))
-        assertTrue(render(listOf(OpsClusterGroup("8.0", listOf(cluster.copy(unblinded = true, distinctInstalls28d = 10))))).contains("Labels visible: 10 ≥ 10 non-trusted installs in 28 days."))
         assertTrue(page.contains("1.2.3+[build withheld]"))
         assertFalse(page.contains("abc1234"))
         assertTrue(page.contains("name=\"color-scheme\" content=\"dark light\""))
@@ -77,7 +66,7 @@ class DashboardRenderTest {
             "No alarms recorded today by this process. Check reporting health below; this is not an all-clear.",
             "No fleet health reports in the last 7 UTC days.",
             "No per-install health reports in this window.",
-            "No clusters to review yet. Ranked groups appear when cluster sightings arrive.",
+            "No clusters to review yet. Rows appear when cluster sightings arrive.",
             "No ingest ledger entries today.",
             "No installs registered yet.",
             "No vocabulary entries currently meet k and await review.",
@@ -157,14 +146,35 @@ class DashboardRenderTest {
         assertPrivate(page)
     }
 
-    private fun render(groups: List<OpsClusterGroup> = emptyList()): String =
+    @Test
+    fun `summary table keeps platform version order counts and validated review destinations`() {
+        val page = render(summaries)
+        val section = page.substringAfter("id=\"clusters\"").substringBefore("</section>")
+        assertTrue(section.contains("Clusters by platform and app version · latest version first"))
+        val rows = Regex("<tr\\b.*?</tr>", RegexOption.DOT_MATCHES_ALL)
+            .findAll(section.substringAfter("<tbody")).map { it.value }.toList()
+        assertEquals(4, rows.size)
+        val expectedCounts = listOf(listOf(3, 2, 1, 0, 0, 0), listOf(1, 0, 0, 0, 1, 0), listOf(1, 1, 0, 0, 0, 0), listOf(1, 0, 0, 0, 0, 1))
+        rows.forEachIndexed { index, row ->
+            val expected = summaries[index]
+            val values = Regex("<span class=\"cell-value\">(.*?)</span>").findAll(row).map { it.groupValues[1] }.toList()
+            assertEquals(expected.platform, values.first())
+            assertEquals(expected.platformAppVersion?.let { "<code>$it</code>" } ?: "Not recorded", values[1])
+            assertEquals(expectedCounts[index].map { it.toString() }, values.subList(2, 8))
+            assertTrue(row.contains("<th scope=\"row\""))
+            assertTrue(row.contains("href=\"/ops/clusters/view?platform=${expected.platform}&amp;version=${expected.platformAppVersion ?: "none"}\""))
+        }
+        assertPrivate(page)
+        for (invalid in listOf(summaries.first().copy(platform = "Bad!"), summaries.first().copy(platformAppVersion = "1.0.0.0.0"))) {
+            val html = render(listOf(invalid))
+            assertTrue(html.contains("Unavailable"))
+            assertFalse(html.contains("href=\"/ops/clusters/view?"))
+            assertPrivate(html)
+        }
+    }
+
+    private fun render(groups: List<OpsClusterSummaryRow> = emptyList()): String =
         DashboardHtml.render("1.2.3+abc1234", 10, "2026-10-02", empty, groups, empty, JsonArray(emptyList()), empty, 0)
 
     private fun obj(value: String): JsonObject = Json.parseToJsonElement(value).jsonObject
-
-    private fun assertPrivate(page: String) {
-        val withoutLinks = page.replace(Regex("href=\"/ops/clusters/[0-9a-f]{64}/view\""), "")
-        assertFalse(Regex("(?i)[0-9a-f]{16}").containsMatchIn(withoutLinks))
-        assertFalse(Regex("(?i)[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}").containsMatchIn(page))
-    }
 }
