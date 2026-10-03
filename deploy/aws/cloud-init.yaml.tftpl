@@ -10,6 +10,7 @@ packages:
   - git
   - unattended-upgrades
   - python3
+  - wireguard
 
 write_files:
   - path: /usr/local/sbin/census-data-setup
@@ -109,6 +110,86 @@ write_files:
       docker compose logs --tail=50 census
       exit 1
 
+  - path: /usr/local/sbin/census-wireguard-configure
+    owner: root:root
+    permissions: '0700'
+    content: |
+      #!/usr/bin/env bash
+      # #1181: the operator VPN. Peers (public keys only) come from Parameter Store; the host's private key is
+      # generated here once and never leaves /etc/wireguard. With no peers configured the VPN stays down and
+      # census-configure binds /ops to loopback. Runs before census-configure on every census.service start.
+      set -euo pipefail
+      umask 077
+      export AWS_DEFAULT_REGION='${region}'
+      export AWS_PAGER=''
+      install -d -m 0700 /etc/wireguard
+      if [ ! -s /etc/wireguard/server.key ]; then
+        wg genkey > /etc/wireguard/server.key
+      fi
+      wg pubkey < /etc/wireguard/server.key > /etc/wireguard/server.pub
+      # A FETCH failure fails the start loudly (like census-configure); only an explicit empty/CHANGE-ME value
+      # means "no peers" — an API blip must never tear a working tunnel down.
+      peers=$(aws ssm get-parameter --name '/${name_prefix}/wireguard_peers' --query Parameter.Value --output text)
+      if [ -z "$peers" ] || [ "$peers" = CHANGE-ME ]; then
+        systemctl disable --now wg-quick@wg0 >/dev/null 2>&1 || true
+        rm -f /etc/wireguard/wg0.conf
+        echo 'CENSUS: no WireGuard peers configured; /ops stays on loopback'
+        exit 0
+      fi
+      python3 - "$peers" <<'PY'
+      import base64, ipaddress, re, sys
+      peers = []
+      seen_ips, seen_keys = set(), set()
+      for raw in sys.argv[1].splitlines():
+          line = raw.strip()
+          if not line or line.startswith('#'):
+              continue
+          parts = line.split()
+          if len(parts) != 3:
+              raise SystemExit('CENSUS: invalid WireGuard peer line (expected: name key address)')
+          name, key, address = parts
+          if not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,31}', name):
+              raise SystemExit('CENSUS: invalid WireGuard peer name')
+          try:
+              decoded = base64.b64decode(key, validate=True)
+          except Exception:
+              raise SystemExit('CENSUS: invalid WireGuard peer key')
+          if len(decoded) != 32 or base64.b64encode(decoded).decode() != key:
+              raise SystemExit('CENSUS: invalid WireGuard peer key')
+          try:
+              ip = ipaddress.ip_address(address)
+          except ValueError:
+              raise SystemExit('CENSUS: invalid WireGuard peer address')
+          if ip not in ipaddress.ip_network('10.8.0.0/24') or ip.packed[-1] in (0, 1, 255):
+              raise SystemExit('CENSUS: WireGuard peer address must be 10.8.0.2-10.8.0.254')
+          if address in seen_ips or key in seen_keys:
+              raise SystemExit('CENSUS: duplicate WireGuard peer')
+          seen_ips.add(address); seen_keys.add(key)
+          peers.append((name, key, address))
+      if not peers:
+          raise SystemExit('CENSUS: WireGuard peers parameter has no peers')
+      private = open('/etc/wireguard/server.key').read().strip()
+      lines = ['[Interface]', 'Address = 10.8.0.1/24', 'ListenPort = 51820', 'PrivateKey = ' + private, '']
+      for name, key, address in peers:
+          lines += ['[Peer]', '# ' + name, 'PublicKey = ' + key, 'AllowedIPs = ' + address + '/32', '']
+      with open('/etc/wireguard/wg0.conf.tmp', 'w') as stream:
+          stream.write('\n'.join(lines))
+      PY
+      chmod 0600 /etc/wireguard/wg0.conf.tmp
+      mv /etc/wireguard/wg0.conf.tmp /etc/wireguard/wg0.conf
+      systemctl enable wg-quick@wg0 >/dev/null 2>&1
+      if wg show wg0 >/dev/null 2>&1; then
+        # Already up: apply the peer set in place (the address and port are constants), no tunnel flap. The
+        # strip runs FIRST on its own: an empty producer under a process substitution would have synced an
+        # empty config and cleared the live peers.
+        stripped=$(wg-quick strip wg0)
+        [ -n "$stripped" ] || { echo 'CENSUS: wg-quick strip produced nothing' >&2; exit 1; }
+        wg syncconf wg0 /dev/stdin <<<"$stripped"
+      else
+        systemctl restart wg-quick@wg0
+      fi
+      echo "CENSUS: WireGuard up with $(grep -c '^\[Peer\]' /etc/wireguard/wg0.conf) peer(s)"
+
   - path: /usr/local/sbin/census-configure
     owner: root:root
     permissions: '0700'
@@ -159,6 +240,8 @@ write_files:
           'DATABASE_USER': 'census',
           'OPERATOR_TOKEN_SHA256': values['operator_token_sha256'],
           'CENSUS_IMAGE_TAG': tag,
+          # #1181: /ops is published only on the WireGuard address when the VPN is configured, else loopback.
+          'OPS_BIND_IP': '10.8.0.1' if os.path.exists('/etc/wireguard/wg0.conf') else '127.0.0.1',
       }
       for name, (key, pattern) in optional.items():
           value = values.get(name)
@@ -523,6 +606,7 @@ write_files:
       Type=oneshot
       RemainAfterExit=yes
       WorkingDirectory=/opt/census
+      ExecStartPre=/usr/local/sbin/census-wireguard-configure
       ExecStartPre=/usr/local/sbin/census-configure
       ExecStartPre=/usr/bin/mountpoint -q /var/lib/census-data
       ExecStart=/usr/local/sbin/census-start

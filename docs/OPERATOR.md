@@ -103,8 +103,10 @@ bucket. A browser `GET` under `/ops` without a valid session is redirected to
 logout, and both pages send `frame-ancestors 'none'`; a malformed percent-escape anywhere in a query,
 cookie or form is a `400`, never a `500`.
 
-Except for `GET /ops/login` and `POST /ops/login`, `/ops/*` endpoints require a valid bearer or
-session cookie. An explicit wrong Authorization header is refused even with a valid cookie.
+`/ops` is not routed on the public host at all (404); it is served only on the operator listener
+`https://OPS_BIND_IP:8443` — the WireGuard address on AWS (see the runbook's "Operator VPN"), loopback
+elsewhere — with Caddy's internal CA (#1181). Except for `GET /ops/login` and `POST /ops/login`, `/ops/*`
+endpoints require a valid bearer or session cookie. An explicit wrong Authorization header is refused even with a valid cookie.
 Missing or incorrect credentials return only `401 {"error":"unauthorized"}`; failed sign-in
 shows only "Sign-in failed." without identifying the factor. The shared `ops` rate bucket allows
 60 requests per minute. Each request logs one INFO line under `Ops`, with method, a known

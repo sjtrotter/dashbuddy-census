@@ -65,6 +65,9 @@ services:
         environment:
             PUBLIC_HOST: ${PUBLIC_HOST:?Set PUBLIC_HOST in .env}
             ACME_EMAIL: ${ACME_EMAIL:-}
+            # #1181: the operator listener's address. The public site answers 404 for /ops; the operator site is
+            # published ONLY on this host address (the WireGuard address, or loopback when no VPN is configured).
+            OPS_BIND_IP: ${OPS_BIND_IP:-127.0.0.1}
         deploy:
             resources:
                 limits:
@@ -72,6 +75,7 @@ services:
         ports:
             - "80:80"
             - "443:443"
+            - "${OPS_BIND_IP:-127.0.0.1}:8443:8443"
         volumes:
             - caddy_data:/data
             - caddy_config:/config
