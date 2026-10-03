@@ -10,7 +10,7 @@ Follow the [AWS deployment runbook](../deploy/aws/README.md) for the S2 Graviton
 
 ## Rotate the operator token
 
-All `/ops` requests require the operator bearer token. Generate and retain a high-entropy token in the operator's password manager. Put only its 64-digit SHA-256 hex digest in `OPERATOR_TOKEN_SHA256`. Never put the original token in `.env`, tickets, or request logs. Replace the digest and recreate census with `docker compose up -d --force-recreate census`; authenticated clients must switch to the new token. No overlapping-token window is implemented.
+Operator authentication uses the operator token directly as a bearer or with TOTP to establish a browser session. Generate and retain a high-entropy token in the operator's password manager. Put only its 64-digit SHA-256 hex digest in `OPERATOR_TOKEN_SHA256`. Never put the original token in `.env`, tickets, or request logs. Replace the digest and recreate census with `docker compose up -d --force-recreate census`; authenticated clients must switch to the new token and browser sessions are lost on restart. No overlapping-token window is implemented.
 
 ## Backup and restore
 
@@ -84,17 +84,37 @@ The silence clock uses a process-local map of install IDs to server receipt inst
 
 `GET /ops/` is a read-only, server-rendered dashboard: server version, `Policy.k`, UTC day,
 delivered alarms, ranked clusters and rendered samples, seven days of fleet health, install
-prefixes, today's ledger, and vocabulary queue count. It has no forms, JavaScript, or embedded
-operator credential. Its CSP is `default-src 'none'; style-src 'unsafe-inline'`. Supply the bearer
-header with your HTTP client (for example, curl); a plain browser link cannot supply that header.
+prefixes, today's ledger, and vocabulary queue count. Its only form is the logout control; it has
+no JavaScript or embedded operator credential. Its CSP is
+`default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'`.
 
-`/ops` is not routed on the public host at all (404); it is served only on the operator listener `https://OPS_BIND_IP:8443` — the WireGuard address on AWS (see the runbook's "Operator VPN"), loopback elsewhere — with Caddy's internal CA (#1181). All `/ops/*` endpoints require `Authorization: Bearer <operator token>`. Missing or incorrect
-credentials return only `401 {"error":"unauthorized"}`. The shared `ops` rate bucket allows
+For a browser, open `GET /ops/login` and enter the operator token and the authenticator's
+6-digit code. The token is the same bearer value; the server never echoes it and the cookie never carries it —
+decline the browser's offer to save it (`autocomplete=off` is only advisory). Success sets `census_ops` with `HttpOnly; Secure; SameSite=Strict; Path=/ops`, a 12-hour
+lifetime and a 1-hour idle timeout. There is ONE active session: a new login elsewhere logs the
+old browser out, and a process restart loses the session. Reads accept the cookie or
+`Authorization: Bearer <operator token>`; mutations still need a fresh `X-Census-Totp` header
+(the cookie never carries the second factor forward). `POST /ops/logout` ends the session and
+expires the cookie; it requires authentication but no TOTP. A wrong token never consumes a code.
+Login and mutations share the same 90-second replay memory, and login shares the 60/minute ops
+bucket. A browser `GET` under `/ops` without a valid session is redirected to
+`/ops/login` (API callers without `Accept: text/html` keep the JSON `401`). Every authenticated
+`/ops` response and both pages carry `Cache-Control: no-store`, so nothing renders from a cache after
+logout, and both pages send `frame-ancestors 'none'`; a malformed percent-escape anywhere in a query,
+cookie or form is a `400`, never a `500`.
+
+`/ops` is not routed on the public host at all (404); it is served only on the operator listener
+`https://OPS_BIND_IP:8443` — the WireGuard address on AWS (see the runbook's "Operator VPN"), loopback
+elsewhere — with Caddy's internal CA (#1181). Except for `GET /ops/login` and `POST /ops/login`, `/ops/*`
+endpoints require a valid bearer or session cookie. An explicit wrong Authorization header is refused even with a valid cookie.
+Missing or incorrect credentials return only `401 {"error":"unauthorized"}`; failed sign-in
+shows only "Sign-in failed." without identifying the factor. The shared `ops` rate bucket allows
 60 requests per minute. Each request logs one INFO line under `Ops`, with method, a known
-`/ops/<first segment>` path (no parameters or query), and status. Unknown segments reduce to
-`/ops`. No body, token, hash, payload, or full install ID is logged.
+`/ops/<first segment>` path (`clusters`, `installs`, `health`, `alarms`, `ledger`, `vocabulary`,
+`login`, or `logout`; no parameters or query), and status. Unknown segments reduce to `/ops`.
+No body, token, TOTP code or secret, cookie value, hash, payload, or full install ID is logged.
 
-Mutations additionally require `X-Census-Totp`, a six-digit RFC 6238 HMAC-SHA1 code. Configure
+Mutations other than logout additionally require `X-Census-Totp`, a six-digit RFC 6238 HMAC-SHA1 code. Configure
 `OPERATOR_TOTP_SECRET` with a canonical uppercase, unpadded RFC 4648 base32 secret of 16–64
 characters. Invalid configuration aborts startup without echoing the value. Codes use 30-second
 steps with a one-step tolerance in either direction. Accepted codes cannot be reused for 90
@@ -106,7 +126,7 @@ On AWS, provision the secret locally and store it as the SSM SecureString
 root-owned 0600 `/opt/census/.env`. Follow [Operator second factor + alarm delivery](../deploy/aws/README.md#operator-second-factor--alarm-delivery)
 for local generation, authenticator enrolment, Terraform apply, and the one-time renderer
 replacement on existing hosts whose cloud-init is frozen. Restart `census.service` after changing
-the parameter. A missing/`CHANGE-ME` secret is omitted, so mutations fail closed with the 503 above;
+the parameter. A missing/`CHANGE-ME` secret is omitted, so login and mutations other than logout fail closed with the 503 above;
 it does not refuse server startup. Never generate, print, or distribute the secret through SSM Run Command.
 
 ### Display gate (#1175)

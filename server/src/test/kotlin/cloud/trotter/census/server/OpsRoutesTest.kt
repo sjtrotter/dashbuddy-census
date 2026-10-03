@@ -21,7 +21,9 @@ import cloud.trotter.census.server.jobs.AlarmSink
 import cloud.trotter.census.server.jobs.HealthAlarms
 import cloud.trotter.census.server.ops.Totp
 import io.ktor.client.HttpClient
+import io.ktor.client.request.get
 import io.ktor.client.request.header
+import io.ktor.client.request.post
 import io.ktor.client.request.request
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.HttpResponse
@@ -30,6 +32,7 @@ import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpMethod
 import io.ktor.http.contentType
+import io.ktor.http.formUrlEncode
 import io.ktor.server.testing.testApplication
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -136,7 +139,7 @@ class OpsRoutesTest {
                     assertEquals(visible, detail.contains("android.widget.$label"))
                 }
                 val page = client.ops("/ops/")
-                assertEquals("default-src 'none'; style-src 'unsafe-inline'", page.headers["Content-Security-Policy"])
+                assertEquals("default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'", page.headers["Content-Security-Policy"])
                 val html = page.bodyAsText()
                 assertTrue(html.contains("android.widget.Eligible"))
                 assertTrue(html.contains("android.widget.Trusted"))
@@ -300,6 +303,31 @@ class OpsRoutesTest {
                 assertError(client.ops(path, body, code = code), 429, "rate_limited")
                 instant = instant.plusSeconds(1) // one token back; the same code is still inside its 30 s step
                 assertEquals(404, client.ops(path, body, code = code).status.value, "the refused request must not have consumed the code")
+            }
+        }
+    }
+
+    @Test
+    fun `session cookie opens the dashboard with its logout form`() {
+        Database.connect(config()).use { db ->
+            testApplication {
+                application { module(config().copy(operatorTotpSecret = totpSecret), db, clock) }
+                val browser = createClient { followRedirects = false }
+                val login = browser.post("/ops/login") {
+                    contentType(ContentType.Application.FormUrlEncoded)
+                    setBody(listOf("token" to operatorToken, "code" to Totp.code(totpSecret, instant.epochSecond)).formUrlEncode())
+                }
+                assertEquals(303, login.status.value)
+                val cookie = requireNotNull(login.headers[HttpHeaders.SetCookie]).substringBefore(';')
+                val page = browser.get("/ops/") { header(HttpHeaders.Cookie, cookie) }
+                assertEquals(200, page.status.value)
+                assertEquals(ContentType.Text.Html, page.contentType()?.withoutParameters())
+                val html = page.bodyAsText()
+                assertEquals(1, Regex("<form\\b").findAll(html).count())
+                assertTrue(html.contains("action=\"/ops/logout\""))
+                assertTrue(html.contains("method=\"post\""))
+                assertTrue(html.contains("Log out"))
+                assertFalse(html.contains("<script"))
             }
         }
     }

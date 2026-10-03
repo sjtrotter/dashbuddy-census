@@ -11,13 +11,24 @@ import cloud.trotter.census.server.db.OpsStore
 import cloud.trotter.census.server.ingest.WireGrammars
 import cloud.trotter.census.server.ingest.parseBounded
 import cloud.trotter.census.server.jobs.HealthAlarms
+import cloud.trotter.census.server.ops.LoginHtml
 import cloud.trotter.census.server.ops.OpsAuth
+import cloud.trotter.census.server.ops.OpsSessions
+import cloud.trotter.census.server.ops.TotpDecision
+import cloud.trotter.census.server.ops.TotpReplay
+import cloud.trotter.census.server.ops.operatorTokenMatches
 import cloud.trotter.census.server.today
+import io.ktor.http.ContentType
+import io.ktor.http.Cookie
+import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
+import io.ktor.http.parseUrlEncodedParameters
 import io.ktor.server.application.ApplicationCall
 import io.ktor.server.application.install
 import io.ktor.server.plugins.BadRequestException
+import io.ktor.server.request.contentType
 import io.ktor.server.response.respond
+import io.ktor.server.response.respondText
 import io.ktor.server.routing.Route
 import io.ktor.server.routing.get
 import io.ktor.server.routing.post
@@ -34,11 +45,68 @@ import java.time.LocalDate
 import java.time.format.DateTimeParseException
 
 private val opsJson = Json { explicitNulls = false; encodeDefaults = true }
+/** The form's bound on the operator token (the bearer header has none); the login page's maxlength mirrors it. */
+internal const val MAX_TOKEN_LENGTH = 1024
 private val clusterStatuses = setOf("new", "triaged", "drafted", "resolved", "ignored")
 
-fun Route.opsRoutes(config: Config, store: OpsStore?, alarms: HealthAlarms?, clock: Clock, policy: Policy) {
+fun Route.opsRoutes(
+    config: Config,
+    store: OpsStore?,
+    alarms: HealthAlarms?,
+    clock: Clock,
+    policy: Policy,
+    // Created once at module's route installation; shared by the auth plugin and login handlers.
+    sessions: OpsSessions = OpsSessions(),
+    replay: TotpReplay = TotpReplay(),
+) {
     route("/ops") {
-        install(OpsAuth) { this.config = config; this.clock = clock }
+        install(OpsAuth) {
+            this.config = config
+            this.clock = clock
+            this.sessions = sessions
+            this.replay = replay
+        }
+        get("/login") {
+            call.loginHeaders()
+            if (sessions.validate(call.request.cookies["census_ops"], clock.now())) {
+                call.seeOther("/ops/")
+            } else {
+                call.respondText(LoginHtml.render(), ContentType.Text.Html)
+            }
+        }
+        post("/login") {
+            call.loginHeaders()
+            val bytes = call.readLimitedBody() ?: return@post
+            if (bytes.size > 4096 || call.request.contentType().withoutParameters() != ContentType.Application.FormUrlEncoded) badRequest()
+            // application/x-www-form-urlencoded: a browser sends a space as `+` (a literal plus arrives as %2B), and
+            // Ktor's parser keeps `+` literal — translate it BEFORE percent-decoding so a token that authenticates
+            // as a bearer also authenticates through the form (review, Astra).
+            val fields = try {
+                bytes.toString(Charsets.UTF_8).replace('+', ' ').parseUrlEncodedParameters()
+            } catch (_: IllegalArgumentException) { badRequest() }
+            val token = fields["token"] ?: badRequest()
+            val code = fields["code"] ?: badRequest()
+            if (token.length > MAX_TOKEN_LENGTH || !Regex("[0-9]{6}").matches(code)) badRequest()
+            val secret = config.operatorTotpSecret
+            if (secret == null) {
+                call.respond(HttpStatusCode.ServiceUnavailable, ErrorResponse("totp_unconfigured"))
+                return@post
+            }
+            val now = clock.now()
+            // Check the token FIRST: an incorrect token must never consume a valid second-factor code.
+            if (!config.operatorTokenMatches(token) || replay.verify(secret, code, now) != TotpDecision.Accepted) {
+                call.respondText(LoginHtml.render(failed = true), ContentType.Text.Html, HttpStatusCode.Unauthorized)
+                return@post
+            }
+            call.opsCookie(sessions.create(now), 43200)
+            call.seeOther("/ops/")
+        }
+        post("/logout") {
+            sessions.revoke()
+            call.opsCookie("", 0)
+            call.response.headers.append(HttpHeaders.CacheControl, "no-store")
+            call.seeOther("/ops/login")
+        }
         run {
             if (store == null || alarms == null) {
                 route("/{rest...}") { handle { call.respond(HttpStatusCode.ServiceUnavailable, ErrorResponse("db_unavailable")) } }
@@ -95,10 +163,28 @@ fun Route.opsRoutes(config: Config, store: OpsStore?, alarms: HealthAlarms?, clo
                 }
                 call.mutation(store.resolve(request.tokenHash, request.clearText, request.source, request.reject))
             }
-            // Keep unknown paths behind the same bearer and TOTP gates.
+            // Keep unknown paths behind the same authentication and TOTP gates.
             route("/{rest...}") { handle { call.respond(HttpStatusCode.NotFound, ErrorResponse("not_found")) } }
         }
     }
+}
+
+private fun ApplicationCall.loginHeaders() {
+    response.headers.append("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'")
+    response.headers.append(HttpHeaders.CacheControl, "no-store")
+}
+
+private fun ApplicationCall.opsCookie(value: String, maxAge: Int) {
+    response.cookies.append(Cookie(
+        name = "census_ops", value = value, path = "/ops", httpOnly = true, secure = true, maxAge = maxAge,
+        // Ktor 3.6 Cookie exposes SameSite through extensions, with no dedicated constructor parameter.
+        extensions = mapOf("SameSite" to "Strict"),
+    ))
+}
+
+private suspend fun ApplicationCall.seeOther(path: String) {
+    response.headers.append(HttpHeaders.Location, path)
+    respond(HttpStatusCode.SeeOther)
 }
 
 internal fun opsAlarms(alarms: HealthAlarms): JsonObject = buildJsonObject {
