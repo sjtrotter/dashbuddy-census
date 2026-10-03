@@ -22,6 +22,9 @@ import cloud.trotter.census.server.jobs.AlarmSink
 import cloud.trotter.census.server.jobs.HealthAlarms
 import cloud.trotter.census.server.ops.Totp
 import cloud.trotter.census.server.ops.opsLogPath
+import cloud.trotter.census.server.db.OpsCluster
+import cloud.trotter.census.server.db.reviewOrder
+import cloud.trotter.census.server.ops.isOpsHtmlPath
 import io.ktor.client.HttpClient
 import io.ktor.client.request.get
 import io.ktor.client.request.header
@@ -666,5 +669,26 @@ class OpsLogPathTest {
         // The caller uses request.path(), so /ops/clusters/view?platform=doordash&version=1.0.0
         // arrives here as the path only; the query string never reaches opsLogPath.
         assertEquals("/ops/clusters", opsLogPath("/ops/clusters/view"))
+    }
+
+    @Test
+    fun `html path predicate follows routing's decoded segments`() {
+        for (html in listOf("/ops", "/ops/", "/ops/clusters/view", "/ops/clusters/%76iew", "/ops/clusters/${"a".repeat(64)}/view", "/ops/clusters/invalid/view")) {
+            assertTrue(isOpsHtmlPath(html), html)
+        }
+        for (json in listOf("/ops/login", "/ops/clusters", "/ops/clusters/a/b/view", "/ops/clusters/view/view/x", "/ops/%ZZ/view", "/v1/health", "/opsx")) {
+            assertFalse(isOpsHtmlPath(json), json)
+        }
+    }
+
+    @Test
+    fun `review order breaks a status and score tie by fingerprint regardless of input order`() {
+        val today = LocalDate.parse("2026-10-03")
+        fun row(fingerprint: Char, status: String, sightings: Long) = OpsCluster(
+            fingerprint.toString().repeat(64), "doordash", status, "2026-10-01", "2026-10-03", 2, false, sightings, listOf("8.10"), false, false,
+        )
+        val reversed = listOf(row('d', "new", 2), row('c', "new", 2), row('b', "resolved", 5), row('a', "new", 2), row('e', "new", 3))
+        val ordered = reversed.sortedWith(reviewOrder(today)).map { it.fingerprint.first() }
+        assertEquals(listOf('e', 'a', 'c', 'd', 'b'), ordered)
     }
 }

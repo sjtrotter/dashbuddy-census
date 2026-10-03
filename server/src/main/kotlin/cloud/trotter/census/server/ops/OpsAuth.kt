@@ -8,6 +8,8 @@ import cloud.trotter.census.server.auth.hashSecret
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
+import io.ktor.http.URLDecodeException
+import io.ktor.http.decodeURLPart
 import io.ktor.server.application.createApplicationPlugin
 import io.ktor.server.application.createRouteScopedPlugin
 import io.ktor.server.application.hooks.ResponseSent
@@ -88,10 +90,22 @@ internal fun Config.operatorTokenMatches(token: String): Boolean = MessageDigest
 internal fun isOpsPath(path: String): Boolean = path == "/ops" || path.startsWith("/ops/")
 
 /** The ops paths that answer a browser page rather than JSON: a request-level failure on them must answer HTML too. */
-internal fun isOpsHtmlPath(path: String): Boolean =
-    path == "/ops" || path == "/ops/" || path == "/ops/clusters/view" ||
-        (path.startsWith("/ops/clusters/") && path.endsWith("/view"))
-// `/ops/login` deliberately stays out: its form rejections answer the JSON envelope (pinned by OpsLoginTest).
+/**
+ * Judged on routing's DECODED segments so the answer agrees with the route that would have run: exactly the
+ * home page, the review page and a one-segment cluster detail page. An undecodable path answers false (JSON).
+ * `/ops/login` deliberately stays out: its form rejections answer the JSON envelope (pinned by OpsLoginTest).
+ */
+internal fun isOpsHtmlPath(path: String): Boolean {
+    if (path != "/ops" && !path.startsWith("/ops/")) return false
+    val segments = try {
+        path.removePrefix("/ops").split('/').filter { it.isNotEmpty() }.map { it.decodeURLPart() }
+    } catch (_: URLDecodeException) {
+        return false
+    }
+    return segments.isEmpty() ||
+        (segments.size == 2 && segments[0] == "clusters" && segments[1] == "view") ||
+        (segments.size == 3 && segments[0] == "clusters" && segments[2] == "view")
+}
 
 /** Unknown first segments are also suppressed: an arbitrary path segment can itself be a credential. */
 internal fun opsLogPath(path: String): String {
