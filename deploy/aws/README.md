@@ -354,7 +354,7 @@ Poll `aws ssm get-command-invocation` for the result; `docker stats` must show e
 
 ## Operator VPN (WireGuard): `/ops` off the public internet (#1181)
 
-The operator surface is served only on a second Caddy listener that Compose publishes on `OPS_BIND_IP:8443` — the host's WireGuard address `10.8.0.1` when peers are configured, loopback otherwise; the public site answers `404` for `/ops` and `/ops/*`. The listener uses Caddy's internal CA (`tls internal`), so the operator's devices install its root certificate once; WireGuard is the transport boundary and TLS keeps the session cookie's `Secure` attribute honest. The host generates its own WireGuard private key on first start and never exposes it; peers are PUBLIC keys in the `wireguard_peers` String parameter, one per line, `name key address` with addresses in `10.8.0.2`–`10.8.0.254`. No peers (`CHANGE-ME`) keeps the VPN down — a fresh deployment is private by default. Terraform opens UDP 51820 to the internet (WireGuard answers nothing to an unknown key).
+The operator surface is served only on a second Caddy listener that Compose publishes on `OPS_BIND_IP:8443` — the host's WireGuard address `10.8.0.1` when peers are configured, loopback otherwise; the public site answers `404` for `/ops` and `/ops/*`. The listener uses Caddy's internal CA (`tls internal`), so the operator's devices install its root certificate once; WireGuard is the transport boundary and TLS protects the bearer in transit on the host side and keeps the coming session cookie's `Secure` attribute honest (the login lands in a separate PR). The host generates its own WireGuard private key on first start and never exposes it; peers are PUBLIC keys in the `wireguard_peers` String parameter, one per line, `name key address` with addresses in `10.8.0.2`–`10.8.0.254`. No peers (`CHANGE-ME`) keeps the VPN down — a fresh deployment is private by default. Terraform opens UDP 51820 to the internet (WireGuard answers nothing to an unknown key).
 
 1. `terraform apply` (two UDP ingress rules + the `wireguard_peers` placeholder; the existing host is otherwise untouched).
 2. Generate a keypair per device on the workstation, keeping private keys in the password manager and in `~/dashbuddy/secrets/wireguard/` (0600):
@@ -370,8 +370,8 @@ The operator surface is served only on a second Caddy listener that Compose publ
    aws ssm put-parameter --name /dashbuddy-census/wireguard_peers --type String --overwrite \
      --value "$(printf 'workstation %s 10.8.0.2\nphone %s 10.8.0.3\n' "$(cat workstation.pub)" "$(cat phone.pub)")"
    ```
-4. Existing host: run the one-time host refresh command in "Operator second factor + alarm delivery" step 3 with `CENSUS_COMPOSE_REF` at the reviewed ref — it installs the WireGuard package and `census-wireguard-configure`, the updated `census-configure`/`census.service`, refreshes Compose and the Caddyfile, and restarts the stack. A new host does all of this from cloud-init.
-5. Read the host's public key and the operator CA, then write each device's config (`AllowedIPs = 10.8.0.1/32` — only operator traffic enters the tunnel):
+4. Existing host: run the one-time host refresh command in "Operator second factor + alarm delivery" step 3 with `CENSUS_COMPOSE_REF` at the reviewed ref — it installs the WireGuard package and `census-wireguard-configure`, the updated `census-configure`/`census.service`, refreshes Compose and the Caddyfile, and restarts the stack. A new host installs all of this from cloud-init, but a parameter change never triggers the configure step by itself: after setting the peers on a new host, run `systemctl restart census.service` over SSM (the existing-host refresh already restarts).
+5. Read the host's public key and the operator CA, then write each device's config — the `Address` is the one registered for THAT device in step 3 (workstation `10.8.0.2/32`, phone `10.8.0.3/32`; WireGuard drops packets from an unregistered inner address even after a good handshake) and `AllowedIPs = 10.8.0.1/32` so only operator traffic enters the tunnel:
 
    ```sh
    aws ssm send-command --instance-ids "$(terraform output -raw instance_id)" --document-name AWS-RunShellScript \
@@ -381,8 +381,8 @@ The operator surface is served only on a second Caddy listener that Compose publ
 
    ```ini
    [Interface]
-   PrivateKey = <device private key>
-   Address = 10.8.0.2/32
+   PrivateKey = <this device's private key>
+   Address = <this device's registered address>/32   # workstation 10.8.0.2, phone 10.8.0.3
    [Peer]
    PublicKey = <host public key>
    Endpoint = <elastic IP>:51820
