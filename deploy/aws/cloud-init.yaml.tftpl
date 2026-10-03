@@ -198,14 +198,24 @@ write_files:
       READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
       DIR_FLAGS = READ_FLAGS | os.O_DIRECTORY
       NAME = re.compile(r'([0-9]{1,16})-([0-9]{1,9})\.alarm')
-      RULE = r'[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*){1,4}'
+      # A writer's in-flight temporary file (write, then atomic rename): kept while younger than 10 minutes.
+      TEMPORARY = re.compile(r'[0-9]{1,16}-[0-9]{1,9}\.alarm\.tmp')
+      TEMPORARY_GRACE_SECONDS = 600
+      # Exactly renderAlarm's contract (HealthAlarms.kt): enumerated kinds, either-case hex prefix,
+      # and every slot the renderer may redact accepts the literal [redacted].
+      KINDS = r'(?:silent_rule_death|rule_share_cliff|trips|fleet_unknown|new_clusters|silence|\[redacted\])'
+      RULE = r'(?:[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*){1,4}|\[redacted\])'
       MESSAGE = re.compile(
-          r'kind=([a-z_]{1,32})\n'
+          r'kind=(' + KINDS + r')\n'
           r'platform=(?:[a-z_][a-z0-9_]{0,31}|\[redacted\])\n'
           r'version=(?:[0-9]{1,5}(?:\.[0-9]{1,5}){0,3}|\[redacted\])\n'
-          r'install_prefix=(?:[0-9a-f]{8}|-)\n'
+          r'install_prefix=(?:[0-9a-fA-F]{8}|-|\[redacted\])\n'
           r'rule_ids=\[(?:' + RULE + r'(?:, ' + RULE + r')*)?\]'
       )
+      # Cleanup/scan work is bounded like publishing: a hostile writer cannot spend the whole run on it.
+      MAX_SCAN_ENTRIES = 4096
+      MAX_REMOVE_OPERATIONS = 64
+      MAX_REMOVE_DEPTH = 4
 
 
       @contextlib.contextmanager
@@ -234,13 +244,18 @@ write_files:
                   and info.st_nlink == 1 and stat.S_IMODE(info.st_mode) == 0o600)
 
 
-      def remove(parent, name):
+      def remove(parent, name, deadline=None):
           # unlink/rmdir operate on the entry itself. A replacement is never followed.
           # Iterative descent avoids a recursion limit on attacker-created subdirs.
           pending = [(parent, name, None, None, None)]
           resources = None
+          operations = 0
           try:
               while pending:
+                  operations += 1
+                  if (operations > MAX_REMOVE_OPERATIONS or len(pending) > MAX_REMOVE_DEPTH
+                          or (deadline is not None and time.monotonic() > deadline)):
+                      break
                   parent, name, fd, entries, resources = pending[-1]
                   try:
                       if fd is None:
@@ -320,21 +335,36 @@ write_files:
                   # Retain only the newest 256 validated snapshots: no unbounded sort
                   # or list of attacker-controlled names/bodies. Order by numeric name.
                   pending = []
+                  scanned = 0
                   with os.scandir(spool) as entries:
                       for entry in entries:
+                          scanned += 1
+                          if scanned > MAX_SCAN_ENTRIES or time.monotonic() + 30 > deadline:
+                              break
                           name = entry.name
+                          if TEMPORARY.fullmatch(name):
+                              # In-flight write by the app: never deleted while young (its rename must succeed).
+                              try:
+                                  with opened(name, READ_FLAGS, spool) as (_, info):
+                                      if stat.S_ISREG(info.st_mode) and time.time() - info.st_mtime < TEMPORARY_GRACE_SECONDS:
+                                          continue
+                              except OSError:
+                                  continue
+                              remove(spool, name, deadline)
+                              counts['rejected'] += 1
+                              continue
                           match = NAME.fullmatch(name)
                           try:
                               if match is None:
                                   raise ValueError('name')
                               message, kind = read_message(spool, name)
                           except (OSError, ValueError):
-                              remove(spool, name)
+                              remove(spool, name, deadline)
                               counts['rejected'] += 1
                               continue
                           heapq.heappush(pending, (int(match[1]), int(match[2]), name, message, kind))
                           if len(pending) > 256:
-                              remove(spool, heapq.heappop(pending)[2])
+                              remove(spool, heapq.heappop(pending)[2], deadline)
                   counts['deferred'] = len(pending)
                   with opened('alarm-publish-state.json', os.O_RDWR | os.O_NOFOLLOW
                               | os.O_NONBLOCK | os.O_CLOEXEC, parent) as (state_fd, info):
@@ -381,7 +411,7 @@ write_files:
                           except (OSError, subprocess.TimeoutExpired):
                               success = False
                           if success:
-                              remove(spool, name)
+                              remove(spool, name, deadline)
                               counts['published'] += 1
                           else:
                               counts['failed'] += 1
