@@ -13,7 +13,10 @@ RUN ./gradlew :server:installDist --no-daemon -PcensusContractPath=${CENSUS_CONT
 
 # TODO(S6): pin by digest via Dependabot
 FROM eclipse-temurin:21-jre-alpine AS runtime
-RUN addgroup -g 10001 census && adduser -D -u 10001 -G census census
+RUN addgroup -g 10001 census && adduser -D -u 10001 -G census census \
+    && mkdir -p /var/spool/census-alarms \
+    && chown 10001:10001 /var/spool/census-alarms \
+    && chmod 0700 /var/spool/census-alarms
 WORKDIR /app
 COPY --from=build /workspace/server/build/install/server /app
 ARG SERVER_VERSION=dev

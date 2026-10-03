@@ -57,7 +57,7 @@ class LoggingAlarmSink : AlarmSink {
     private val log = LoggerFactory.getLogger("Alarm")
 }
 
-/** The single rendering owner for logs and SNS: validated tokens only, one field per line. */
+/** The single rendering owner for logs and spool files: validated tokens only, one field per line. */
 fun renderAlarm(alarm: Alarm): String {
     val kind = alarm.kind.takeIf { it in alarmKinds } ?: "[redacted]"
     val platform = alarm.platform.takeIf { platformPattern.matches(it) } ?: "[redacted]"

@@ -46,17 +46,7 @@ write_files:
       mountpoint -q /var/lib/census-data
       install -d -m 0700 -o 70 -g 70 /var/lib/census-data/pgdata
       install -d -m 0700 /var/lib/census-data/backups
-
-  - path: /usr/local/sbin/census-imds-guard
-    owner: root:root
-    permissions: '0700'
-    content: |
-      #!/bin/sh
-      set -eu
-      iptables -N CENSUS-IMDS 2>/dev/null || iptables -F CENSUS-IMDS
-      iptables -A CENSUS-IMDS -s 172.30.0.10 -d 169.254.169.254 -j RETURN
-      iptables -A CENSUS-IMDS -d 169.254.169.254 -j DROP
-      iptables -C DOCKER-USER -j CENSUS-IMDS 2>/dev/null || iptables -I DOCKER-USER 1 -j CENSUS-IMDS
+      install -d -m 0700 -o 10001 -g 10001 /var/lib/census-data/alarms
 
   - path: /usr/local/sbin/census-start
     owner: root:root
@@ -65,8 +55,6 @@ write_files:
       #!/usr/bin/env bash
       set -euo pipefail
       cd /opt/census
-      # Refuse startup if the required guard's forwarding hook has disappeared.
-      iptables -C DOCKER-USER -j CENSUS-IMDS
       trap 'docker compose logs --tail=50 census' ERR
       docker compose up -d --wait --wait-timeout 180
       # Census publishes no host port; probe from its network namespace.
@@ -151,6 +139,79 @@ write_files:
               os.unlink(temporary)
       PY
 
+  - path: /usr/local/sbin/census-alarm-publish
+    owner: root:root
+    permissions: '0700'
+    content: |
+      #!/bin/sh
+      set -eu
+      [ -f /opt/census/.env ] || exit 0
+      ARN=$(sed -n "s/^ALERTS_TOPIC_ARN='\([^']*\)'$/\1/p" /opt/census/.env)
+      [ -n "$ARN" ] || exit 0
+      cd /var/lib/census-data/alarms
+      # App filenames encode epoch milliseconds and a numeric sequence counter.
+      printf '%s\n' *.alarm | sort -t '-' -k1,1n -k2,2n | head -n 64 |
+      while IFS= read -r f; do
+        [ -f "$f" ] || continue
+        # A concurrent drop-oldest can remove a file before it is read.
+        message=$(cat "$f" 2>/dev/null) || continue
+        kind=$(printf '%s\n' "$message" | sed -n '1s/^kind=//p')
+        if timeout 20 aws sns publish --topic-arn "$ARN" \
+          --subject "census alarm: $kind" --message "$message" >/dev/null 2>&1; then
+          rm -f "$f"
+        else
+          echo 'census-alarm-publish: publish failed' >&2
+        fi
+      done
+
+  - path: /etc/systemd/system/census-alarm-publish.service
+    owner: root:root
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Publish census alarm spool to SNS
+      RequiresMountsFor=/var/lib/census-data
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      Type=oneshot
+      Environment=AWS_DEFAULT_REGION=${region}
+      Environment=AWS_PAGER=
+      ExecStart=/usr/local/sbin/census-alarm-publish
+      TimeoutStartSec=25min
+      UMask=0077
+
+  - path: /etc/systemd/system/census-alarm-publish.path
+    owner: root:root
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Watch census alarm spool
+      RequiresMountsFor=/var/lib/census-data
+
+      [Path]
+      PathChanged=/var/lib/census-data/alarms
+      Unit=census-alarm-publish.service
+
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /etc/systemd/system/census-alarm-publish.timer
+    owner: root:root
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Retry census alarm publishing every five minutes
+
+      [Timer]
+      OnBootSec=5min
+      OnUnitActiveSec=5min
+      Unit=census-alarm-publish.service
+
+      [Install]
+      WantedBy=timers.target
+
   - path: /usr/local/sbin/census-backup
     owner: root:root
     permissions: '0700'
@@ -164,33 +225,15 @@ write_files:
       /opt/census/backup.sh
       find "$BACKUPS_DIR" -maxdepth 1 -type f -name 'census-????-??-??.sql.gz' -mmin +2880 -delete
 
-  - path: /etc/systemd/system/census-imds-guard.service
-    owner: root:root
-    permissions: '0644'
-    content: |
-      [Unit]
-      Description=Restrict container IMDS access to census
-      Requires=docker.service
-      After=docker.service
-
-      [Service]
-      Type=oneshot
-      RemainAfterExit=yes
-      ExecStart=/usr/local/sbin/census-imds-guard
-      UMask=0077
-
-      [Install]
-      WantedBy=multi-user.target
-
   - path: /etc/systemd/system/census.service
     owner: root:root
     permissions: '0644'
     content: |
       [Unit]
       Description=Census compose stack (Parameter Store configuration)
-      Requires=docker.service census-imds-guard.service
+      Requires=docker.service
       RequiresMountsFor=/var/lib/census-data
-      After=docker.service census-imds-guard.service network-online.target
+      After=docker.service network-online.target
       Wants=network-online.target
 
       [Service]
@@ -290,6 +333,12 @@ write_files:
       cp -a /opt/census-src/deploy/compose/. /opt/census/
       cat > /opt/census/docker-compose.override.yml <<'YAML'
       volumes:
+          alarm-spool:
+              driver: local
+              driver_opts:
+                  type: none
+                  o: bind
+                  device: /var/lib/census-data/alarms
           pgdata:
               driver: local
               driver_opts:
@@ -304,7 +353,7 @@ write_files:
       # expression. Rewrite only census, preserving postgres and caddy images.
       sed -i "/^    census:/,/^    [a-zA-Z0-9_-]*:/s#^\([[:space:]]*image:[[:space:]]*\).*#\1$image#" /opt/census/docker-compose.yml
       systemctl daemon-reload
-      systemctl enable --now census-imds-guard.service
+      systemctl enable --now census-alarm-publish.path census-alarm-publish.timer
       systemctl enable census.service
       systemctl enable --now census-backup.timer unattended-upgrades.service
       # All setup is complete before this expected first-boot failure on CHANGE-ME.

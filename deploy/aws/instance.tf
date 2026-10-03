@@ -36,7 +36,7 @@ resource "aws_instance" "census" {
   metadata_options {
     http_tokens                 = "required"
     http_endpoint               = "enabled"
-    http_put_response_hop_limit = 2 # the census container sits one Docker bridge hop behind the host: the SDK's IMDSv2 credential chain needs 2
+    http_put_response_hop_limit = 1
   }
 
   root_block_device {

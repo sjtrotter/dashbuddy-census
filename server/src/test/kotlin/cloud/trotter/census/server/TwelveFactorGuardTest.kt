@@ -23,6 +23,14 @@ class TwelveFactorGuardTest {
     }
 
     @Test
+    fun `the spool sink exemption is by exact file name only`() {
+        val write = "Files.writeString(dir.resolve(name), text)"
+        assertTrue(violations("FileSpoolAlarmSink.kt", write).isEmpty())
+        assertFalse(violations("OtherSink.kt", write).isEmpty())
+        assertFalse(violations("FileSpoolAlarmSinkHelper.kt", write).isEmpty())
+    }
+
+    @Test
     fun `guards reject violations and permit explicit exceptions`() {
         assertFalse(violations("Example.kt", "File(\"state\").writeText(\"data\")").isEmpty())
         assertTrue(violations("Example.kt", "File(System.getProperty(\"java.io.tmpdir\"), \"x\").writeText(\"data\")").isEmpty())
@@ -66,6 +74,10 @@ class TwelveFactorGuardTest {
         }
         // Conservative guard: every File/Path constructor in a file that writes must
         // explicitly root itself at tmpdir. NIO writes need a directly rooted path.
+        // The ONE sanctioned exception (S6b, review-recorded): the alarm spool sink writes validated alarm lines into an
+        // operator-injected volume (`ALARM_SPOOL_DIR`) that a HOST unit drains to SNS — the filesystem IS the backing
+        // service there, by design, so no container ever holds cloud credentials. Exempt by exact file name only.
+        if (name in FILESYSTEM_WRITE_EXEMPTIONS) return@buildList
         val writes = Regex("\\b(write|writeString|writeText|writeBytes|appendText|appendBytes|writer|bufferedWriter|outputStream|newOutputStream|newBufferedWriter|createNewFile|mkdir|mkdirs)\\s*\\(")
         if (writes.containsMatchIn(source)) {
             val constructors = Regex("\\b(File|Path\\s*\\.\\s*of|Paths\\s*\\.\\s*get)\\s*\\(\\s*").findAll(source)
@@ -93,6 +105,10 @@ class TwelveFactorGuardTest {
             }
             if (hasBareClosingBrace(pattern)) add("Escape literal closing braces in Regex (#909)")
         }
+    }
+
+    private companion object {
+        val FILESYSTEM_WRITE_EXEMPTIONS = setOf("FileSpoolAlarmSink.kt")
     }
 
     private fun hasBareClosingBrace(pattern: String): Boolean {

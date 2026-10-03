@@ -9,20 +9,18 @@ import org.junit.jupiter.api.Test
 /** Checks fail-fast configuration and redaction without reading the host environment (#1157 S1). */
 class ConfigTest {
     @Test
-    fun `SNS topic is optional and validated without disclosing its value`() {
-        assertEquals(null, Config.fromEnv(testEnvironment()).alertsTopicArn)
-        val arn = "arn:aws:sns:us-east-2:000000000000:census-alerts_1"
-        val config = Config.fromEnv(testEnvironment() + ("ALERTS_TOPIC_ARN" to arn))
-        assertEquals(arn, config.alertsTopicArn)
+    fun `alarm spool is optional and must be an absolute path without disclosing its value`() {
+        assertEquals(null, Config.fromEnv(testEnvironment()).alarmSpoolDir)
+        val dir = "/var/spool/census-alarms"
+        val config = Config.fromEnv(testEnvironment() + ("ALARM_SPOOL_DIR" to dir))
+        assertEquals(dir, config.alarmSpoolDir)
         assertEquals("Config([redacted])", config.toString())
-        val prefix = "arn:aws:sns:us-east-2:000000000000:"
-        assertEquals(prefix + "a".repeat(256), config.copy(alertsTopicArn = prefix + "a".repeat(256)).alertsTopicArn)
-        for (invalid in listOf("", "CHANGE-ME", "$arn\n", "$arn.fifo", arn.replace("sns:", "sqs:"), prefix, prefix + "a".repeat(257))) {
+        for (invalid in listOf("", "relative/private-dir", "/private-dir\u0000")) {
             val failure = assertThrows(IllegalArgumentException::class.java) {
-                Config.fromEnv(testEnvironment() + ("ALERTS_TOPIC_ARN" to invalid))
+                Config.fromEnv(testEnvironment() + ("ALARM_SPOOL_DIR" to invalid))
             }
-            assertEquals("Invalid variable: ALERTS_TOPIC_ARN", failure.message)
-            assertThrows(IllegalArgumentException::class.java) { config.copy(alertsTopicArn = invalid) }
+            assertEquals("Invalid variable: ALARM_SPOOL_DIR", failure.message)
+            assertThrows(IllegalArgumentException::class.java) { config.copy(alarmSpoolDir = invalid) }
         }
     }
 
