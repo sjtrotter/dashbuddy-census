@@ -6,19 +6,20 @@ services:
         environment:
             ALARM_SPOOL_DIR: /var/spool/census-alarms
             # Bounded JVM on the 2 GiB host (#1179). Bounded: heap 320, metaspace 96, direct 32 (Netty is
-            # told to count against the JDK limit), code cache 48, SerialGC pinned so a later limit change
-            # cannot flip the collector unnoticed. Unbounded but small: thread stacks, GC/JVM text, malloc.
-            # The sized /tmp tmpfs below is charged to this cgroup too. Worst case ≈ 600 MiB < 704.
+            # told to count against the JDK limit), code cache 48, 512 KiB stacks (Dispatchers.IO can reach
+            # 64 threads + Ktor's: ~35 MiB reserved, less resident), SerialGC pinned so a later limit change
+            # cannot flip the collector unnoticed. Not bounded: GC/JVM text, malloc. The sized /tmp tmpfs
+            # below is charged to this cgroup too. ESTIMATE ≈ 560 MiB under the 704 limit, not a proof.
             # A HotSpot-raised heap/metaspace OutOfMemoryError exits so Compose restarts a healthy process;
             # a direct-buffer exhaustion is a Java-thrown error and degrades to failed requests instead.
             # JAVA_TOOL_OPTIONS is additive to the image's JAVA_OPTS (disjoint keys).
-            JAVA_TOOL_OPTIONS: -Xmx320m -XX:MaxMetaspaceSize=96m -XX:MaxDirectMemorySize=32m -XX:ReservedCodeCacheSize=48m -XX:+UseSerialGC -XX:+ExitOnOutOfMemoryError -Dio.netty.maxDirectMemory=0
+            JAVA_TOOL_OPTIONS: -Xmx320m -XX:MaxMetaspaceSize=96m -XX:MaxDirectMemorySize=32m -XX:ReservedCodeCacheSize=48m -Xss512k -XX:+UseSerialGC -XX:+ExitOnOutOfMemoryError -Dio.netty.maxDirectMemory=0
         volumes:
             - alarm-spool:/var/spool/census-alarms
         # Memory limits bound ONE runaway service to its cgroup (#1179). Budget on a t4g.small (1835 MiB,
-        # no swap): limits sum to 1120 MiB (704 + 320 + 96), leaving ~700 MiB for the host — ~540 at rest
-        # plus the daily backup's aws-cli/gzip and a deploy's compose CLI. Two services at their ceilings
-        # at once would still reach the host OOM killer; the limits make that an unlikely corner, not impossible.
+        # no swap): limits sum to 1120 MiB (704 + 320 + 96), leaving 715 MiB for the host — ~540 at rest
+        # plus the daily backup's aws-cli/gzip and a deploy's compose CLI. The residual host-OOM risk is
+        # host/agent/transient use exceeding those 715 MiB; the memory alarm (90 %) is the backstop.
         deploy:
             resources:
                 limits:
@@ -35,11 +36,13 @@ services:
         networks: [edge, db]
     postgres:
         image: postgres:16-alpine
-        # Budget visible here (#1179): shared_buffers 128 (the default) + 3 autovacuum workers × 16 +
-        # one manual maintenance op 32 + 20 connections (count cap: app pool 5 + Flyway + pg_dump/psql)
-        # × ~2 work_mem sorts × 4 MiB ≈ 300 MiB < 320. max_connections caps the COUNT, which is what
-        # bounds the per-connection sum. The official entrypoint still runs initdb and su-execs uid 70.
-        command: ["postgres", "-c", "shared_buffers=128MB", "-c", "max_connections=20", "-c", "maintenance_work_mem=32MB", "-c", "autovacuum_work_mem=16MB"]
+        # Budget visible here (#1179), an ESTIMATE not a bound (work_mem is per plan node, and parallel
+        # workers/hashes add to it): shared_buffers 128 (the default) + 3 autovacuum workers × 16 + one
+        # manual maintenance op 32 + 20 connections (count cap: app pool 5 + Flyway + pg_dump/psql) × ~2
+        # work_mem nodes × 2 MiB ≈ 288 MiB under the 320 limit, which is the real backstop. The queries
+        # are small aggregates, so work_mem 2 MiB costs nothing. The official entrypoint still runs initdb
+        # and su-execs uid 70.
+        command: ["postgres", "-c", "shared_buffers=128MB", "-c", "max_connections=20", "-c", "work_mem=2MB", "-c", "maintenance_work_mem=32MB", "-c", "autovacuum_work_mem=16MB"]
         environment:
             POSTGRES_DB: census
             POSTGRES_USER: census
