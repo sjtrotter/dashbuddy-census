@@ -5,6 +5,8 @@ import cloud.trotter.census.server.Policy
 import cloud.trotter.census.server.db.OpsStore
 import cloud.trotter.census.server.jobs.HealthAlarms
 import cloud.trotter.census.server.ops.ClusterDetailHtml
+import cloud.trotter.census.server.ops.ClusterFilter
+import cloud.trotter.census.server.ops.ClustersPageHtml
 import cloud.trotter.census.server.ops.DashboardHtml
 import cloud.trotter.census.server.ops.fingerprintPattern
 import cloud.trotter.census.server.today
@@ -19,10 +21,24 @@ fun Route.dashboardRoute(store: OpsStore, alarms: HealthAlarms, clock: Clock, po
     get("/") {
         val html = DashboardHtml.render(
             policy.serverVersion, policy.k, clock.today().toString(), opsAlarms(alarms),
-            store.clusters(includeSamples = false), store.health(), store.installs(), store.ledger(), store.vocabularyQueueCount(), store.vocabularyQueueDisplay(),
+            store.clusterSummary(), store.health(), store.installs(), store.ledger(), store.vocabularyQueueCount(), store.vocabularyQueueDisplay(),
         )
         call.response.headers.append("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'")
         call.respondText(html, ContentType.Text.Html)
+    }
+    get("/clusters/view") {
+        call.response.headers.append("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'")
+        // A malformed percent-escape never reaches here: routing decodes the query first and the module's
+        // bad-request handler answers the HTML shell for ops pages.
+        val parameters = call.request.queryParameters
+        val filter = ClusterFilter.parse(parameters["platform"], parameters["version"], parameters["status"], parameters["page"])
+        val today = clock.today().toString()
+        if (filter == null) {
+            call.respondText(ClustersPageHtml.renderInvalid(policy.serverVersion, policy.k, today), ContentType.Text.Html, HttpStatusCode.BadRequest)
+        } else {
+            val result = store.clustersPage(filter.platform, filter.version, filter.status, filter.page)
+            call.respondText(ClustersPageHtml.render(policy.serverVersion, policy.k, today, result), ContentType.Text.Html)
+        }
     }
     get("/clusters/{fingerprint}/view") {
         val fingerprint = call.parameters["fingerprint"]

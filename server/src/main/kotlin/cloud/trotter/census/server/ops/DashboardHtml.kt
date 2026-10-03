@@ -1,7 +1,7 @@
 package cloud.trotter.census.server.ops
 
-import cloud.trotter.census.server.db.OpsCluster
-import cloud.trotter.census.server.db.OpsClusterGroup
+import cloud.trotter.census.server.db.CLUSTER_STATUSES
+import cloud.trotter.census.server.db.OpsClusterSummaryRow
 import cloud.trotter.census.server.db.OpsVocabularyDisplay
 import cloud.trotter.census.server.ingest.WireGrammars
 import kotlinx.html.DL
@@ -9,7 +9,6 @@ import kotlinx.html.FlowContent
 import kotlinx.html.FlowOrPhrasingContent
 import kotlinx.html.FormMethod
 import kotlinx.html.a
-import kotlinx.html.article
 import kotlinx.html.body
 import kotlinx.html.button
 import kotlinx.html.caption
@@ -23,8 +22,6 @@ import kotlinx.html.footer
 import kotlinx.html.form
 import kotlinx.html.h1
 import kotlinx.html.h2
-import kotlinx.html.h3
-import kotlinx.html.h4
 import kotlinx.html.head
 import kotlinx.html.header
 import kotlinx.html.html
@@ -37,7 +34,6 @@ import kotlinx.html.nav
 import kotlinx.html.p
 import kotlinx.html.section
 import kotlinx.html.span
-import kotlinx.html.strong
 import kotlinx.html.style
 import kotlinx.html.summary
 import kotlinx.html.table
@@ -69,7 +65,7 @@ object DashboardHtml {
         k: Int,
         today: String,
         alarms: JsonObject,
-        clusters: List<OpsClusterGroup>,
+        clusters: List<OpsClusterSummaryRow>,
         health: JsonObject,
         installs: JsonArray,
         ledger: JsonObject,
@@ -100,32 +96,23 @@ object DashboardHtml {
         }
         alarmSection(alarms)
         healthSection(health, today)
-        panel("clusters", "Ranked clusters") {
-            p("muted") { +"Latest versions first; clusters ranked within each version. Up to 50 entries across groups. A cluster can appear in more than one group." }
-            val labels = linkedMapOf<String, String>()
-            if (clusters.all { it.clusters.isEmpty() }) emptyState("No clusters to review yet. Ranked groups appear when cluster sightings arrive.")
-            for (group in clusters) {
-                h3 { +"Version ${version(group.platformAppVersion)} · ${number(group.clusters.size)} ${if (group.clusters.size == 1) "entry" else "entries"}" }
-                div("cluster-grid") {
-                    for (cluster in group.clusters) article("cluster-card") {
-                        val label = labels.getOrPut(cluster.fingerprint) { "Cluster ${String.format(Locale.ROOT, "%02d", labels.size + 1)}" }
-                        div("cluster-heading") {
-                            h4 {
-                                if (fingerprintPattern.matches(cluster.fingerprint)) a(href = "/ops/clusters/${cluster.fingerprint}/view", classes = "cluster-link") { +label }
-                                else +label
-                            }
-                            statusChip(cluster.status)
+        panel("clusters", "Clusters") {
+            p("muted") { +"One row per platform and app version. Review opens the clusters of that row, untriaged first." }
+            if (clusters.isEmpty()) emptyState("No clusters to review yet. Rows appear when cluster sightings arrive.")
+            else dataTable("Clusters by platform and app version · latest version first",
+                listOf("Platform", "Version", "Clusters", "New", "Triaged", "Drafted", "Resolved", "Ignored", "Review"), clusters.map { row ->
+                    listOf(
+                        cell { +platform(row.platform) },
+                        cell { row.platformAppVersion?.let { code { +version(it) } } ?: run { +"Not recorded" } },
+                        numeric(row.total),
+                    ) + CLUSTER_STATUSES.map { numeric(row.byStatus[it] ?: 0) } + cell {
+                        val filter = ClusterFilter.parse(row.platform, row.platformAppVersion ?: "none", null, null)
+                        if (filter == null) +"Unavailable" else a(href = filter.href(), classes = "action") {
+                            attributes["aria-label"] = "Review ${platform(row.platform)} ${row.platformAppVersion?.let { version(it) } ?: "no version"}"
+                            +"Review"
                         }
-                        clusterFacts(cluster)
-                        p("muted") { +visibility(cluster, k) }
                     }
-                }
-            }
-            details {
-                summary { +"How ranking works" }
-                p { +"distinctInstalls28d × log2(1 + sightings28d) × recency" }
-                p("muted") { +"Recency is 1.0 within 7 days, 0.5 within 28 days, and 0.1 otherwise." }
-            }
+                })
         }
         ledgerSection(ledger, today)
         panel("installs", "Installs") {
@@ -227,51 +214,6 @@ private fun FlowContent.metric(target: String, label: String, date: Boolean = fa
 
 internal fun DL.fact(label: String, value: FlowContent.() -> Unit) {
     div { this@fact.dt { +label }; this@fact.dd { value() } }
-}
-
-internal fun FlowContent.clusterFacts(cluster: OpsCluster, detail: Boolean = false) {
-    dl("facts") {
-        fact("Platform") { +platform(cluster.platform) }
-        fact("Non-trusted installs · 28 d") { strong { +number(cluster.distinctInstalls28d) } }
-        fact("Sightings · 28 d") { strong { +number(cluster.sightings28d) } }
-        fact("First seen") { date(cluster.firstSeenDay) }
-        fact("Last seen") { date(cluster.lastSeenDay) }
-        fact("Seen by trusted") { +if (cluster.seenByTrusted) "Yes" else "No" }
-        fact("Versions") {
-            if (cluster.versions.isEmpty()) +"None recorded" else {
-                +"${number(cluster.versions.size)} ${if (cluster.versions.size == 1) "version" else "versions"}"
-                ul("versions") { cluster.versions.forEach { li { code { +version(it) } } } }
-            }
-        }
-        fact(if (detail) "New with newest observed version" else "New with this version") { yesChip(cluster.newWithVersion, "accent") }
-        fact("Label visibility") { chip(if (cluster.unblinded) "Visible" else "Redacted", "neutral") }
-        fact("Resolved rule") { cluster.resolvedRuleId?.let { code { +rule(it) } } ?: run { +"None" } }
-        fact("Notes") {
-            +when {
-                cluster.notesWithheld -> "Withheld below privacy gate"
-                !cluster.notes.isNullOrEmpty() -> "Present · see detail"
-                else -> "None"
-            }
-        }
-    }
-}
-
-internal fun visibility(cluster: OpsCluster, k: Int): String = when {
-    !cluster.unblinded -> "Labels redacted: ${number(cluster.distinctInstalls28d)} / ${number(k)} non-trusted installs in 28 days; no trusted sighting."
-    cluster.seenByTrusted -> "Labels visible: trusted sighting."
-    else -> "Labels visible: ${number(cluster.distinctInstalls28d)} ≥ ${number(k)} non-trusted installs in 28 days."
-}
-
-internal fun FlowContent.statusChip(status: String) {
-    val (label, tone) = when (status) {
-        "new" -> "New" to "warn"
-        "triaged" -> "Triaged" to "neutral"
-        "drafted" -> "Drafted" to "accent"
-        "resolved" -> "Resolved" to "good"
-        "ignored" -> "Ignored" to "neutral"
-        else -> "[redacted]" to "neutral"
-    }
-    chip(label, tone)
 }
 
 private data class AlarmDisplay(val kind: String, val label: String, val tone: String, val trigger: String)
@@ -427,7 +369,7 @@ private fun FlowContent.dataTable(description: String, columns: List<String>, ro
 }
 
 internal fun FlowOrPhrasingContent.chip(label: String, tone: String) { span("chip $tone") { +label } }
-private fun FlowOrPhrasingContent.yesChip(value: Boolean, tone: String) { if (value) chip("Yes", tone) else +"No" }
+internal fun FlowOrPhrasingContent.yesChip(value: Boolean, tone: String) { if (value) chip("Yes", tone) else +"No" }
 internal fun FlowContent.emptyState(copy: String) { p("empty") { +copy } }
 internal fun FlowOrPhrasingContent.date(value: String) { time { attributes["datetime"] = safe(value); +safe(value) } }
 internal fun number(value: Number): String = String.format(Locale.ROOT, "%,d", value.toLong())
@@ -437,9 +379,9 @@ internal fun safe(value: String): String = value
     .replace(Regex("(?i)[0-9a-f]{16,}"), "[redacted]")
 internal fun version(value: String): String = safe(value.substringBefore('+')) + if ('+' in value) "+[build withheld]" else ""
 private fun validated(value: String, pattern: Regex): String = if (pattern.matches(value)) safe(value) else "[redacted]"
-private fun platform(value: String): String = validated(value, Regex("[a-z_][a-z0-9_]{0,31}"))
+internal fun platform(value: String): String = validated(value, WireGrammars.platform)
 private fun prefix(value: String): String = validated(value, Regex("[a-fA-F0-9]{8}"))
-private fun rule(value: String): String = validated(value, WireGrammars.ruleId)
+internal fun rule(value: String): String = validated(value, WireGrammars.ruleId)
 private fun JsonObject.rows(key: String): List<JsonObject> = (get(key) as? JsonArray).orEmpty().map { it.jsonObject }
 private fun JsonObject.obj(key: String): JsonObject = get(key) as? JsonObject ?: JsonObject(emptyMap())
 private fun JsonObject.optionalText(key: String): String? = (get(key) as? JsonPrimitive)?.contentOrNull
