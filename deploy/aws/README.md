@@ -308,32 +308,41 @@ SSM `AWS-RunShellScript` runs as root. Protect trusted repository refs and workf
 
 ### Compose-only refresh (memory limits, service options)
 
-The image workflow never refreshes `docker-compose.yml`, and the host's cloud-init is frozen, so a reviewed change to the committed Compose file (for example the #1179 memory limits) is applied with one SSM command from the workstation. It fetches the file at the reviewed ref, keeps the census image the host currently runs, validates the merged configuration, and recreates only the services whose definition changed. Postgres and census restart (seconds of downtime; the app pool reconnects); `pgdata` is a bind to the data volume and is untouched.
+The image workflow never refreshes `docker-compose.yml`, and the host's cloud-init is frozen, so a reviewed change to the committed Compose file (for example the #1179 memory limits) is applied with one SSM command from the workstation. The S6b upgrade command above also refreshes the Compose file (and the host scripts, units and override); use this lighter one when only service options changed. It fetches the file at the reviewed ref, pins the image the **running** census container uses (not the file's, which a deploy that failed between its sed and its `up` can leave ahead of the container), validates the merged configuration against the host override under the deploy lock, and recreates every service whose definition changed — for the limits change that is all three, so Caddy's public listener blips for a second or two and census/postgres restart (the app pool reconnects); `pgdata` is a bind to the data volume and is untouched. To roll back, re-run with the previous ref.
+
+Run from `deploy/aws` in a subshell (the block uses `set -e`; do not paste it bare into an interactive shell):
 
 ```bash
-set -euo pipefail
+( set -euo pipefail
 export AWS_DEFAULT_REGION="$(terraform output -raw region)" AWS_PAGER=''
 CENSUS_COMPOSE_REF='main'   # the reviewed branch/tag
+[[ "$CENSUS_COMPOSE_REF" =~ ^[A-Za-z0-9_][A-Za-z0-9_./-]*$ ]] || { echo 'Invalid compose ref' >&2; exit 1; }
 script=$(cat <<'EOS'
 set -euo pipefail
 cd /opt/census
-image=$(docker compose config --format json | python3 -c 'import json,sys; print(json.load(sys.stdin)["services"]["census"]["image"])')
-git -C /opt/census-src fetch --depth 1 origin "$CENSUS_COMPOSE_REF"
+image=$(docker inspect --format '{{.Config.Image}}' "$(docker compose ps -q census)")
+[[ -n "$image" ]] || { echo 'census is not running; use the S6b upgrade command' >&2; exit 1; }
+git -C /opt/census-src fetch --depth 1 origin -- "$CENSUS_COMPOSE_REF"
 git -C /opt/census-src show FETCH_HEAD:deploy/compose/docker-compose.yml > docker-compose.yml.new
 sed -i "/^    census:/,/^    [a-zA-Z0-9_-]*:/s#^\([[:space:]]*image:[[:space:]]*\).*#\1$image#" docker-compose.yml.new
 docker compose -f docker-compose.yml.new -f docker-compose.override.yml config --quiet
 mv docker-compose.yml.new docker-compose.yml
 docker compose up -d --wait --wait-timeout 180
-docker compose exec -T census wget -qO- http://127.0.0.1:8080/readyz
+deadline=$((SECONDS + 60))
+until docker compose exec -T census wget -qO- http://127.0.0.1:8080/readyz; do
+    (( SECONDS < deadline )) || { echo 'CENSUS: readiness timed out' >&2; docker compose logs --tail=50 census; exit 1; }
+    sleep 1
+done
+echo
 docker stats --no-stream --format '{{.Name}}\t{{.MemUsage}}'
 EOS
 )
 aws ssm send-command --instance-ids "$(terraform output -raw instance_id)" --document-name AWS-RunShellScript \
   --parameters "$(python3 -c 'import json,shlex,sys; print(json.dumps({"commands":["mountpoint -q /var/lib/census-data && flock -w 600 /var/lib/census-data/.deploy.lock env CENSUS_COMPOSE_REF="+shlex.quote(sys.argv[1])+" bash -c "+shlex.quote(sys.argv[2])],"executionTimeout":["900"]}))' "$CENSUS_COMPOSE_REF" "$script")" \
-  --query Command.CommandId --output text
+  --query Command.CommandId --output text )
 ```
 
-Poll `aws ssm get-command-invocation` for the result; `docker stats` must show each container's limit (`/ 768MiB`, `/ 384MiB`, `/ 128MiB`) rather than the host total.
+Poll `aws ssm get-command-invocation` for the result; `docker stats` must show each container's limit (`/ 704MiB`, `/ 320MiB`, `/ 96MiB`) rather than the host total. That proves the limits are installed, not that peak usage is safe — the memory alarm is the backstop for that.
 
 ## Restore drill / disaster recovery
 

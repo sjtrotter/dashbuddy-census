@@ -5,21 +5,27 @@ services:
         env_file: .env
         environment:
             ALARM_SPOOL_DIR: /var/spool/census-alarms
-            # Bounded JVM on the 2 GiB host (#1179): heap + metaspace + direct memory stay under the
-            # container limit below, and an OutOfMemoryError exits so Compose restarts a healthy process
-            # instead of a limping one. JAVA_TOOL_OPTIONS is additive to the image's JAVA_OPTS.
-            JAVA_TOOL_OPTIONS: -Xmx384m -XX:MaxMetaspaceSize=128m -XX:MaxDirectMemorySize=64m -XX:+ExitOnOutOfMemoryError
+            # Bounded JVM on the 2 GiB host (#1179). Bounded: heap 320, metaspace 96, direct 32 (Netty is
+            # told to count against the JDK limit), code cache 48, SerialGC pinned so a later limit change
+            # cannot flip the collector unnoticed. Unbounded but small: thread stacks, GC/JVM text, malloc.
+            # The sized /tmp tmpfs below is charged to this cgroup too. Worst case ≈ 600 MiB < 704.
+            # A HotSpot-raised heap/metaspace OutOfMemoryError exits so Compose restarts a healthy process;
+            # a direct-buffer exhaustion is a Java-thrown error and degrades to failed requests instead.
+            # JAVA_TOOL_OPTIONS is additive to the image's JAVA_OPTS (disjoint keys).
+            JAVA_TOOL_OPTIONS: -Xmx320m -XX:MaxMetaspaceSize=96m -XX:MaxDirectMemorySize=32m -XX:ReservedCodeCacheSize=48m -XX:+UseSerialGC -XX:+ExitOnOutOfMemoryError -Dio.netty.maxDirectMemory=0
         volumes:
             - alarm-spool:/var/spool/census-alarms
-        # Memory limits make the cgroup, not the kernel's host-wide OOM killer, pick the victim (#1179).
-        # Budget on a t4g.small (1.8 GiB usable, no swap): ~540 MiB host/agents + 768 + 384 + 128.
+        # Memory limits bound ONE runaway service to its cgroup (#1179). Budget on a t4g.small (1835 MiB,
+        # no swap): limits sum to 1120 MiB (704 + 320 + 96), leaving ~700 MiB for the host — ~540 at rest
+        # plus the daily backup's aws-cli/gzip and a deploy's compose CLI. Two services at their ceilings
+        # at once would still reach the host OOM killer; the limits make that an unlikely corner, not impossible.
         deploy:
             resources:
                 limits:
-                    memory: 768M
+                    memory: 704M
         read_only: true
         tmpfs:
-            - /tmp
+            - /tmp:size=32m
         cap_drop: [ALL]
         security_opt: [no-new-privileges:true]
         restart: unless-stopped
@@ -29,9 +35,11 @@ services:
         networks: [edge, db]
     postgres:
         image: postgres:16-alpine
-        # shared_buffers stays at the 128 MiB default; max_connections 20 caps per-connection memory
-        # (the app pool is 5, plus pg_dump/psql). Both are explicit so the budget is visible here (#1179).
-        command: ["postgres", "-c", "shared_buffers=128MB", "-c", "max_connections=20"]
+        # Budget visible here (#1179): shared_buffers 128 (the default) + 3 autovacuum workers × 16 +
+        # one manual maintenance op 32 + 20 connections (count cap: app pool 5 + Flyway + pg_dump/psql)
+        # × ~2 work_mem sorts × 4 MiB ≈ 300 MiB < 320. max_connections caps the COUNT, which is what
+        # bounds the per-connection sum. The official entrypoint still runs initdb and su-execs uid 70.
+        command: ["postgres", "-c", "shared_buffers=128MB", "-c", "max_connections=20", "-c", "maintenance_work_mem=32MB", "-c", "autovacuum_work_mem=16MB"]
         environment:
             POSTGRES_DB: census
             POSTGRES_USER: census
@@ -41,7 +49,7 @@ services:
         deploy:
             resources:
                 limits:
-                    memory: 384M
+                    memory: 320M
         healthcheck:
             test: [CMD-SHELL, "pg_isready -U census -d census"]
             interval: 10s
@@ -57,7 +65,7 @@ services:
         deploy:
             resources:
                 limits:
-                    memory: 128M
+                    memory: 96M
         ports:
             - "80:80"
             - "443:443"
