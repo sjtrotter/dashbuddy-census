@@ -125,7 +125,7 @@ The host writes a root-owned 0600 `.env` atomically, never logs secret values, a
 
    The renderer omits `OPERATOR_TOTP_SECRET` or `ALERTS_TOPIC_ARN` when its optional parameter is missing, empty, or `CHANGE-ME`; startup continues. Present values must match `^[A-Z2-7]{16,64}$` and `^arn:aws:sns:[a-z0-9-]+:[0-9]{12}:[A-Za-z0-9_-]{1,256}$` respectively. Invalid formats refuse rendering without printing values; the app also validates canonical base32. An omitted TOTP secret leaves authenticated mutations at `503 totp_unconfigured`; an omitted topic makes the host publisher exit silently; the app still logs and keeps its bounded spool. The four required parameters and their refusal are unchanged.
 
-3. **Existing host:** its cloud-init is frozen by `ignore_changes`, so applying the template edit does **not** update the host scripts or units. Run this one-time SSM command from the workstation's reviewed S6b checkout in `deploy/aws`. It installs the exact optional-parameter renderer, startup script, census service, and alarm publisher script plus its service/path/timer units from the template, with root ownership and 0700 scripts. Set `CENSUS_NAME_PREFIX` and `CENSUS_IMAGE_REF` to this deployment's non-secret template settings, and `CENSUS_COMPOSE_REF` to the reviewed branch/tag containing these fixes. Bootstrap originally cloned the repository to `/opt/census-src` and copied Compose into `/opt/census`; neither `census-start` nor the image deploy workflow refreshes those files. This command holds the deployment lock, fetches the reviewed Compose file, preserves the selected census image and existing volume bindings, creates the alarms directory owned by uid/gid 10001, and writes the alarm volume bind into the Compose override. It enables the publisher path/timer and restarts `census.service`.
+3. **Existing host:** its cloud-init is frozen by `ignore_changes`, so applying the template edit does **not** update the host scripts or units. Run this one-time SSM command from the workstation's reviewed S6b checkout in `deploy/aws`. It installs the exact optional-parameter renderer, startup script, census service, and alarm publisher script plus its service/path/timer units from the template, with root ownership and 0700 scripts. Set `CENSUS_NAME_PREFIX` and `CENSUS_IMAGE_REF` to this deployment's non-secret template settings, and `CENSUS_COMPOSE_REF` to the reviewed branch/tag containing these fixes. Bootstrap originally cloned the repository to `/opt/census-src` and copied Compose into `/opt/census`; neither `census-start` nor the image deploy workflow refreshes those files. This command holds the deployment lock, fetches the reviewed Compose file, preserves the selected census image and existing volume bindings, creates the alarms directory owned by uid/gid 10001, initializes the root-owned 0600 budget state outside the spool (preserving any existing budget) and root-owned `/root/.aws`, and writes the alarm volume bind into the Compose override. It enables the publisher path/timer and restarts `census.service`.
 
    ```bash
    set -euo pipefail
@@ -203,12 +203,23 @@ The host writes a root-owned 0600 `.env` atomically, never logs secret values, a
            encoded,
            'CENSUS_FILE',
        ])
-       if mode == '0700':
+       if path == '/usr/local/sbin/census-alarm-publish':
+           command.append('python3 -c ' + shlex.quote(
+               'import ast,sys; ast.parse(open(sys.argv[1]).read())') + ' ' + staged)
+       elif mode == '0700':
            command.append('bash -n ' + staged)
        installs.append('install -o root -g root -m ' + mode + ' ' + staged + ' ' + path)
+   # Reuse the exact root-only initialization fragment from data setup; do not
+   # rerun its volume formatting/mount steps on an existing host.
+   setup_block = template.split('  - path: /usr/local/sbin/census-data-setup\n', 1)[1].split('\n  - path:', 1)[0]
+   setup = textwrap.dedent(setup_block.split('    content: |\n', 1)[1])
+   publisher_setup = '# Root-only publisher state;' + setup.split('# Root-only publisher state;', 1)[1]
    command.extend([
+       'for unit in census-alarm-publish.path census-alarm-publish.timer census-alarm-publish.service; do '
+       'if systemctl cat "$unit" >/dev/null 2>&1; then systemctl stop "$unit"; fi; done',
        *installs,
        'install -d -m 0700 -o 10001 -g 10001 /var/lib/census-data/alarms',
+       publisher_setup,
        'install -o root -g root -m 0600 "$temporary/docker-compose.override.yml" /opt/census/docker-compose.override.yml',
        'install -o root -g root -m 0600 "$temporary/docker-compose.yml" /opt/census/docker-compose.yml',
        'systemctl daemon-reload',
@@ -233,7 +244,11 @@ The host writes a root-owned 0600 `.env` atomically, never logs secret values, a
 
 Application alarm delivery is WARN log + spool file → host publisher → the existing SNS email subscription. The WARN under `Alarm` is the system of record. Compose sets `ALARM_SPOOL_DIR=/var/spool/census-alarms` and mounts the `alarm-spool` named volume there; the host override binds it to `/var/lib/census-data/alarms`. `FileSpoolAlarmSink` writes exactly the validated rendering to a temporary file and atomically renames it to `.alarm`, dropping the oldest at the 64-file cap. An I/O failure increments process-local `AlarmStats.spool_failed` and produces at most one `Alarm` WARN `alarm_spool_failed class=<simple name>` per ten minutes, without failing health admission or purge. Unset `ALARM_SPOOL_DIR` selects logging only.
 
-The root host publisher reads the optional topic from `/opt/census/.env`, sends at most 64 files oldest first, and deletes each only after a successful `timeout 20 aws sns publish`. Failure leaves the file for retry and journals only `census-alarm-publish: publish failed`; inspect `journalctl -u census-alarm-publish.service`. The path unit watches directory changes and the timer retries every five minutes. The subject is `census alarm: <kind>`; the body has exactly five lines: `kind=...`, `platform=...`, `version=...`, `install_prefix=...`, `rule_ids=...`. Values use the log's validated tokens and `[redacted]` replacements, with `-` for an absent prefix and a bracketed rule-ID list. Neither the application message nor its logs contain a topic ARN/account ID, full install ID, secret, token, TOTP code, payload string, or exception message. AWS's own email envelope/unsubscribe links are outside the application message. Spool overflow or write failure may lose the email copy, and a successful publish followed by a host crash before deletion can cause a duplicate. Counts of raised alarms refer to local delivery, not confirmed email delivery.
+The root Python publisher treats the spool as hostile: it opens entries relative to a pinned directory fd with `O_NOFOLLOW`, checks the opened inode is regular, uid 10001, single-link and at most 4 KiB, and strictly validates UTF-8 and the five-line grammar. Numeric `<epochMillis>-<counter>.alarm` names are required. Other names (including hidden and temporary files), directories, symlinks, hard links, wrong-owner/oversized files and malformed messages are rejected and removed without following links. It retains at most the newest 256 valid entries during each scan and attempts at most 16 oldest first per run. A persistent root-owned token bucket outside the spool has capacity 20 and refills at 20/hour; each attempt consumes a token before AWS runs, including failures. Deferred valid files remain until delivery or storage eviction. A corrupt budget state fails closed and requires operator repair; upgrades preserve it.
+
+Each AWS CLI publish has a 20-second timeout; success deletes the entry, failure retains it. The hardened service has a five-minute timeout, a read-only system except the spool, budget state and root AWS cache, private temporary storage and no new privileges. It journals only `census-alarm-publish: published=<n> failed=<n> rejected=<n> deferred=<n>` plus one `census-alarm-publish: budget exhausted, deferred=<n>` when needed, never names, bodies, exception text or AWS output. Missing topic configuration exits silently. Inspect `journalctl -u census-alarm-publish.service`; the path unit watches directory changes and the timer retries every five minutes.
+
+The subject is `census alarm: <kind>`; the body has exactly five lines: `kind=...`, `platform=...`, `version=...`, `install_prefix=...`, `rule_ids=...`. The host accepts `[redacted]` only for platform/version; the prefix must be eight lowercase hex characters or `-`, and rule IDs must match the wire grammar. Neither the application message nor its logs contain a topic ARN/account ID, full install ID, secret, token, TOTP code, payload string, or exception message. AWS's own email envelope/unsubscribe links are outside the application message. Spool overflow or write failure may lose the email copy, and a successful publish followed by a host crash before deletion can cause a duplicate. Counts of raised alarms refer to local delivery, not confirmed email delivery.
 
 ## 4. DNS and first start
 
