@@ -16,6 +16,7 @@ import cloud.trotter.census.server.ops.OpsAuth
 import cloud.trotter.census.server.ops.OpsSessions
 import cloud.trotter.census.server.ops.TotpDecision
 import cloud.trotter.census.server.ops.TotpReplay
+import cloud.trotter.census.server.ops.fingerprintPattern
 import cloud.trotter.census.server.ops.operatorTokenMatches
 import cloud.trotter.census.server.today
 import io.ktor.http.ContentType
@@ -197,7 +198,7 @@ internal fun opsAlarms(alarms: HealthAlarms): JsonObject = buildJsonObject {
 }
 
 private fun badRequest(): Nothing = throw BadRequestException("Invalid operator request")
-private fun ApplicationCall.fingerprint(): String = parameters["fingerprint"]?.takeIf { Regex("[0-9a-f]{64}").matches(it) } ?: badRequest()
+private fun ApplicationCall.fingerprint(): String = parameters["fingerprint"]?.takeIf { fingerprintPattern.matches(it) } ?: badRequest()
 private fun ApplicationCall.installId() = parameters["uuid"]?.let(InstallId::parse)?.toUuid() ?: badRequest()
 private fun ApplicationCall.bound(key: String, default: Int, maximum: Int): Int {
     val value = request.queryParameters[key] ?: return default

@@ -16,6 +16,7 @@ import cloud.trotter.census.server.routes.identityRoutes
 import cloud.trotter.census.server.routes.opsRoutes
 import cloud.trotter.census.server.routes.policyRoutes
 import cloud.trotter.census.server.routes.skeletonRoutes
+import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.content.OutgoingContent
 import io.ktor.serialization.kotlinx.json.json
@@ -111,8 +112,12 @@ fun Application.module(config: Config, db: Database?, clock: Clock = SystemClock
             if (failure is CancellationException) throw failure
             call.respond(HttpStatusCode.InternalServerError, ErrorResponse("internal_error"))
         }
-        status(HttpStatusCode.NotFound, HttpStatusCode.MethodNotAllowed) { call, status ->
-            call.respond(status, ErrorResponse(if (status == HttpStatusCode.NotFound) "not_found" else "method_not_allowed"))
+        status(HttpStatusCode.NotFound, HttpStatusCode.MethodNotAllowed) { status ->
+            // The operator dashboard answers an unknown cluster with its own HTML 404 shell; every other
+            // not-found/method-not-allowed stays the JSON error envelope.
+            if (content.contentType?.withoutParameters() != ContentType.Text.Html) {
+                call.respond(status, ErrorResponse(if (status == HttpStatusCode.NotFound) "not_found" else "method_not_allowed"))
+            }
         }
     }
     routing {

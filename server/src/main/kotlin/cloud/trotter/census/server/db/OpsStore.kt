@@ -52,6 +52,9 @@ data class OpsCluster(
 @Serializable
 data class OpsClusterGroup(val platformAppVersion: String, val clusters: List<OpsCluster>)
 
+/** Hash-free vocabulary display projection; no plaintext or token identifier enters HTML. */
+data class OpsVocabularyDisplay(val kind: String, val distinctInstalls: Int, val firstDay: String, val lastDay: String)
+
 /** Numerical segments, with missing segments treated as zero; unknown sorts before numeric versions. */
 internal val opsVersionOrder: Comparator<String> = Comparator { left, right ->
     val a = left.split('.').map { it.toIntOrNull() ?: -1 }
@@ -216,6 +219,12 @@ class OpsStore(private val db: Database, private val clock: Clock, private val p
     }
 
     suspend fun vocabularyQueue(limit: Int = 50): JsonArray = query { queue(limit) }
+
+    suspend fun vocabularyQueueDisplay(limit: Int = 50): List<OpsVocabularyDisplay> = query {
+        select("SELECT kind, installs, first_day, last_day FROM ($QUEUE_SQL) queue ORDER BY first_day, token_hash LIMIT ?", policy.k, limit) { rows -> buildList {
+            do { add(OpsVocabularyDisplay(rows.getString("kind"), rows.getInt("installs"), rows.getString("first_day"), rows.getString("last_day"))) } while (rows.next())
+        } } ?: emptyList()
+    }
 
     suspend fun vocabularyQueueCount(): Long = query {
         select("SELECT count(*) FROM ($QUEUE_SQL) queue", policy.k) { it.getLong(1) } ?: 0L

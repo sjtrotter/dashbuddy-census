@@ -104,9 +104,8 @@ The silence clock uses a process-local map of install IDs to server receipt inst
 
 ## S6a operator surface
 
-`GET /ops/` is a read-only, server-rendered dashboard: server version, `Policy.k`, UTC day,
-delivered alarms, ranked clusters and rendered samples, seven days of fleet health, install
-prefixes, today's ledger, and vocabulary queue count. Its only form is the logout control; it has
+`GET /ops/` is a read-only, server-rendered dashboard with identity and snapshot sections followed by alarms, seven days of health, ranked clusters, today's ledger, installs, and the hash-free vocabulary queue.
+`GET /ops/clusters/{fingerprint}/view` is the authenticated HTML cluster detail page with gated notes and skeleton samples. Its only form is the logout control; it has
 no JavaScript or embedded operator credential. Its CSP is
 `default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'`.
 
