@@ -2,6 +2,7 @@ package cloud.trotter.census.server.ingest
 
 /** Shared, pure grammars for retained wire tokens. */
 object WireGrammars {
+    val platform = Regex("^[a-z_][a-z0-9_]{0,31}$")
     val platformAppVersion = Regex("""^[0-9]{1,5}(\.[0-9]{1,5}){0,3}$""")
     val appVersion = Regex("""^([0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}(\+([0-9a-f]{7,40}(\.dirty)?|nogit))?|test)$""")
     val rulesetReleaseTag = Regex("""^(corpus|dev|v?[0-9]{1,5}(\.[0-9]{1,5}){0,3}(-[a-z0-9]{1,12})?)$""")

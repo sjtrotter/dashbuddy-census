@@ -32,6 +32,8 @@ class ClusterDetailRenderTest {
         assertTrue(page.contains("href=\"/ops/clusters/$fingerprint\""))
         assertTrue(page.contains(">Cluster JSON</a>"))
         assertTrue(page.contains("New with newest observed version"))
+        assertTrue(page.contains("<dt>Platform</dt>"))
+        assertTrue(page.contains("<dt>Versions</dt>"))
         assertTrue(page.contains("Labels redacted: 9 / 10 non-trusted installs in 28 days; no trusted sighting."))
         assertTrue(page.contains("12,480"))
         assertEquals(2, Regex("<article class=\"sample\"").findAll(page).count())

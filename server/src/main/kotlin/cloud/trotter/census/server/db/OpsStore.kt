@@ -52,8 +52,29 @@ data class OpsCluster(
 @Serializable
 data class OpsClusterGroup(val platformAppVersion: String, val clusters: List<OpsCluster>)
 
+@Serializable
+data class OpsClusterSummaryRow(val platform: String, val platformAppVersion: String?, val total: Int, val byStatus: Map<String, Int>)
+
+@Serializable
+data class OpsClusterPage(val platform: String, val platformAppVersion: String?, val status: String?, val total: Int, val page: Int, val pageSize: Int, val pageCount: Int, val clusters: List<OpsCluster>)
+
 /** Hash-free vocabulary display projection; no plaintext or token identifier enters HTML. */
 data class OpsVocabularyDisplay(val kind: String, val distinctInstalls: Int, val firstDay: String, val lastDay: String)
+
+/** Review order: what an operator should look at first. The one owner of the status vocabulary. */
+val CLUSTER_STATUSES: List<String> = listOf("new", "triaged", "drafted", "resolved", "ignored")
+
+/** distinctInstalls28d × log2(1 + sightings28d) × recency (1.0 within 7 days, 0.5 within 28, else 0.1). */
+internal fun reviewScore(row: OpsCluster, today: LocalDate): Double {
+    val age = ChronoUnit.DAYS.between(LocalDate.parse(row.lastSeenDay), today)
+    val recency = when { age <= 7 -> 1.0; age <= 28 -> 0.5; else -> 0.1 }
+    return row.distinctInstalls28d * log2(1.0 + row.sightings28d) * recency
+}
+
+/** The review page's order: status rank (unknown last) → score descending → fingerprint. The one owner; pure. */
+internal fun reviewOrder(today: LocalDate): Comparator<OpsCluster> =
+    compareBy<OpsCluster> { CLUSTER_STATUSES.indexOf(it.status).takeIf { rank -> rank >= 0 } ?: Int.MAX_VALUE }
+        .thenByDescending { reviewScore(it, today) }.thenBy { it.fingerprint }
 
 /** Numerical segments, with missing segments treated as zero; unknown sorts before numeric versions. */
 internal val opsVersionOrder: Comparator<String> = Comparator { left, right ->
@@ -73,9 +94,9 @@ class OpsStore(private val db: Database, private val clock: Clock, private val p
         }
     }
 
-    suspend fun clusters(version: String? = null, status: String? = null, limit: Int = 50, includeSamples: Boolean = false): List<OpsClusterGroup> = query {
+    suspend fun clusters(version: String? = null, status: String? = null, limit: Int = 50, includeSamples: Boolean = false, platform: String? = null): List<OpsClusterGroup> = query {
         val today = clock.today()
-        val rows = clusterRows(today, status = status)
+        val rows = clusterRows(today, status = status).filter { platform == null || it.platform == platform }
         val firstDays = versionFirstDays()
         val groups = rows.flatMap { row -> row.versions.map { it to row } }.groupBy({ it.first }, { it.second })
         var remaining = limit
@@ -92,6 +113,33 @@ class OpsStore(private val db: Database, private val clock: Clock, private val p
             })
         }
     }
+
+    suspend fun clusterSummary(): List<OpsClusterSummaryRow> = query {
+        clusterRows(clock.today()).flatMap { row ->
+            displayVersions(row).map { (row.platform to it) to row }
+        }.groupBy({ it.first }, { it.second }).map { (key, rows) ->
+            OpsClusterSummaryRow(key.first, key.second, rows.size, CLUSTER_STATUSES.associateWith { status -> rows.count { it.status == status } })
+        }.sortedWith(compareBy<OpsClusterSummaryRow> { it.platform }
+            .thenBy(nullsLast(opsVersionOrder.reversed())) { it.platformAppVersion })
+    }
+
+    suspend fun clustersPage(platform: String, version: String?, status: String?, page: Int, pageSize: Int = 25): OpsClusterPage = query {
+        require(pageSize > 0)
+        val today = clock.today()
+        val rows = clusterRows(today, status = status).filter { row ->
+            row.platform == platform && version in displayVersions(row)
+        }.sortedWith(reviewOrder(today))
+        val pageCount = if (rows.isEmpty()) 1 else (rows.size - 1) / pageSize + 1
+        val currentPage = page.coerceIn(1, pageCount)
+        val firstDays = if (version == null) emptyMap() else versionFirstDays()
+        val clusters = rows.drop((currentPage - 1) * pageSize).take(pageSize).map { row ->
+            row.copy(newWithVersion = version != null && newWithVersion(row, version, firstDays), samples = null)
+        }
+        OpsClusterPage(platform, version, status, rows.size, currentPage, pageSize, pageCount, clusters)
+    }
+
+    private fun displayVersions(row: OpsCluster): List<String?> =
+        row.versions.map { it.takeUnless { version -> version == "unknown" } }.ifEmpty { listOf(null) }
 
     suspend fun cluster(fingerprint: String): OpsCluster? = query {
         val row = clusterRows(clock.today(), fingerprint = fingerprint).singleOrNull() ?: return@query null
@@ -137,11 +185,7 @@ class OpsStore(private val db: Database, private val clock: Clock, private val p
         return LocalDate.parse(row.firstSeenDay) >= first && row.versions.none { opsVersionOrder.compare(it, version) < 0 }
     }
 
-    private fun score(row: OpsCluster, today: LocalDate): Double {
-        val age = ChronoUnit.DAYS.between(LocalDate.parse(row.lastSeenDay), today)
-        val recency = when { age <= 7 -> 1.0; age <= 28 -> 0.5; else -> 0.1 }
-        return row.distinctInstalls28d * log2(1.0 + row.sightings28d) * recency
-    }
+    private fun score(row: OpsCluster, today: LocalDate): Double = reviewScore(row, today)
 
     private fun Connection.samples(row: OpsCluster): List<OpsSample> = select(
         "SELECT platform_app_version, received_day, skeleton FROM cluster_samples WHERE fingerprint = ? ORDER BY received_day DESC, platform_app_version",
