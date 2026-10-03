@@ -38,7 +38,7 @@ object LoginHtml {
                     input(type = InputType.password, name = "token") {
                         attributes["autocomplete"] = "off"
                         required = true
-                        maxLength = "256"
+                        maxLength = cloud.trotter.census.server.routes.MAX_TOKEN_LENGTH.toString()
                     }
                 }
                 label {

@@ -45,6 +45,8 @@ import java.time.LocalDate
 import java.time.format.DateTimeParseException
 
 private val opsJson = Json { explicitNulls = false; encodeDefaults = true }
+/** The form's bound on the operator token (the bearer header has none); the login page's maxlength mirrors it. */
+internal const val MAX_TOKEN_LENGTH = 1024
 private val clusterStatuses = setOf("new", "triaged", "drafted", "resolved", "ignored")
 
 fun Route.opsRoutes(
@@ -76,12 +78,15 @@ fun Route.opsRoutes(
             call.loginHeaders()
             val bytes = call.readLimitedBody() ?: return@post
             if (bytes.size > 4096 || call.request.contentType().withoutParameters() != ContentType.Application.FormUrlEncoded) badRequest()
+            // application/x-www-form-urlencoded: a browser sends a space as `+` (a literal plus arrives as %2B), and
+            // Ktor's parser keeps `+` literal — translate it BEFORE percent-decoding so a token that authenticates
+            // as a bearer also authenticates through the form (review, Astra).
             val fields = try {
-                bytes.toString(Charsets.UTF_8).parseUrlEncodedParameters()
+                bytes.toString(Charsets.UTF_8).replace('+', ' ').parseUrlEncodedParameters()
             } catch (_: IllegalArgumentException) { badRequest() }
             val token = fields["token"] ?: badRequest()
             val code = fields["code"] ?: badRequest()
-            if (token.length > 256 || !Regex("[0-9]{6}").matches(code)) badRequest()
+            if (token.length > MAX_TOKEN_LENGTH || !Regex("[0-9]{6}").matches(code)) badRequest()
             val secret = config.operatorTotpSecret
             if (secret == null) {
                 call.respond(HttpStatusCode.ServiceUnavailable, ErrorResponse("totp_unconfigured"))

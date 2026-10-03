@@ -104,6 +104,9 @@ fun Application.module(config: Config, db: Database?, clock: Clock = SystemClock
         exception<io.ktor.http.URLDecodeException> { call, _ ->
             call.respond(HttpStatusCode.BadRequest, ErrorResponse("bad_request"))
         }
+        exception<io.ktor.http.BadContentTypeFormatException> { call, _ ->
+            call.respond(HttpStatusCode.BadRequest, ErrorResponse("bad_request"))
+        }
         exception<Throwable> { call, failure ->
             if (failure is CancellationException) throw failure
             call.respond(HttpStatusCode.InternalServerError, ErrorResponse("internal_error"))

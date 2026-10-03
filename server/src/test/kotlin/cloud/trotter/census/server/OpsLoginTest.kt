@@ -47,7 +47,7 @@ class OpsLoginTest {
         assertEquals("default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'", response.headers["Content-Security-Policy"])
         assertEquals("no-store", response.headers[HttpHeaders.CacheControl])
         val page = response.bodyAsText()
-        for (expected in listOf("<title>census · sign in</title>", "<form", "action=\"/ops/login\"", "method=\"post\"", "name=\"token\"", "name=\"code\"", "autocomplete=\"off\"", "autocomplete=\"one-time-code\"", "pattern=\"[0-9]{6}\"", "maxlength=\"256\"", "maxlength=\"6\"")) {
+        for (expected in listOf("<title>census · sign in</title>", "<form", "action=\"/ops/login\"", "method=\"post\"", "name=\"token\"", "name=\"code\"", "autocomplete=\"off\"", "autocomplete=\"one-time-code\"", "pattern=\"[0-9]{6}\"", "maxlength=\"1024\"", "maxlength=\"6\"")) {
             assertTrue(page.contains(expected))
         }
         assertFalse(page.contains("<script"))
@@ -154,7 +154,7 @@ class OpsLoginTest {
     fun `oversized forms invalid fields and other content types are rejected`() = testApplication {
         application { module(config(), db = null, clock = clock) }
         // "%ZZ" and a trailing "%" raise Ktor's checked URLDecodeException: a 400, never a 500 whose message embeds the body.
-        for (body in listOf("x".repeat(5000), "code=123456", "token=x", "token=${"a".repeat(257)}&code=123456", "token=x&code=12345", "token=x&code=abcdef", "token=%ZZ&code=123456", "token=abc%")) {
+        for (body in listOf("x".repeat(5000), "code=123456", "token=x", "token=${"a".repeat(1025)}&code=123456", "token=x&code=12345", "token=x&code=abcdef", "token=%ZZ&code=123456", "token=abc%")) {
             assertError(client.post("/ops/login") {
                 contentType(ContentType.Application.FormUrlEncoded)
                 setBody(body)
@@ -164,6 +164,24 @@ class OpsLoginTest {
             contentType(ContentType.Application.Json)
             setBody("{}")
         }, 400, "bad_request")
+        // No refusal path ever sets a cookie. (A malformed Content-Type is mapped to 400 by StatusPages; the test
+        // client refuses to send one, so that mapping is exercised by the URLDecodeException sibling above.)
+        val refused = client.post("/ops/login") { contentType(ContentType.Application.FormUrlEncoded); setBody("token=x&code=12345") }
+        assertEquals(400, refused.status.value)
+        assertNull(refused.headers[HttpHeaders.SetCookie])
+    }
+
+    @Test
+    fun `a token with spaces or a literal plus authenticates through the form exactly as it does as a bearer`() = testApplication {
+        val spaced = "operator pass+phrase"
+        application { module(Config.fromEnv(testEnvironment() + mapOf("OPERATOR_TOKEN_SHA256" to hashSecret(spaced), "OPERATOR_TOTP_SECRET" to secret)), db = null, clock = clock) }
+        val browser = createClient { followRedirects = false }
+        assertError(browser.get("/ops/clusters") { header(HttpHeaders.Authorization, "Bearer $spaced") }, 503, "db_unavailable")
+        // The browser encodes the space as `+` and the literal plus as %2B (formUrlEncode does the same).
+        val cookie = assertSessionCookie(browser.login(token = spaced))
+        assertError(browser.get("/ops/clusters") { header(HttpHeaders.Cookie, cookie) }, 503, "db_unavailable")
+        instant = instant.plusSeconds(30) // a fresh code: the replay memory refuses the one just spent on login
+        assertSessionCookie(browser.login(token = spaced))
     }
 
     @Test
