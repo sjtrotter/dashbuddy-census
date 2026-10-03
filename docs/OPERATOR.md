@@ -16,7 +16,21 @@ All `/ops` requests require the operator bearer token. Generate and retain a hig
 
 Run `./backup.sh` from `deploy/compose` using a daily scheduler. It writes a restricted-permission compressed `pg_dump` and prunes local dumps to 14 UTC dates. Export `BACKUP_BUCKET` to enable `aws s3 cp`; configure bucket encryption, restricted access, and a 14-day lifecycle including noncurrent object versions. Local files and S3 copies both contain sensitive pseudonymous data.
 
-For recovery, use a fresh PostgreSQL volume/database, start only `postgres`, and run `./restore.sh /absolute/path/to/backup.sql.gz`. Type `RESTORE` at the prompt. The script stops census, refuses a database with user relations, and restores in one transaction with SQL errors fatal. It never drops an existing database. Review the restored data, reapply later withdrawals when that feature exists, then start census and check readiness. Schedule a restore drill; copying a dump alone does not prove recovery.
+For recovery, use a fresh PostgreSQL volume/database, start only `postgres`, and run `./restore.sh /absolute/path/to/backup.sql.gz`. Type `RESTORE` at the prompt. The script stops census, refuses a database with user relations, and restores in one transaction with SQL errors fatal. It never drops an existing database. Review the restored data, then start census and check readiness. The first drill ran 2026-10-03 (record in [the AWS runbook](../deploy/aws/README.md#drill-log)): 20 s from stop to a backup of the recovered database. **Reapplying withdrawals is manual and has no record to work from** (DashBuddy #1192): a withdrawal deletes rows and leaves no trace, so an install that withdrew after the dump was taken comes back with the restore. If you know the id, delete it again in one transaction over the same tables the withdrawal uses (`InstallStore.WITHDRAWAL_TABLES` is the owner of this list; keep the snippet in sync):
+
+```sql
+BEGIN;
+DELETE FROM trusted_envelopes WHERE install_id = '<uuid>';
+DELETE FROM health_daily      WHERE install_id = '<uuid>';
+DELETE FROM token_sightings   WHERE install_id = '<uuid>';
+DELETE FROM cluster_sightings WHERE install_id = '<uuid>';
+DELETE FROM ingest_ledger     WHERE install_id = '<uuid>';
+DELETE FROM nonces            WHERE install_id = '<uuid>';
+DELETE FROM installs          WHERE install_id = '<uuid>';
+COMMIT;
+```
+
+Schedule a restore drill; copying a dump alone does not prove recovery.
 
 ## Revoke or withdraw an install
 
