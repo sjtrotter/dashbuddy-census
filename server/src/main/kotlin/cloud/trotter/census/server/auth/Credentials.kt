@@ -1,18 +1,21 @@
 package cloud.trotter.census.server.auth
 
+import cloud.trotter.census.contract.auth.Bearer
+import cloud.trotter.census.contract.auth.InstallIdGrammar
+import cloud.trotter.census.contract.auth.InstallSecret
+import cloud.trotter.census.contract.auth.RequestSigner as ContractRequestSigner
 import java.security.MessageDigest
-import java.util.Base64
+import java.time.Instant
+import java.util.HexFormat
 import java.util.UUID
-import javax.crypto.Mac
-import javax.crypto.spec.SecretKeySpec
 
+/** the contract is the ONE owner of the wire-auth bytes; this file adapts it to Ktor types */
 @JvmInline
 value class InstallId private constructor(val value: String) {
     fun toUuid(): UUID = UUID.fromString(value)
 
     companion object {
-        private val canonicalV4 = Regex("[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
-        fun parse(value: String): InstallId? = if (canonicalV4.matches(value)) InstallId(value) else null
+        fun parse(value: String): InstallId? = if (InstallIdGrammar.isCanonicalV4(value)) InstallId(value) else null
     }
 }
 
@@ -21,57 +24,43 @@ class BearerCredential(val installId: InstallId, val secret: String) {
     override fun toString(): String = "BearerCredential([redacted])"
 }
 
-private val secretPattern = Regex("[A-Za-z0-9_-]{43,128}")
-
-fun isValidSecret(secret: String): Boolean {
-    if (!secretPattern.matches(secret)) return false
-    val bytes = try {
-        Base64.getUrlDecoder().decode(secret)
-    } catch (_: IllegalArgumentException) {
-        return false
-    }
-    return bytes.size >= 32 && Base64.getUrlEncoder().withoutPadding().encodeToString(bytes) == secret // constant-time: not credential material
-}
+fun isValidSecret(secret: String): Boolean = InstallSecret.isValid(secret)
 
 fun parseBearer(header: String?): BearerCredential? {
-    if (header == null || !header.startsWith("Bearer ", ignoreCase = true)) return null
-    val credential = header.substring(7)
-    val separator = credential.indexOf('.')
-    if (separator != 36) return null
-    val id = InstallId.parse(credential.substring(0, separator)) ?: return null
-    val secret = credential.substring(separator + 1)
-    return if (isValidSecret(secret)) BearerCredential(id, secret) else null
+    val credential = Bearer.parse(header) ?: return null
+    val id = InstallId.parse(credential.installId) ?: return null
+    return BearerCredential(id, credential.secret)
 }
 
-fun hashSecret(secret: String): String = sha256Hex(secret.toByteArray(Charsets.UTF_8))
+fun hashSecret(secret: String): String = InstallSecret.hash(secret)
 
+// A plain digest helper for server-side uses (nonces, state): not wire-auth, so it does not route through the contract.
 fun sha256Hex(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256").digest(bytes).toLowerHex()
 
-internal fun ByteArray.toLowerHex(): String = joinToString("") { "%02x".format(it.toInt() and 0xff) }
+// Retained for server nonce generation, which is independent of wire signing.
+internal fun ByteArray.toLowerHex(): String = HexFormat.of().formatHex(this)
 
-/** Shared wire algorithm; see docs/CLIENT.md. HMAC uses the base64url-decoded secret bytes. */
+/** Server adapter for the contract's wire algorithm; see docs/CLIENT.md. */
 object RequestSigner {
     fun canonical(method: String, path: String, timestamp: String, rawBody: ByteArray = byteArrayOf()): String =
-        "$method\n${path.substringBefore('?')}\n$timestamp\n${sha256Hex(rawBody)}"
+        ContractRequestSigner.canonical(method, path, timestamp, rawBody)
 
-    fun sign(secret: String, canonical: String): String {
-        val mac = Mac.getInstance("HmacSHA256")
-        mac.init(SecretKeySpec(Base64.getUrlDecoder().decode(secret), "HmacSHA256"))
-        return "v1=" + mac.doFinal(canonical.toByteArray(Charsets.UTF_8)).toLowerHex()
-    }
+    fun sign(secret: String, canonical: String): String = ContractRequestSigner.sign(secret, canonical)
 
     fun verify(secret: String, canonical: String, header: String): Boolean =
-        verify(secret, canonical, header) { expected, actual -> MessageDigest.isEqual(expected, actual) }
+        ContractRequestSigner.verify(secret, canonical, header)
 
-    /** Test seam checks that well-formed signatures take the constant-time comparison path. */
-    internal fun verify(secret: String, canonical: String, header: String, equal: (ByteArray, ByteArray) -> Boolean): Boolean {
+    /** The contract's internal seam is not visible across modules; retain shape checks and an injectable comparator. */
+    internal fun verify(
+        secret: String,
+        canonical: String,
+        header: String,
+        equal: (ByteArray, ByteArray) -> Boolean = { expected, actual -> MessageDigest.isEqual(expected, actual) },
+    ): Boolean {
         if (header.length != 67 || !header.startsWith("v1=") || header.drop(3).any { it !in "0123456789abcdef" }) return false
-        return equal(sign(secret, canonical).toByteArray(Charsets.US_ASCII), header.toByteArray(Charsets.US_ASCII))
+        return equal(ContractRequestSigner.sign(secret, canonical).toByteArray(Charsets.US_ASCII), header.toByteArray(Charsets.US_ASCII))
     }
 
-    fun timestampInWindow(timestamp: String, now: java.time.Instant): Boolean {
-        if (!Regex("-?(0|[1-9][0-9]*)").matches(timestamp)) return false
-        val seconds = timestamp.toLongOrNull() ?: return false
-        return seconds >= now.epochSecond - 300 && seconds <= now.epochSecond + 300
-    }
+    fun timestampInWindow(timestamp: String, now: Instant): Boolean =
+        ContractRequestSigner.timestampInWindow(timestamp, now.epochSecond)
 }
