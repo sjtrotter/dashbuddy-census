@@ -64,7 +64,8 @@ services:
         # #1178: upstream Caddy + caddy-ratelimit, built by .github/workflows/caddy-image.yml. Production pins the
         # whole reference BY DIGEST in this committed file (@sha256:…, like the census image) once a caddy-v* tag
         # has published; the image deploy workflow never touches this line (its sed is scoped to the census service).
-        image: ${CADDY_IMAGE_REF:-ghcr.io/sjtrotter/dashbuddy-census-caddy:caddy-v0.1.0}
+        # caddy-v0.1.0 (Caddy 2.11.6 + caddy-ratelimit 5625512f), published 2026-10-03 and keyless-signed by caddy-image.yml.
+        image: ${CADDY_IMAGE_REF:-ghcr.io/sjtrotter/dashbuddy-census-caddy@sha256:64eb40c86a415e790093e21e902b60a5b7a85fa77215bcff3c6d730c1f702637}
         environment:
             PUBLIC_HOST: ${PUBLIC_HOST:?Set PUBLIC_HOST in .env}
             ACME_EMAIL: ${ACME_EMAIL:-}
