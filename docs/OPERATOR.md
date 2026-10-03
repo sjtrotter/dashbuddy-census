@@ -88,7 +88,7 @@ prefixes, today's ledger, and vocabulary queue count. It has no forms, JavaScrip
 operator credential. Its CSP is `default-src 'none'; style-src 'unsafe-inline'`. Supply the bearer
 header with your HTTP client (for example, curl); a plain browser link cannot supply that header.
 
-All `/ops/*` endpoints require `Authorization: Bearer <operator token>`. Missing or incorrect
+`/ops` is not routed on the public host at all (404); it is served only on the operator listener `https://OPS_BIND_IP:8443` — the WireGuard address on AWS (see the runbook's "Operator VPN"), loopback elsewhere — with Caddy's internal CA (#1181). All `/ops/*` endpoints require `Authorization: Bearer <operator token>`. Missing or incorrect
 credentials return only `401 {"error":"unauthorized"}`. The shared `ops` rate bucket allows
 60 requests per minute. Each request logs one INFO line under `Ops`, with method, a known
 `/ops/<first segment>` path (no parameters or query), and status. Unknown segments reduce to

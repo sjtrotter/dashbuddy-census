@@ -125,7 +125,7 @@ The host writes a root-owned 0600 `.env` atomically, never logs secret values, a
 
    The renderer omits `OPERATOR_TOTP_SECRET` or `ALERTS_TOPIC_ARN` when its optional parameter is missing, empty, or `CHANGE-ME`; startup continues. Present values must match `^[A-Z2-7]{16,64}$` and `^arn:aws:sns:[a-z0-9-]+:[0-9]{12}:[A-Za-z0-9_-]{1,256}$` respectively. Invalid formats refuse rendering without printing values; the app also validates canonical base32. An omitted TOTP secret leaves authenticated mutations at `503 totp_unconfigured`; an omitted topic makes the host publisher exit silently; the app still logs and keeps its bounded spool. The four required parameters and their refusal are unchanged.
 
-3. **Existing host:** its cloud-init is frozen by `ignore_changes`, so applying the template edit does **not** update the host scripts or units. Run this one-time SSM command from the workstation's reviewed S6b checkout in `deploy/aws`. It installs the exact optional-parameter renderer, startup script, census service, and alarm publisher script plus its service/path/timer units from the template, with root ownership and 0700 scripts. Set `CENSUS_NAME_PREFIX` and `CENSUS_IMAGE_REF` to this deployment's non-secret template settings, and `CENSUS_COMPOSE_REF` to the reviewed branch/tag containing these fixes. Bootstrap originally cloned the repository to `/opt/census-src` and copied Compose into `/opt/census`; neither `census-start` nor the image deploy workflow refreshes those files. This command holds the deployment lock, fetches the reviewed Compose file, preserves the selected census image and existing volume bindings, creates the alarms directory owned by uid/gid 10001, initializes the root-owned 0600 budget state outside the spool (preserving any existing budget) and root-owned `/root/.aws`, and writes the alarm volume bind into the Compose override. It enables the publisher path/timer and restarts `census.service`.
+3. **Existing host:** its cloud-init is frozen by `ignore_changes`, so applying the template edit does **not** update the host scripts or units. Run this one-time SSM command from the workstation's reviewed checkout in `deploy/aws` (first written for S6b; since #1181 it also installs the WireGuard configure script and package and refreshes the Caddyfile, so it is the command for every host-script/Caddy change). It installs the exact optional-parameter renderer, startup script, census service, and alarm publisher script plus its service/path/timer units from the template, with root ownership and 0700 scripts. Set `CENSUS_NAME_PREFIX` and `CENSUS_IMAGE_REF` to this deployment's non-secret template settings, and `CENSUS_COMPOSE_REF` to the reviewed branch/tag containing these fixes. Bootstrap originally cloned the repository to `/opt/census-src` and copied Compose into `/opt/census`; neither `census-start` nor the image deploy workflow refreshes those files. This command holds the deployment lock, fetches the reviewed Compose file, preserves the selected census image and existing volume bindings, creates the alarms directory owned by uid/gid 10001, initializes the root-owned 0600 budget state outside the spool (preserving any existing budget) and root-owned `/root/.aws`, and writes the alarm volume bind into the Compose override. It enables the publisher path/timer and restarts `census.service`.
 
    ```bash
    set -euo pipefail
@@ -169,6 +169,9 @@ The host writes a root-owned 0600 `.env` atomically, never logs secret values, a
        'git -C /opt/census-src fetch --depth 1 origin ' + shlex.quote(compose_ref),
        'git -C /opt/census-src show FETCH_HEAD:deploy/compose/docker-compose.yml > "$temporary/docker-compose.yml"',
        r'sed -i "/^    census:/,/^    [a-zA-Z0-9_-]*:/s#^\([[:space:]]*image:[[:space:]]*\).*#\1$image#" "$temporary/docker-compose.yml"',
+       # #1181: the Caddyfile is refreshed too (bootstrap copied it once; nothing else ever rewrites it).
+       'git -C /opt/census-src show FETCH_HEAD:deploy/compose/Caddyfile > "$temporary/Caddyfile"',
+       'DEBIAN_FRONTEND=noninteractive apt-get install -y wireguard >/dev/null',
    ]
    # Compose emits resolved volume definitions as JSON (also valid YAML). Retain
    # pgdata, including a recovery-host override, while adding the alarm bind.
@@ -182,6 +185,7 @@ The host writes a root-owned 0600 `.env` atomically, never logs secret values, a
                   + ' > "$temporary/docker-compose.override.yml"')
    installs = []
    for path, mode in [
+       ('/usr/local/sbin/census-wireguard-configure', '0700'),
        ('/usr/local/sbin/census-configure', '0700'),
        ('/usr/local/sbin/census-start', '0700'),
        ('/usr/local/sbin/census-alarm-publish', '0700'),
@@ -222,6 +226,7 @@ The host writes a root-owned 0600 `.env` atomically, never logs secret values, a
        publisher_setup,
        'install -o root -g root -m 0600 "$temporary/docker-compose.override.yml" /opt/census/docker-compose.override.yml',
        'install -o root -g root -m 0600 "$temporary/docker-compose.yml" /opt/census/docker-compose.yml',
+       'install -o root -g root -m 0644 "$temporary/Caddyfile" /opt/census/Caddyfile',
        'systemctl daemon-reload',
        'systemctl enable --now census-alarm-publish.path census-alarm-publish.timer',
        'systemctl restart census.service',
@@ -346,6 +351,49 @@ aws ssm send-command --instance-ids "$(terraform output -raw instance_id)" --doc
 ```
 
 Poll `aws ssm get-command-invocation` for the result; `docker stats` must show each container's limit (`/ 704MiB`, `/ 320MiB`, `/ 96MiB`) rather than the host total. That proves the limits are installed, not that peak usage is safe — the memory alarm is the backstop for that.
+
+## Operator VPN (WireGuard): `/ops` off the public internet (#1181)
+
+The operator surface is served only on a second Caddy listener that Compose publishes on `OPS_BIND_IP:8443` — the host's WireGuard address `10.8.0.1` when peers are configured, loopback otherwise; the public site answers `404` for `/ops` and `/ops/*`. The listener uses Caddy's internal CA (`tls internal`), so the operator's devices install its root certificate once; WireGuard is the transport boundary and TLS keeps the session cookie's `Secure` attribute honest. The host generates its own WireGuard private key on first start and never exposes it; peers are PUBLIC keys in the `wireguard_peers` String parameter, one per line, `name key address` with addresses in `10.8.0.2`–`10.8.0.254`. No peers (`CHANGE-ME`) keeps the VPN down — a fresh deployment is private by default. Terraform opens UDP 51820 to the internet (WireGuard answers nothing to an unknown key).
+
+1. `terraform apply` (two UDP ingress rules + the `wireguard_peers` placeholder; the existing host is otherwise untouched).
+2. Generate a keypair per device on the workstation, keeping private keys in the password manager and in `~/dashbuddy/secrets/wireguard/` (0600):
+
+   ```sh
+   umask 077; wg genkey | tee workstation.key | wg pubkey > workstation.pub   # or an X25519 keypair from python-cryptography
+   ```
+
+   A phone can instead generate its own keypair in the WireGuard app ("Create from scratch") and show only the public key.
+3. Set the peers (public keys only; the value is a plain String):
+
+   ```sh
+   aws ssm put-parameter --name /dashbuddy-census/wireguard_peers --type String --overwrite \
+     --value "$(printf 'workstation %s 10.8.0.2\nphone %s 10.8.0.3\n' "$(cat workstation.pub)" "$(cat phone.pub)")"
+   ```
+4. Existing host: run the one-time host refresh command in "Operator second factor + alarm delivery" step 3 with `CENSUS_COMPOSE_REF` at the reviewed ref — it installs the WireGuard package and `census-wireguard-configure`, the updated `census-configure`/`census.service`, refreshes Compose and the Caddyfile, and restarts the stack. A new host does all of this from cloud-init.
+5. Read the host's public key and the operator CA, then write each device's config (`AllowedIPs = 10.8.0.1/32` — only operator traffic enters the tunnel):
+
+   ```sh
+   aws ssm send-command --instance-ids "$(terraform output -raw instance_id)" --document-name AWS-RunShellScript \
+     --parameters 'commands=["cat /etc/wireguard/server.pub","cd /opt/census && docker compose exec -T caddy cat /data/caddy/pki/authorities/local/root.crt"]' \
+     --query Command.CommandId --output text   # then get-command-invocation
+   ```
+
+   ```ini
+   [Interface]
+   PrivateKey = <device private key>
+   Address = 10.8.0.2/32
+   [Peer]
+   PublicKey = <host public key>
+   Endpoint = <elastic IP>:51820
+   AllowedIPs = 10.8.0.1/32
+   PersistentKeepalive = 25
+   ```
+
+   Workstation (Fedora): `nmcli connection import type wireguard file census-ops.conf`. Phone: the WireGuard app imports the same text or a QR of it (the QR is the private key — generate it locally, never paste it anywhere). Install `root.crt` as a CA certificate on each device (Android: Settings → Security → Encryption & credentials → Install a certificate → CA certificate).
+6. Verify from a connected device: `curl --cacert root.crt -H "Authorization: Bearer …" https://10.8.0.1:8443/ops/health` → 200, and `https://<public host>/ops/` → 404. `/v1/*` is unchanged on the public host.
+
+Rotation: replace the device line in the parameter and `systemctl restart census.service` (the configure step rewrites `wg0.conf`); to rotate the host key delete `/etc/wireguard/server.key` and restart, then update every device. The VPN carries only operator traffic; nothing about it is logged beyond `CENSUS: WireGuard up with N peer(s)` in the service journal.
 
 ## Restore drill / disaster recovery
 

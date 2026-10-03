@@ -20,6 +20,8 @@ resource "aws_security_group" "census" {
 
 locals {
   ingress_ports = toset(["80", "443"])
+  # #1181: the operator VPN. /ops is served only on the WireGuard address; the public listener answers 404.
+  wireguard_port = 51820
   egress_ports = {
     http  = { protocol = "tcp", port = 80 }
     https = { protocol = "tcp", port = 443 }
@@ -47,6 +49,22 @@ resource "aws_vpc_security_group_ingress_rule" "ipv6" {
   ip_protocol       = "tcp"
   from_port         = tonumber(each.value)
   to_port           = tonumber(each.value)
+}
+
+resource "aws_vpc_security_group_ingress_rule" "wireguard_ipv4" {
+  security_group_id = aws_security_group.census.id
+  cidr_ipv4         = "0.0.0.0/0"
+  ip_protocol       = "udp"
+  from_port         = local.wireguard_port
+  to_port           = local.wireguard_port
+}
+
+resource "aws_vpc_security_group_ingress_rule" "wireguard_ipv6" {
+  security_group_id = aws_security_group.census.id
+  cidr_ipv6         = "::/0"
+  ip_protocol       = "udp"
+  from_port         = local.wireguard_port
+  to_port           = local.wireguard_port
 }
 
 resource "aws_vpc_security_group_egress_rule" "ipv4" {

@@ -6,7 +6,7 @@
     }
 }
 
-{$PUBLIC_HOST} {
+(hardened) {
     encode zstd gzip
     header {
         Strict-Transport-Security "max-age=31536000; includeSubDomains"
@@ -14,6 +14,13 @@
         Referrer-Policy no-referrer
         -Server
     }
+    # Access log is DISCARDED on purpose: no IP retention (ADR-0011).
+    log {
+        output discard
+    }
+}
+
+(upstream) {
     reverse_proxy census:8080 {
         header_up -X-Forwarded-For
         header_up -Forwarded
@@ -21,9 +28,28 @@
         header_up -CF-Connecting-IP
         header_up -True-Client-IP
     }
-    # Access log is DISCARDED on purpose: no IP retention (ADR-0011).
-    log {
-        output discard
+}
+
+# The public site: the client API only. /ops is not routed here at all (#1181) — the operator surface lives on
+# the private listener below, so a stolen operator token is useless from the internet.
+{$PUBLIC_HOST} {
+    import hardened
+    @ops path /ops /ops/*
+    handle @ops {
+        respond 404
+    }
+    handle {
+        import upstream
     }
     # S3: per-IP rate limiting via caddy-ratelimit requires a custom Caddy build.
+}
+
+# The operator site (#1181): published by Compose only on OPS_BIND_IP (the WireGuard address 10.8.0.1 on AWS,
+# loopback otherwise), with Caddy's internal CA — install its root certificate on the operator's devices
+# (`docker compose exec caddy cat /data/caddy/pki/authorities/local/root.crt`). The VPN is the transport boundary;
+# TLS keeps the session cookie's Secure attribute honest.
+https://{$OPS_BIND_IP}:8443 {
+    import hardened
+    tls internal
+    import upstream
 }
