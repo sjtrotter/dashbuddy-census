@@ -16,6 +16,11 @@ updates:
           # JDK major stays at 21 (toolchain + app parity); bump deliberately, not by bot.
           - dependency-name: "eclipse-temurin"
             update-types: ["version-update:semver-major"]
+    - package-ecosystem: docker
+      # The edge image (#1178): caddy builder + runtime tags.
+      directory: /deploy/caddy
+      schedule:
+          interval: weekly
     - package-ecosystem: github-actions
       directory: /
       schedule:

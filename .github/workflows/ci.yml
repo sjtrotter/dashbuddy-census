@@ -32,6 +32,13 @@ jobs:
                   java-version: "21"
             - name: Build and test (runner Docker enables MigrationTest)
               run: ./gradlew build --no-daemon -PcensusContractPath="$GITHUB_WORKSPACE/DashBuddy/census-contract"
+            - name: Edge image builds and the committed Caddyfile adapts with it (#1178)
+              run: |
+                  docker build -q -t census-caddy-ci deploy/caddy
+                  docker run --rm census-caddy-ci caddy list-modules | grep -Fxq 'http.handlers.rate_limit'
+                  docker run --rm -v "$PWD/deploy/compose/Caddyfile:/etc/caddy/Caddyfile:ro" \
+                      -e PUBLIC_HOST=census.example.test -e ACME_EMAIL=ops@example.test -e OPS_BIND_IP=127.0.0.1 \
+                      census-caddy-ci caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
     terraform:
         runs-on: ubuntu-latest
         steps:

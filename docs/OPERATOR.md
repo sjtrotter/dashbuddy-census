@@ -36,6 +36,28 @@ Schedule a restore drill; copying a dump alone does not prove recovery.
 
 `DELETE /v1/installs/me` lets an authenticated install withdraw. The operator can revoke credentials using the endpoint below. Revocation retains stored observations; withdrawal deletes install-keyed rows in one transaction. Reapply subsequent withdrawals after restoring an older backup. Foreign keys currently do not cascade. Do not pretend a manual `DELETE FROM installs` is a complete withdrawal procedure.
 
+## Edge rate limiting (#1178)
+
+The public site runs `caddy-ratelimit` zones keyed by the direct client address: `/v1/enroll` 10 per
+minute AND 20 per hour, all of `/v1` (the enrol request spends both) 200 per minute — sliding windows,
+10 % jitter on the `Retry-After`, a 15-second sweep. A refused request is `429` with `Retry-After`
+from Caddy and never reaches the application, so it spends none of the application's shared buckets.
+What that buys: one address can take at most a sixth of the application's hourly enrol allowance
+(120/h, spent before credential checks) and a third of its global 600/min admission, so emptying the
+shared buckets in seconds from one curl is over — starving them now costs at least six addresses
+(enrol) or three (ingest); the application-side scope of those buckets is the real weakness and is
+filed separately. 200/min per address still lets ~66 phones behind one carrier address each run a
+three-batch upload in the same minute; a phone treats an edge `429` as a deferral (spool kept, run
+rescheduled). The client address exists only inside the Caddy process for one window plus the sweep;
+nothing is stored. The plugin's refusal line DOES carry the peer address (logger
+`http.handlers.rate_limit`), and it is discarded by the global default logger in the Caddyfile — not
+by the site logs — which is how ADR-0011's "no IP ever" posture is kept; keep that global block. The
+limits reset on a Caddy restart. The operator listener has no per-IP zone: it is reachable only
+through the VPN from registered peers and keeps the application's 60/minute operator bucket. A load
+check after each edge rollout, from one address: 201 `GET /v1/policy` inside a minute must answer
+`429` from the 201st on (and `200` again from another address); use `GET /v1/policy`, never bogus
+enrols, which would spend the shared enrol budget.
+
 ## Incident: what we can and cannot see
 
 The future database can show pseudonymous install IDs, key hashes, token hashes, structural fingerprints, day-level counts, and reviewed vocabulary. Skeleton storage must not contain screen plaintext below the promotion gate. The S5 trusted-envelope exception is described below. No storage path may retain bearer tokens, IP addresses, or device identifiers. Nonce and revocation timestamps are explicit exceptions to date-only observations. S1 request logs have known route, method, status, elapsed duration, and an optional eight-hex-character install-ID prefix; unmatched paths are redacted.
