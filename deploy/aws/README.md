@@ -174,7 +174,9 @@ The host writes a root-owned 0600 `.env` atomically, never logs secret values, a
        'DEBIAN_FRONTEND=noninteractive apt-get install -y wireguard >/dev/null',
        # #1178: the edge image must be pullable BEFORE any file is replaced — a denied pull here aborts with the
        # old files and the old containers intact, instead of leaving a Caddyfile the running binary cannot adapt.
-       'docker compose -f "$temporary/docker-compose.yml" pull --quiet caddy',
+       # --project-directory keeps /opt/census/.env in scope: with a bare -f, Compose would look for .env beside
+       # the temporary file and fail interpolation of the required variables before pulling (review, Astra).
+       'docker compose --project-directory /opt/census -f "$temporary/docker-compose.yml" pull --quiet caddy',
    ]
    # Compose emits resolved volume definitions as JSON (also valid YAML). Retain
    # pgdata, including a recovery-host override, while adding the alarm bind.

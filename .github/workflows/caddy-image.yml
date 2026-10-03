@@ -54,7 +54,7 @@ jobs:
               env:
                   IMAGE: ghcr.io/sjtrotter/dashbuddy-census-caddy@${{ steps.build.outputs.digest }}
               run: |
-                  docker run --rm "$IMAGE" caddy list-modules | grep -qx http.handlers.rate_limit
+                  docker run --rm "$IMAGE" caddy list-modules | grep -Fxq 'http.handlers.rate_limit'
                   docker run --rm -v "$PWD/deploy/compose/Caddyfile:/etc/caddy/Caddyfile:ro" \
                       -e PUBLIC_HOST=census.example.test -e ACME_EMAIL=ops@example.test -e OPS_BIND_IP=127.0.0.1 \
                       "$IMAGE" caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
