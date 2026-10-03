@@ -61,7 +61,8 @@ services:
         restart: unless-stopped
         networks: [db]
     caddy:
-        image: caddy:2-alpine
+        # #1178: upstream Caddy + caddy-ratelimit, built by .github/workflows/caddy-image.yml (pin, bump deliberately).
+        image: ghcr.io/sjtrotter/dashbuddy-census-caddy:${CADDY_IMAGE_TAG:-caddy-v0.1.0}
         environment:
             PUBLIC_HOST: ${PUBLIC_HOST:?Set PUBLIC_HOST in .env}
             ACME_EMAIL: ${ACME_EMAIL:-}

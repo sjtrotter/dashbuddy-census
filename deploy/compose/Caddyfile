@@ -1,5 +1,7 @@
 {
     email {$ACME_EMAIL}
+    # #1178: caddy-ratelimit is a non-standard directive; place it before the standard handlers.
+    order rate_limit before basicauth
     # #1181: clients connecting to the operator site by IP literal send no SNI; behind Docker's port NAT the
     # connection's local address is the container's, so certificate selection needs this default.
     default_sni {$OPS_BIND_IP}
@@ -48,7 +50,30 @@
     handle {
         import upstream
     }
-    # S3: per-IP rate limiting via caddy-ratelimit requires a custom Caddy build.
+    # #1178: per-IP admission at the edge, so one curl with invented install ids cannot starve every driver's
+    # enrol/ingest (the app's buckets are keyed by the bearer's install id and shared). The client address is the
+    # direct TCP peer (nothing is in front of Caddy), held ONLY in this plugin's in-memory zones — no access log,
+    # no retention, lost on restart (ADR-0011). Figures: enrol 10/min (a device enrols once), the rest of /v1 at
+    # 120/min (a phone's hourly batches and health posts are a handful), both far above honest use.
+    rate_limit {
+        zone enroll {
+            match {
+                path /v1/enroll
+            }
+            key {http.request.remote.host}
+            events 10
+            window 1m
+        }
+        zone api {
+            match {
+                path /v1/*
+            }
+            key {http.request.remote.host}
+            events 120
+            window 1m
+        }
+        jitter 0.1
+    }
 }
 
 # The operator site (#1181): published by Compose only on OPS_BIND_IP (the WireGuard address 10.8.0.1 on AWS,

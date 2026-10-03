@@ -36,6 +36,19 @@ Schedule a restore drill; copying a dump alone does not prove recovery.
 
 `DELETE /v1/installs/me` lets an authenticated install withdraw. The operator can revoke credentials using the endpoint below. Revocation retains stored observations; withdrawal deletes install-keyed rows in one transaction. Reapply subsequent withdrawals after restoring an older backup. Foreign keys currently do not cascade. Do not pretend a manual `DELETE FROM installs` is a complete withdrawal procedure.
 
+## Edge rate limiting (#1178)
+
+The public site runs `caddy-ratelimit` zones keyed by the direct client address: `/v1/enroll` 10 per
+minute, `/v1/*` 120 per minute (sliding windows, 10 % jitter on the `Retry-After`). A refused request
+is `429` with `Retry-After` from Caddy and never reaches the application, so it spends none of the
+application's shared buckets — one curl with invented install ids can no longer starve every driver's
+enrol or ingest. The client address exists only inside the Caddy process for the window; nothing is
+logged (both sites discard their logs) and nothing is stored, which is how ADR-0011's "no IP ever"
+posture is kept while still refusing abuse at the edge. The limits reset on a Caddy restart. The
+operator listener has no per-IP zone: it is reachable only through the VPN from registered peers and
+keeps the application's 60/minute operator bucket. A load check after each edge rollout: more than
+ten `POST /v1/enroll` from one address inside a minute must answer `429` from the eleventh on.
+
 ## Incident: what we can and cannot see
 
 The future database can show pseudonymous install IDs, key hashes, token hashes, structural fingerprints, day-level counts, and reviewed vocabulary. Skeleton storage must not contain screen plaintext below the promotion gate. The S5 trusted-envelope exception is described below. No storage path may retain bearer tokens, IP addresses, or device identifiers. Nonce and revocation timestamps are explicit exceptions to date-only observations. S1 request logs have known route, method, status, elapsed duration, and an optional eight-hex-character install-ID prefix; unmatched paths are redacted.

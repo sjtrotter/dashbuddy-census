@@ -19,3 +19,7 @@ Pre-authentication admission is process-local: a configurable global bucket allo
 Exception events remain available for diagnosis. Logback's `SafeThrowableConverter` renders only the exception class-name chain and the first three stack frames of the outermost exception as `class.method:line`. It never renders exception messages, cause messages, or suppressed exceptions, and default full-stack rendering is disabled. Ordinary log messages must still exclude private data; SQL diagnostic loggers remain disabled. `Install.toString()` redacts the key hash and truncates the ID to its verified-log prefix length.
 
 Authentication captures one request instant for admission, timestamp verification, last-seen updates, and the route's ledger day/reset. Last-seen writes require the verified key hash and an active row and can only advance the stored day. `/v1/me` re-reads the stored row, so an older or stale request cannot report its attempted update as a successful write.
+
+## Edge admission (#1178)
+
+Per-client-address limits run in the Caddy edge (`caddy-ratelimit`, in-memory zones, no access log, no retention): `/v1/enroll` 10/min, `/v1/*` 120/min. They bound the cheapest abuse — invented install ids spending the application's shared enrol/ingest buckets — without the server ever obtaining, storing or logging an IP; the zones are the only place an address exists and they live in process memory for one window. Not a defence against a distributed source, which is accepted at this scale.
