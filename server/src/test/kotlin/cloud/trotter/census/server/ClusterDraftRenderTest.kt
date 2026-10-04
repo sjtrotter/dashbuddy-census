@@ -213,6 +213,23 @@ class ClusterDraftRenderTest {
         assertTrue(page.contains("value=\"classify\""))
         assertTrue(page.contains("name=\"screenClass\"")); assertTrue(page.contains("name=\"notes\""))
         assertFalse(page.contains("name=\"shape\"")); assertFalse(page.contains("Preview draft"))
+        assertTrue(page.contains("Save classification")); assertFalse(page.contains("Save draft"))
         assertPrivate(page)
+    }
+
+    @Test
+    fun `a capture-bearing page offers classification-only and draft saves and hints at it on a blank intent`() {
+        val page = render()
+        assertTrue(Regex("<button[^>]*name=\"mode\"[^>]*value=\"classify\"[^>]*formnovalidate[^>]*>Save classification only</button>").containsMatchIn(page)
+            || Regex("<button[^>]*formnovalidate[^>]*name=\"mode\"[^>]*value=\"classify\"[^>]*>Save classification only</button>").containsMatchIn(page))
+        assertFalse(page.contains("<input type=\"hidden\" name=\"mode\""))
+        assertTrue(page.contains("Save draft"))
+        assertFalse(page.contains("To record the screen class without drafting"))
+        val envelope = envelope(1)
+        val nodes = EnvelopeWalk.walk(envelope.getValue("payload").jsonObject)
+        val frame = requireNotNull(WireframeRender.render(envelope, nodes, capture.receivedDay, capture.installPrefix))
+        val refused = ClusterDraftHtml.render("0.11.0", 10, "2026-10-02", cluster, capture, frame, DraftForm.rows(nodes, frame),
+            Parameters.Empty, errors = listOf("Invalid intent"))
+        assertTrue(refused.contains("To record the screen class without drafting a rule, use &quot;Save classification only&quot; (no intent needed)."))
     }
 }
