@@ -63,10 +63,10 @@ data class OpsCluster(
 data class OpsClusterGroup(val platformAppVersion: String, val clusters: List<OpsCluster>)
 
 @Serializable
-data class OpsClusterSummaryRow(val platform: String, val platformAppVersion: String?, val total: Int, val byStatus: Map<String, Int>)
+data class OpsClusterSummaryRow(val platform: String, val platformAppVersion: String?, val total: Int, val byStatus: Map<String, Int>, val byClass: Map<String, Int> = emptyMap())
 
 @Serializable
-data class OpsClusterPage(val platform: String, val platformAppVersion: String?, val status: String?, val total: Int, val page: Int, val pageSize: Int, val pageCount: Int, val clusters: List<OpsCluster>)
+data class OpsClusterPage(val platform: String, val platformAppVersion: String?, val status: String?, val total: Int, val page: Int, val pageSize: Int, val pageCount: Int, val clusters: List<OpsCluster>, val byClass: Map<String, Int> = emptyMap())
 
 /** Hash-free vocabulary display projection; no plaintext or token identifier enters HTML. */
 data class OpsVocabularyDisplay(val kind: String, val distinctInstalls: Int, val firstDay: String, val lastDay: String)
@@ -128,7 +128,7 @@ class OpsStore(private val db: Database, private val clock: Clock, private val p
         clusterRows(clock.today()).flatMap { row ->
             displayVersions(row).map { (row.platform to it) to row }
         }.groupBy({ it.first }, { it.second }).map { (key, rows) ->
-            OpsClusterSummaryRow(key.first, key.second, rows.size, CLUSTER_STATUSES.associateWith { status -> rows.count { it.status == status } })
+            OpsClusterSummaryRow(key.first, key.second, rows.size, CLUSTER_STATUSES.associateWith { status -> rows.count { it.status == status } }, classCounts(rows))
         }.sortedWith(compareBy<OpsClusterSummaryRow> { it.platform }
             .thenBy(nullsLast(opsVersionOrder.reversed())) { it.platformAppVersion })
     }
@@ -145,8 +145,13 @@ class OpsStore(private val db: Database, private val clock: Clock, private val p
         val clusters = rows.drop((currentPage - 1) * pageSize).take(pageSize).map { row ->
             row.copy(newWithVersion = version != null && newWithVersion(row, version, firstDays), samples = null)
         }
-        OpsClusterPage(platform, version, status, rows.size, currentPage, pageSize, pageCount, clusters)
+        OpsClusterPage(platform, version, status, rows.size, currentPage, pageSize, pageCount, clusters, classCounts(rows))
     }
+
+    private fun classCounts(rows: List<OpsCluster>): Map<String, Int> =
+        (RuleAuthoringVocabulary.SCREEN_CLASSES + "unclassified").associateWith { screenClass ->
+            rows.count { (it.screenClass ?: "unclassified") == screenClass }
+        }
 
     private fun displayVersions(row: OpsCluster): List<String?> =
         row.versions.map { it.takeUnless { version -> version == "unknown" } }.ifEmpty { listOf(null) }
@@ -176,7 +181,6 @@ class OpsStore(private val db: Database, private val clock: Clock, private val p
     suspend fun saveDraft(fp: String, screenClass: String, selectionsJson: JsonObject, json5: String, day: LocalDate): Boolean = query {
         require(screenClass in RuleAuthoringVocabulary.SCREEN_CLASSES)
         val id = (selectionsJson["envelopeId"] as? JsonPrimitive)?.content?.toLongOrNull() ?: return@query false
-        val expected = (selectionsJson["envelopeSha256"] as? JsonPrimitive)?.content ?: return@query false
         // Lock the install before the envelope, matching withdrawal's parent-first lock order.
         // Lock provenance through commit: withdrawal/revocation and retention cannot race a successful save.
         val eligible = select("""SELECT i.install_id FROM installs i
@@ -184,12 +188,11 @@ class OpsStore(private val db: Database, private val clock: Clock, private val p
             AND i.trusted AND i.revoked_at IS NULL FOR SHARE""", id, fp) { true } ?: false
         if (!eligible) return@query false
         val pinned = pinned(fp, id, lock = true) ?: return@query false
-        if (pinned.sha256Hex != expected) return@query false
         val notes = (selectionsJson["notes"] as? JsonPrimitive)?.content
         require(notes == null || notes.length <= 2000)
         val draft = buildJsonObject {
             put("selections", JsonObject(selectionsJson - setOf("envelopeId", "envelopeSha256", "notes")))
-            put("json5", json5); put("envelopeId", id); put("envelopeSha256", expected)
+            put("json5", json5); put("envelopeId", id); put("envelopeSha256", pinned.sha256Hex)
         }
         update("""UPDATE clusters SET screen_class = ?, draft = ?::jsonb, draft_day = ?, status = 'drafted',
             notes = COALESCE(?, notes) WHERE fingerprint = ?""", screenClass, draft.toString(), day, notes, fp) == 1
@@ -374,7 +377,4 @@ class OpsStore(private val db: Database, private val clock: Clock, private val p
 data class PinnedEnvelope(
     val id: Long, val bytes: String, val sha256Hex: String, val receivedDay: String,
     val installPrefix: String, val platformAppVersion: String?,
-) {
-    // Grouped so hidden values cannot be confused with displayable hashes by the HTML privacy guard.
-    val pin: String get() = sha256Hex.take(16).chunked(4).joinToString("-")
-}
+)

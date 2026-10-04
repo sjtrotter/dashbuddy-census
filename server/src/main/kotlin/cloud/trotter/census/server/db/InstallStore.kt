@@ -139,10 +139,10 @@ class InstallStore(private val db: Database, private val clock: Clock) {
             if (table == "trusted_envelopes") {
                 // Delete/lock envelopes before clusters, the same lock order as retention and draft saves.
                 select("""WITH deleted AS (
-                    DELETE FROM trusted_envelopes WHERE install_id = ? RETURNING fingerprint
+                    DELETE FROM trusted_envelopes WHERE install_id = ? RETURNING id
                 ), cleared AS (
-                    UPDATE clusters SET screen_class = NULL, draft = NULL, draft_day = NULL
-                    WHERE fingerprint IN (SELECT fingerprint FROM deleted)
+                    UPDATE clusters SET draft = NULL, draft_day = NULL
+                    WHERE draft->>'envelopeId' = ANY(SELECT id::text FROM deleted)
                 ) SELECT count(*) FROM deleted""", installId) { it.getInt(1) } ?: 0
             } else update("DELETE FROM $table WHERE install_id = ?", installId)
         })
@@ -183,10 +183,10 @@ class InstallStore(private val db: Database, private val clock: Clock) {
     suspend fun purgeTrustedEnvelopes(today: LocalDate): Int = purge("envelopes") {
         select("""WITH deleted AS (
             DELETE FROM trusted_envelopes WHERE ctid IN
-                (SELECT ctid FROM trusted_envelopes WHERE purge_after < ? LIMIT 1000) RETURNING fingerprint
+                (SELECT ctid FROM trusted_envelopes WHERE purge_after < ? LIMIT 1000) RETURNING id
             ), cleared AS (
-                UPDATE clusters SET screen_class = NULL, draft = NULL, draft_day = NULL
-                WHERE fingerprint IN (SELECT fingerprint FROM deleted)
+                UPDATE clusters SET draft = NULL, draft_day = NULL
+                WHERE draft->>'envelopeId' = ANY(SELECT id::text FROM deleted)
             ) SELECT count(*) FROM deleted""", today) { it.getInt(1) } ?: 0
     }
 

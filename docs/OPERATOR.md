@@ -235,6 +235,8 @@ Open **Classify & draft** on a cluster detail page. This is a server-rendered fo
 JavaScript and the same restrictive CSP as the dashboard. With no currently trusted,
 unrevoked paired capture, it offers classification and notes only. Saving classification
 alone leaves the cluster status and any saved draft unchanged; “unknown” clears the class.
+Cluster cards show the class beside status; the dashboard summary and review header show
+counts by class, including unclassified clusters.
 
 With an eligible capture, the page numbers the drawn wireframe boxes. Choose a screen class,
 shape, intent and priority, then mark anchors, fields, binds and redactions by those numbers.
@@ -252,14 +254,14 @@ The field shares replay protection with login and the header-based API; sending 
 in both places is refused. Codes are never echoed on a re-rendered page. A successful save
 redirects to cluster detail, which offers **Draft (JSON5)**.
 
-The form pins its capture using a private row reference and the first sixteen hexadecimal
-digits of the stored bytes' digest, grouped into four short groups in the hidden pin value.
-The server reloads that exact row and checks its pin, trust and revocation before preview
-or save. A newer upload does not replace an open form's capture. A stale or ineligible
-capture produces “This capture changed — reload”. Node selections resolve through the
+The form pins its immutable capture using only its row ID (`envelopeId`). No digest is
+round-tripped through the form. The server reloads that exact row and checks trust and
+revocation before preview or save, computing `envelopeSha256` server-side at save time
+for provenance inside the stored draft document. A newer upload does not replace an open
+form's capture. A stale or ineligible capture produces “This capture changed — reload”. Node selections resolve through the
 contract walk's child-index paths, never through labels or display numbers alone.
 
-Forms are bounded to 64 KiB, 1,000 unique parameters and 2,000 characters per value. At most
+Draft forms are bounded to 64 KiB, 1,000 unique parameters and 2,000 characters per value. At most
 150 eligible drawn nodes appear in the table, with a remainder count; six controls per row
 keep a full form below the parameter limit. At most 64 active assignments are allowed,
 counting both field slots and constants separately. All processing stays on the server.
@@ -272,13 +274,16 @@ responses never contain drafts, selections or capture provenance; classification
 presence are the only new public DTO fields. Empty defaults remain omitted, preserving the
 previous response for an unclassified cluster without a draft.
 
-A saved draft is an operator-owned artefact: it remains downloadable after install
-revocation or removal of trust, even though the drafting page becomes classify-only when
-no eligible capture remains. Install withdrawal and envelope retention clear classification,
-draft and save day in the same transaction as deletion of the affected capture rows.
+A saved draft is an operator artefact that survives install **REVOCATION** (access) or
+removal of trust: it remains downloadable, even though the drafting page becomes
+classify-only when no eligible capture remains. **WITHDRAWAL** and retention are erasure:
+they delete the draft and save day only when its own capture is deleted, in the same
+transaction. Deleting another capture in the cluster leaves the draft intact. The operator's
+screen classification survives both erasure paths because it is not capture-derived.
 
 Drafts quote trusted-capture text and remain operator-only. Display strings are masked and
-HTML-escaped, hidden pins are abbreviated and grouped, and form actions are relative.
+HTML-escaped, the hidden capture reference contains only the row ID, and form actions
+are relative.
 The generator refuses weak anchors; the server also refuses generated output containing
 identifiers that would violate the page's privacy rules, keeping preview and download bytes
 identical. A draft does not prove recognition safety: **the APP test suite is the gate**,

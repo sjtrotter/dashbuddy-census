@@ -31,7 +31,7 @@ class DraftFormTest {
         this@changed.entries().forEach { (k, v) -> if (entries.none { it.first == k }) appendAll(k, v) }
         entries.forEach { (k, v) -> append(k, v) }
     }.build()
-    private fun base() = codec.encode(selections).changed("envelopeId" to "7", "envelopePin" to "abcd-abcd-abcd-abcd", "notes" to "Review")
+    private fun base() = codec.encode(selections).changed("envelopeId" to "7", "notes" to "Review")
 
     @Test
     fun `round trip preserves paths two fields prefix transforms constants and optional controls`() {
@@ -40,7 +40,7 @@ class DraftFormTest {
         assertEquals("Review", result.value.notes)
         assertEquals(7L, result.value.envelopeId)
         val single = selections.copy(fields = listOf(FieldAssignment(NodeRef(rows[1].node.path), "storeName", listOf("trim"))))
-        assertEquals(single, (codec.decode(codec.encode(single).changed("envelopeId" to "7", "envelopePin" to "abcd-abcd-abcd-abcd")) as DraftDecode.Ok).value.selections)
+        assertEquals(single, (codec.decode(codec.encode(single).changed("envelopeId" to "7")) as DraftDecode.Ok).value.selections)
     }
 
     @Test
@@ -49,7 +49,7 @@ class DraftFormTest {
             "screenClass" to "unknown", "shape" to "invented", "intent" to "Bad!", "intent" to "x".repeat(49),
             "priority" to "0", "priority" to "999", "priority" to "x", "modeHint" to "none", "offerSurface" to "none",
             "comment" to "x".repeat(501), "notes" to "x".repeat(2001), "envelopeId" to "0", "envelopeId" to "-1",
-            "envelopeId" to "9".repeat(30), "envelopePin" to "wrong", "role_1" to "reject", "field_2" to "payAmount",
+            "envelopeId" to "9".repeat(30), "role_1" to "reject", "field_2" to "payAmount",
             "field2_2" to "invented", "transform_2" to "invented", "stripPrefix_2" to "x".repeat(41),
             "bind_4" to "invented", "role_150" to "anchor", "role_0" to "anchor",
             "constName_1" to "customerNameHash", "constName_1" to "redCardTotal", "constValue_1" to "yes",
@@ -74,7 +74,7 @@ class DraftFormTest {
     fun `64 assignment cap counts each field slot and constants`() {
         val many = DraftForm(nodes(65).mapIndexed { i, n -> DraftNode(i + 1, n) })
         fun selected(n: Int) = Selections("idle", "idle", "home", 500, anchors = many.nodes.take(n).map { NodeRef(it.node.path) })
-        fun decode(s: Selections) = many.decode(many.encode(s).changed("envelopeId" to "7", "envelopePin" to "abcd-abcd-abcd-abcd"))
+        fun decode(s: Selections) = many.decode(many.encode(s).changed("envelopeId" to "7"))
         assertTrue(decode(selected(64)) is DraftDecode.Ok)
         assertTrue(decode(selected(65)) is DraftDecode.Errors)
         assertTrue(decode(selected(64).copy(constants = listOf(Constant("startingSession", JsonPrimitive(true))))) is DraftDecode.Errors)
@@ -101,9 +101,9 @@ class DraftFormTest {
     @Test
     fun `constants accept int string and boolean with native json types`() {
         val s = selections.copy(constants = listOf(Constant("itemsRemaining", JsonPrimitive(2)), Constant("storeName", JsonPrimitive("Shop")), Constant("arrivalConfirmed", JsonPrimitive(false))))
-        val decoded = codec.decode(codec.encode(s).changed("envelopeId" to "7", "envelopePin" to "abcd-abcd-abcd-abcd")) as DraftDecode.Ok
+        val decoded = codec.decode(codec.encode(s).changed("envelopeId" to "7")) as DraftDecode.Ok
         assertEquals(s.constants, decoded.value.selections.constants)
-        val json = DraftForm.selectionsJson(decoded.value, "a".repeat(64))
+        val json = DraftForm.selectionsJson(decoded.value)
         assertFalse(json.toString().contains("totp"))
         assertEquals(JsonArray(listOf(JsonPrimitive(0))), json.getValue("anchors").jsonArray.single())
     }

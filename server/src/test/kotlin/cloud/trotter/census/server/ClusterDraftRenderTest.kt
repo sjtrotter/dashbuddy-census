@@ -59,6 +59,46 @@ class ClusterDraftRenderTest {
     }
 
     @Test
+    fun `two node rows associate every control and wireframe link with the row header`() {
+        val page = render(2)
+        for (n in 2..3) {
+            val row = Regex("""<tr>\s*<th[^>]*id="node-$n"[^>]*>.*?</tr>""", RegexOption.DOT_MATCHES_ALL).find(page)?.value
+            assertNotNull(row)
+            val html = requireNotNull(row)
+            assertTrue(html.substringBefore("</th>").contains("scope=\"row\""))
+            for ((key, label) in listOf("role" to "Role", "field" to "Field", "field2" to "Second field",
+                "transform" to "Transform", "stripPrefix" to "Strip prefix", "bind" to "Bind")) {
+                val control = Regex("""<(?:select|input)\b[^>]*name="${key}_$n"[^>]*>""").find(html)?.value
+                assertNotNull(control, key)
+                assertTrue(requireNotNull(control).contains("aria-label=\"$label for node $n\""))
+                assertTrue(control.contains("aria-describedby=\"node-$n\""))
+            }
+            assertTrue(page.contains("<a href=\"#node-$n\" class=\"wire-n\">$n</a>"))
+        }
+        val form = page.substringAfter("<form action=\"draft\"").substringBefore("</form>")
+        assertTrue(Regex("""<ul[^>]*role="alert"[^>]*>""").containsMatchIn(form))
+        assertFalse(page.contains("envelopePin")); assertFalse(page.contains(capture.sha256Hex))
+        assertPrivate(page)
+    }
+
+    @Test
+    fun `privacy assertion rejects grouped and compacted attribute hex while permitting cluster links`() {
+        for (value in listOf("abcd-abcd-abcd-abcd", "abcd abcd abcd", "abcdefabcdef", "prefix'ABCD ABCD ABCD")) {
+            assertThrows(AssertionError::class.java) { assertPrivate("<input value=\"$value\">") }
+        }
+        assertThrows(AssertionError::class.java) { assertPrivate("<p>abcd-abcd-abcd-abcd</p>") }
+        assertPrivate("<a href=\"/ops/clusters/${cluster.fingerprint}/view\">Cluster</a>")
+    }
+
+    @Test
+    fun `grouped and spaced hex never survives in control attributes`() {
+        for (value in listOf("abcd-abcd-abcd-abcd", "abcd abcd abcd", "abcdefabcdef")) {
+            val page = render(state = ParametersBuilder().apply { append("intent", value); append("field_2", value) }.build())
+            assertPrivate(page)
+        }
+    }
+
+    @Test
     fun `150 node rows fit parser parameter budget and report remainder`() {
         val page = render(170)
         assertEquals(150, Regex("name=\"role_[0-9]+\"").findAll(page).count())

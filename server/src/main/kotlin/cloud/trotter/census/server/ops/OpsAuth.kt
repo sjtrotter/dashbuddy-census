@@ -18,6 +18,7 @@ import io.ktor.http.Parameters
 import io.ktor.http.ParametersBuilder
 import io.ktor.http.URLDecodeException
 import io.ktor.http.decodeURLPart
+import io.ktor.http.parseUrlEncodedParameters
 import io.ktor.server.application.ApplicationCall
 import io.ktor.server.application.createApplicationPlugin
 import io.ktor.server.application.createRouteScopedPlugin
@@ -61,7 +62,7 @@ val OpsAuth = createRouteScopedPlugin("OpsAuth", ::OpsAuthConfig) {
         }
         val path = call.request.path()
         val method = call.request.httpMethod
-        // Login consumes the same bounded form, but authenticates its own token before TOTP.
+        // Login retains its raw 4 KiB cap and original parser, authenticating its token before TOTP.
         if (path == "/ops/login" && method in setOf(HttpMethod.Get, HttpMethod.Post)) {
             if (method == HttpMethod.Post && call.request.contentType().withoutParameters() == ContentType.Application.FormUrlEncoded) {
                 if (!call.readOpsForm()) return@onCall
@@ -195,9 +196,9 @@ internal fun isPureDraftPath(path: String): Boolean = try {
 } catch (_: URLDecodeException) { false }
 
 /** Explicit bounds, including duplicates after decoding. Unknown fields still consume the parser budget. */
-internal fun parseOpsForm(body: String): Parameters {
+internal fun parseOpsForm(body: String, draftLimits: Boolean = true): Parameters {
     val fields = if (body.isEmpty()) emptyList() else body.split('&')
-    if (fields.size > 1000) throw BadRequestException("Invalid operator form")
+    if (draftLimits && fields.size > 1000) throw BadRequestException("Invalid operator form")
     val builder = ParametersBuilder()
     for (field in fields) {
         val key: String
@@ -207,16 +208,28 @@ internal fun parseOpsForm(body: String): Parameters {
             value = field.substringAfter('=', "").replace('+', ' ').decodeURLPart()
         } catch (_: URLDecodeException) { throw BadRequestException("Invalid operator form") }
         catch (_: IllegalArgumentException) { throw BadRequestException("Invalid operator form") }
-        if (value.length > 2000 || builder.contains(key)) throw BadRequestException("Invalid operator form")
+        if ((draftLimits && value.length > 2000) || builder.contains(key)) throw BadRequestException("Invalid operator form")
         builder.append(key, value)
     }
     return builder.build()
 }
 
 private suspend fun ApplicationCall.readOpsForm(): Boolean {
-    when (val read = readBounded(receiveChannel(), 64 * 1024, BODY_READ_TIMEOUT_MS)) {
-        is BoundedRead.Ok -> attributes.put(OpsForm, parseOpsForm(read.bytes.toString(Charsets.UTF_8)))
-        BoundedRead.TooLarge -> { respond(HttpStatusCode.PayloadTooLarge, ErrorResponse("payload_too_large")); return false }
+    val draft = try {
+        Regex("^/ops/clusters/[0-9a-f]{64}/draft(?:/(?:preview|shape))?$").matches(request.path().decodeURLPart())
+    } catch (_: URLDecodeException) { false }
+    when (val read = readBounded(receiveChannel(), if (draft) 64 * 1024 else 4096, BODY_READ_TIMEOUT_MS)) {
+        is BoundedRead.Ok -> {
+            val body = read.bytes.toString(Charsets.UTF_8)
+            val fields = if (request.path() != "/ops/login") parseOpsForm(body, draftLimits = draft) else try {
+                body.replace('+', ' ').parseUrlEncodedParameters()
+            } catch (_: IllegalArgumentException) { throw BadRequestException("Invalid operator form") }
+            attributes.put(OpsForm, fields)
+        }
+        BoundedRead.TooLarge -> {
+            if (!draft) throw BadRequestException("Invalid operator form")
+            respond(HttpStatusCode.PayloadTooLarge, ErrorResponse("payload_too_large")); return false
+        }
         BoundedRead.Timeout -> { respond(HttpStatusCode.RequestTimeout, ErrorResponse("request_timeout")); return false }
     }
     return true

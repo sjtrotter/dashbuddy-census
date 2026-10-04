@@ -80,7 +80,6 @@ fun Route.opsRoutes(
             call.loginHeaders()
             if (call.request.contentType().withoutParameters() != ContentType.Application.FormUrlEncoded) badRequest()
             val fields = call.attributes.getOrNull(OpsForm) ?: badRequest()
-            if (fields.entries().sumOf { (key, values) -> key.length + values.sumOf { it.length } } > 4096) badRequest()
             val token = fields["token"] ?: badRequest()
             val code = fields["code"] ?: badRequest()
             if (token.length > MAX_TOKEN_LENGTH || !Regex("[0-9]{6}").matches(code)) badRequest()

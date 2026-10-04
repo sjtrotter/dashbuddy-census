@@ -23,6 +23,20 @@ class ClustersPageRenderTest {
     private val page = OpsClusterPage("doordash", "8.10", "new", 54, 1, 25, 3, clusters)
 
     @Test
+    fun `cards show validated classification beside status and header shows class counts`() {
+        val html = render(page.copy(clusters = listOf(clusters[0].copy(screenClass = "idle"),
+            clusters[1], clusters[2].copy(screenClass = "invented_class")),
+            byClass = mapOf("idle" to 1, "unclassified" to 53)))
+        assertTrue(html.contains("Classes · idle: 1 · unclassified: 53"))
+        val headings = Regex("""<div class="cluster-heading">.*?</div>""", RegexOption.DOT_MATCHES_ALL)
+            .findAll(html).map { it.value }.toList()
+        assertTrue(headings[0].contains(">Ignored</span>")); assertTrue(headings[0].contains(">idle</span>"))
+        assertTrue(headings[1].contains(">unclassified</span>"))
+        assertTrue(headings[2].contains(">[redacted]</span>")); assertFalse(html.contains("invented_class"))
+        assertPrivate(html)
+    }
+
+    @Test
     fun `cards preserve supplied order and local labels without exposing samples or identifiers`() {
         val html = render()
         val links = Regex("href=\"(/ops/clusters/[0-9a-f]{64}/view)\" class=\"cluster-link\">(.*?)</a>")

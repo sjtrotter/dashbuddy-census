@@ -100,12 +100,12 @@ object DashboardHtml {
             p("muted") { +"One row per platform and app version. Review opens the clusters of that row, untriaged first." }
             if (clusters.isEmpty()) emptyState("No clusters to review yet. Rows appear when cluster sightings arrive.")
             else dataTable("Clusters by platform and app version · latest version first",
-                listOf("Platform", "Version", "Clusters", "New", "Triaged", "Drafted", "Resolved", "Ignored", "Review"), clusters.map { row ->
+                listOf("Platform", "Version", "Clusters", "New", "Triaged", "Drafted", "Resolved", "Ignored", "Classes", "Review"), clusters.map { row ->
                     listOf(
                         cell { +platform(row.platform) },
                         cell { row.platformAppVersion?.let { code { +version(it) } } ?: run { +"Not recorded" } },
                         numeric(row.total),
-                    ) + CLUSTER_STATUSES.map { numeric(row.byStatus[it] ?: 0) } + cell {
+                    ) + CLUSTER_STATUSES.map { numeric(row.byStatus[it] ?: 0) } + cell { +classSummary(row.byClass) } + cell {
                         val filter = ClusterFilter.parse(row.platform, row.platformAppVersion ?: "none", null, null)
                         if (filter == null) +"Unavailable" else a(href = filter.href(), classes = "action") {
                             attributes["aria-label"] = "Review ${platform(row.platform)} ${row.platformAppVersion?.let { version(it) } ?: "no version"}"
@@ -377,6 +377,11 @@ internal val fingerprintPattern = WireGrammars.fingerprint
 internal fun safe(value: String): String = value
     .replace(Regex("(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"), "[redacted]")
     .replace(Regex("(?i)[0-9a-f]{16,}"), "[redacted]")
+    .replace(Regex("(?i)[0-9a-f]{4}(-[0-9a-f]{4}){3}"), "[redacted]")
+internal fun safeAttribute(value: String): String = if (
+    Regex("(?i)[0-9a-f]{12,}").containsMatchIn(value.replace("-", "").replace(" ", ""))
+) "[redacted]" else safe(value)
+internal fun validated(value: String, choices: Collection<String>): String = if (value in choices) safe(value) else "[redacted]"
 internal fun version(value: String): String = safe(value.substringBefore('+')) + if ('+' in value) "+[build withheld]" else ""
 private fun validated(value: String, pattern: Regex): String = if (pattern.matches(value)) safe(value) else "[redacted]"
 internal fun platform(value: String): String = validated(value, WireGrammars.platform)

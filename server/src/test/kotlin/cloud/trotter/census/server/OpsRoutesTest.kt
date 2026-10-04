@@ -14,6 +14,7 @@ import cloud.trotter.census.server.db.EnvelopeStore
 import cloud.trotter.census.server.db.HealthStore
 import cloud.trotter.census.server.db.IngestOutcome
 import cloud.trotter.census.server.db.InstallStore
+import cloud.trotter.census.server.db.MutationOutcome
 import cloud.trotter.census.server.db.OpsStore
 import cloud.trotter.census.server.db.SkeletonStore
 import cloud.trotter.census.server.db.update
@@ -56,6 +57,8 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNotEquals
+import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeAll
@@ -309,6 +312,7 @@ class OpsRoutesTest {
                     connection.update("INSERT INTO clusters (fingerprint, platform, first_seen_day, last_seen_day, status) VALUES (?, 'uber', ?, ?, 'ignored')", uber, day, day)
                     connection.update("INSERT INTO cluster_sightings (fingerprint, install_id, day, platform_app_version) VALUES (?, ?, ?, '1.2')", uber, first, day)
                 }
+                assertTrue(ops.saveClassification(fresh.item.fingerprint, "idle"))
                 val summary = ops.clusterSummary()
                 assertEquals(listOf("doordash" to "8.10", "doordash" to "8.9", "doordash" to null, "uber" to "1.2"),
                     summary.map { it.platform to it.platformAppVersion })
@@ -316,16 +320,29 @@ class OpsRoutesTest {
                 assertEquals(listOf(listOf(1, 0, 0, 1, 0), listOf(1, 0, 0, 0, 0), listOf(2, 0, 0, 0, 0), listOf(0, 0, 0, 0, 1)),
                     summary.map { row -> CLUSTER_STATUSES.map { row.byStatus.getValue(it) } })
                 summary.forEach { assertEquals(CLUSTER_STATUSES.toSet(), it.byStatus.keys) }
+                assertEquals(listOf(1, 0, 0, 0), summary.map { it.byClass.getValue("idle") })
+                assertEquals(listOf(1, 1, 2, 1), summary.map { it.byClass.getValue("unclassified") })
+                summary.forEach {
+                    assertEquals(it.total, it.byClass.values.sum())
+                    assertEquals((cloud.trotter.census.contract.authoring.RuleAuthoringVocabulary.SCREEN_CLASSES + "unclassified").toSet(), it.byClass.keys)
+                }
+                val homeHtml = client.ops("/ops/").bodyAsText()
+                assertTrue(homeHtml.contains("idle: 1 · unclassified: 1")); assertPrivate(homeHtml)
+                val reviewHtml = client.ops("/ops/clusters/view?platform=doordash&version=8.10").bodyAsText()
+                assertTrue(reviewHtml.contains("Classes · idle: 1 · unclassified: 1"))
+                assertTrue(reviewHtml.contains(">idle</span>")); assertPrivate(reviewHtml)
                 val review = ops.clustersPage("doordash", "8.10", null, 1)
                 assertEquals(listOf(old.item.fingerprint, fresh.item.fingerprint), review.clusters.map { it.fingerprint })
                 assertEquals(listOf(false, true), review.clusters.map { it.newWithVersion })
                 assertTrue(review.clusters.all { it.samples == null })
+                assertEquals(summary.first().byClass, review.byClass)
                 assertEquals(2, review.total)
                 assertEquals(25, review.pageSize)
                 assertEquals(1, review.pageCount)
                 // JSON still ranks by score, even though review puts the lower-scoring new cluster first.
                 assertEquals(fresh.item.fingerprint, ops.clusters(platform = "doordash").first().clusters.first().fingerprint)
                 val lastPage = ops.clustersPage("doordash", "8.10", null, 99, pageSize = 1)
+                assertEquals(review.byClass, lastPage.byClass)
                 assertEquals(2, lastPage.page)
                 assertEquals(2, lastPage.pageCount)
                 assertEquals(2, lastPage.total)
@@ -333,6 +350,8 @@ class OpsRoutesTest {
                 assertEquals(listOf(fresh.item.fingerprint), lastPage.clusters.map { it.fingerprint })
                 assertEquals(1, ops.clustersPage("doordash", "8.10", null, 0, pageSize = 1).page)
                 val filtered = ops.clustersPage("doordash", "8.10", "resolved", 99)
+                assertEquals(1, filtered.byClass.getValue("idle"))
+                assertEquals(0, filtered.byClass.getValue("unclassified"))
                 assertEquals("resolved", filtered.status)
                 assertEquals(1, filtered.total)
                 assertEquals(1, filtered.page)
@@ -648,6 +667,7 @@ class OpsRoutesTest {
                 val before = beforeResponse.bodyAsText()
                 assertFalse(client.ops("$path/view").bodyAsText().contains("class=\"wire-frame\""))
                 val raw = requireNotNull(javaClass.getResource("/fixtures/phone-envelope-uber-home.json")).readText()
+                assertEquals("00000000-0000-4000-8000-000000000000", Json.parseToJsonElement(raw).jsonObject.getValue("captureId").jsonPrimitive.content)
                 val capture = JsonObject(Json.parseToJsonElement(raw).jsonObject + ("fingerprint" to JsonPrimitive(fingerprint)))
                 val uploaded = client.signed(clock, id.toString(), key, HttpMethod.Post, "/v1/envelopes",
                     """{"batchId":"wire-capture","items":[$capture]}""")
@@ -709,6 +729,7 @@ class OpsRoutesTest {
                 val unchanged = client.ops(path).bodyAsText()
                 assertFalse(unchanged.contains("screenClass")); assertFalse(unchanged.contains("hasDraft"))
                 val raw = requireNotNull(javaClass.getResource("/fixtures/phone-envelope-uber-home.json")).readText()
+                assertEquals("00000000-0000-4000-8000-000000000000", Json.parseToJsonElement(raw).jsonObject.getValue("captureId").jsonPrimitive.content)
                 val capture = JsonObject(Json.parseToJsonElement(raw).jsonObject + ("fingerprint" to JsonPrimitive(fp)))
                 assertEquals(200, client.signed(clock, id.toString(), key, HttpMethod.Post, "/v1/envelopes",
                     """{"batchId":"draft-capture","items":[$capture]}""").status.value)
@@ -727,7 +748,7 @@ class OpsRoutesTest {
                 assertPrivate(html)
                 assertEquals(404, client.ops("$path/draft.json5").status.value)
                 val browser = createClient { followRedirects = false }
-                val fields = linkedMapOf("envelopeId" to pinned.id.toString(), "envelopePin" to pinned.pin,
+                val fields = linkedMapOf("envelopeId" to pinned.id.toString(),
                     "screenClass" to "idle", "shape" to "idle", "intent" to "home", "priority" to "501",
                     "modeHint" to "online", "offerSurface" to "", "comment" to "Review & verify", "notes" to "Saved notes",
                     "constName_1" to "startingSession", "constValue_1" to "true", "role_$anchor" to "anchor",
@@ -788,7 +809,7 @@ class OpsRoutesTest {
                 } }
                 val detailHtml = client.ops("$path/view").bodyAsText()
                 assertTrue(detailHtml.contains("Draft saved")); assertTrue(detailHtml.contains("Draft (JSON5)")); assertPrivate(detailHtml)
-                val stale = submit("draft/preview", fields + ("envelopePin" to "0000-0000-0000-0000"))
+                val stale = submit("draft/preview", fields + ("envelopeId" to Long.MAX_VALUE.toString()))
                 assertEquals(409, stale.status.value); assertTrue(stale.bodyAsText().contains("This capture changed — reload")); assertPrivate(stale.bodyAsText())
                 // A later capture must not silently change which node the pinned form selects.
                 val accepted = EnvelopeValidator.validate(capture, Policy()) as EnvelopeVerdict.Accepted
@@ -809,29 +830,47 @@ class OpsRoutesTest {
     }
 
     @Test
-    fun `withdrawal and envelope retention clear classification and draft in their delete transaction`() {
+    fun `withdrawal and retention erase only the draft from the deleted capture and preserve classification`() {
         Database.connect(config()).use { db ->
             val installs = InstallStore(db, clock)
             val ops = OpsStore(db, clock, Policy())
             testApplication {
                 application { module(config(), db, clock) }
                 for ((index, withdraw) in listOf(true, false).withIndex()) {
-                    val id = UUID.randomUUID()
+                    val first = UUID.randomUUID()
+                    val second = UUID.randomUUID()
                     val keyHash = hashSecret(secret(90 + index))
-                    installs.enrol(id, keyHash, "1.0.0"); ops.trust(id, true)
+                    for (id in listOf(first, second)) {
+                        installs.enrol(id, keyHash, "1.0.0"); ops.trust(id, true)
+                    }
                     val sample = fixture("Cleanup$index", "Ready")
-                    SkeletonStore(db, clock).ingest(id, keyHash, day, listOf(sample), 0, emptyMap(), "cleanup-skeleton-$index", 100, BudgetPolicy())
+                    SkeletonStore(db, clock).ingest(second, keyHash, day, listOf(sample), 0, emptyMap(), "cleanup-skeleton-$index", 100, BudgetPolicy())
                     val fp = sample.item.fingerprint
                     val raw = JsonObject(envelopeFixture() + ("fingerprint" to JsonPrimitive(fp)))
-                    EnvelopeStore(db, clock).ingest(id, keyHash, day, listOf(EnvelopeValidator.validate(raw, Policy()) as EnvelopeVerdict.Accepted), emptyMap(), "cleanup-envelope-$index", 100, BudgetPolicy(), 30)
-                    val capture = requireNotNull(ops.pinnedEnvelope(fp))
+                    val accepted = EnvelopeValidator.validate(raw, Policy()) as EnvelopeVerdict.Accepted
+                    val envelopes = EnvelopeStore(db, clock)
+                    // A expires before B; both captures belong to the same cluster but different installs.
+                    envelopes.ingest(first, keyHash, day.minusDays(30), listOf(accepted), emptyMap(), "cleanup-a-$index", 100, BudgetPolicy(), 30)
+                    val captureA = requireNotNull(ops.pinnedEnvelope(fp))
+                    envelopes.ingest(second, keyHash, day, listOf(accepted), emptyMap(), "cleanup-b-$index", 100, BudgetPolicy(), 30)
+                    val captureB = requireNotNull(ops.pinnedEnvelope(fp))
+                    assertNotEquals(captureA.id, captureB.id)
                     val selections = kotlinx.serialization.json.buildJsonObject {
-                        put("envelopeId", JsonPrimitive(capture.id)); put("envelopeSha256", JsonPrimitive(capture.sha256Hex))
+                        put("envelopeId", JsonPrimitive(captureB.id))
                     }
                     assertTrue(ops.saveDraft(fp, "idle", selections, "stored artefact", day))
-                    if (withdraw) installs.withdraw(id, keyHash) else assertEquals(1, installs.purgeTrustedEnvelopes(day.plusDays(31)))
-                    val cluster = requireNotNull(ops.cluster(fp))
-                    assertNull(cluster.screenClass); assertFalse(cluster.hasDraft); assertNull(cluster.draftDay); assertNull(ops.draftJson5(fp))
+                    if (withdraw) assertTrue(installs.withdraw(first, keyHash) is MutationOutcome.Applied)
+                    else assertEquals(1, installs.purgeTrustedEnvelopes(day.plusDays(1)))
+                    assertNull(ops.pinnedEnvelope(fp, captureA.id))
+                    assertNotNull(ops.pinnedEnvelope(fp, captureB.id))
+                    val surviving = requireNotNull(ops.cluster(fp))
+                    assertEquals("idle", surviving.screenClass); assertTrue(surviving.hasDraft)
+                    assertEquals(day.toString(), surviving.draftDay); assertEquals("stored artefact", ops.draftJson5(fp))
+                    if (withdraw) assertTrue(installs.withdraw(second, keyHash) is MutationOutcome.Applied)
+                    else assertEquals(1, installs.purgeTrustedEnvelopes(day.plusDays(31)))
+                    val erased = requireNotNull(ops.cluster(fp))
+                    assertEquals("idle", erased.screenClass); assertFalse(erased.hasDraft)
+                    assertNull(erased.draftDay); assertNull(ops.draftJson5(fp))
                 }
             }
         }

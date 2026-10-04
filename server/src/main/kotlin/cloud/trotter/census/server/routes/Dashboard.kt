@@ -97,9 +97,8 @@ fun Route.dashboardRoute(store: OpsStore, alarms: HealthAlarms, clock: Clock, po
                 return@post
             }
             val id = params["envelopeId"]?.toLongOrNull()?.takeIf { it > 0 }
-            val pin = params["envelopePin"]
             val capture = id?.let { store.pinnedEnvelope(fp, it) }
-            val context = capture?.takeIf { it.pin == pin }?.let { draftContext(it) }
+            val context = capture?.let { draftContext(it) }
             if (context == null) {
                 call.draftPage(policy, clock, cluster, null, errors = listOf("This capture changed — reload"),
                     nested = operation != "save", status = HttpStatusCode.Conflict)
@@ -133,7 +132,7 @@ fun Route.dashboardRoute(store: OpsStore, alarms: HealthAlarms, clock: Clock, po
                 is DraftResult.Ok -> if (operation == "preview") {
                     call.draftPage(policy, clock, cluster, context, params, json5 = result.json5, warnings = result.warnings, nested = true)
                 } else {
-                    if (store.saveDraft(fp, input.selections.screenClass, DraftForm.selectionsJson(input, pinned.sha256Hex), result.json5, clock.today())) {
+                    if (store.saveDraft(fp, input.selections.screenClass, DraftForm.selectionsJson(input), result.json5, clock.today())) {
                         call.draftRedirect(fp)
                     } else call.draftPage(policy, clock, cluster, null, errors = listOf("This capture changed — reload"), status = HttpStatusCode.Conflict)
                 }

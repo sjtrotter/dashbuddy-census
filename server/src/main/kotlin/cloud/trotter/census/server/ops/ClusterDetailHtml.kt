@@ -42,7 +42,7 @@ object ClusterDetailHtml {
                 attributes["aria-labelledby"] = "cluster-heading"
                 h1 { id = "cluster-heading"; +"Cluster detail" }
                 statusChip(cluster.status)
-                cluster.screenClass?.let { chip(safe(it), "neutral") }
+                classChip(cluster.screenClass)
                 cluster.draftDay?.let { day -> p { +"Draft saved "; date(day) } }
                 clusterFacts(cluster, detail = true)
                 p("notice") { +visibility(cluster, k) }

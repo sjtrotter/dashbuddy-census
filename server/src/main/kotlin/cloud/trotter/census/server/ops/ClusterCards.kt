@@ -1,5 +1,6 @@
 package cloud.trotter.census.server.ops
 
+import cloud.trotter.census.contract.authoring.RuleAuthoringVocabulary
 import cloud.trotter.census.server.db.CLUSTER_STATUSES
 import cloud.trotter.census.server.db.OpsCluster
 import kotlinx.html.FlowContent
@@ -25,6 +26,7 @@ internal fun FlowContent.clusterCards(clusters: List<OpsCluster>, k: Int, showGr
                 else +label
             }
             statusChip(cluster.status)
+            classChip(cluster.screenClass)
         }
         clusterFacts(cluster, showGroupFacts = showGroupFacts)
         p("muted") { +visibility(cluster, k) }
@@ -69,3 +71,11 @@ internal fun FlowContent.statusChip(status: String) {
     val tones = mapOf("new" to "warn", "triaged" to "accent", "drafted" to "accent", "resolved" to "good", "ignored" to "neutral")
     chip(label, tones[status] ?: "neutral")
 }
+
+internal fun FlowContent.classChip(screenClass: String?) {
+    chip(screenClass?.let { validated(it, RuleAuthoringVocabulary.SCREEN_CLASSES) } ?: "unclassified", "neutral")
+}
+
+internal fun classSummary(byClass: Map<String, Int>): String = byClass.entries.filter { it.value > 0 }.joinToString(" · ") {
+    "${validated(it.key, RuleAuthoringVocabulary.SCREEN_CLASSES + "unclassified")}: ${number(it.value)}"
+}.ifEmpty { "None" }

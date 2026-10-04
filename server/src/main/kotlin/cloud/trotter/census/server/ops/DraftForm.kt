@@ -8,7 +8,7 @@ import kotlinx.serialization.json.*
 
 /** A badge is presentation only; a node's original child-index path is its identity. */
 data class DraftNode(val number: Int, val node: WalkedNode)
-data class DraftInput(val selections: Selections, val envelopeId: Long, val envelopePin: String, val notes: String)
+data class DraftInput(val selections: Selections, val envelopeId: Long, val notes: String)
 sealed interface DraftDecode {
     data class Ok(val value: DraftInput) : DraftDecode
     data class Errors(val errors: List<String>) : DraftDecode
@@ -42,8 +42,6 @@ class DraftForm(val nodes: List<DraftNode>) {
         val notes = text("notes", 2000)
         val envelopeId = params["envelopeId"]?.takeIf { Regex("[1-9][0-9]{0,18}").matches(it) }?.toLongOrNull()
         if (envelopeId == null) errors += "Invalid capture reference"
-        val pin = params["envelopePin"].orEmpty()
-        if (!PIN.matches(pin)) errors += "Invalid capture pin"
         val specs = if (shapeRefresh) V.FIELDS_BY_SHAPE.values.flatten() else V.FIELDS_BY_SHAPE[shape].orEmpty()
         val anchors = mutableListOf<NodeRef>()
         val fields = mutableListOf<FieldAssignment>()
@@ -94,7 +92,7 @@ class DraftForm(val nodes: List<DraftNode>) {
         if (anchors.size + fields.size + binds.size + redacts.size + constants.size > 64) errors += "At most 64 active assignments"
         if (errors.isNotEmpty()) return DraftDecode.Errors(errors.distinct())
         return DraftDecode.Ok(DraftInput(Selections(screenClass, shape, intent, requireNotNull(priority), mode, surface,
-            anchors, fields, binds, redacts, constants, comment), requireNotNull(envelopeId), pin, notes))
+            anchors, fields, binds, redacts, constants, comment), requireNotNull(envelopeId), notes))
     }
 
     /** Encodes the subset represented by the form: one role, at most two fields and one transform per row. */
@@ -120,9 +118,8 @@ class DraftForm(val nodes: List<DraftNode>) {
     }.build()
 
     companion object {
-        // Six controls per node, plus header/constants/pin/TOTP: comfortably below 1,000 parameters.
+        // Six controls per node, plus header/constants/capture/TOTP: comfortably below 1,000 parameters.
         const val MAX_ROWS = 150
-        val PIN = Regex("[0-9a-f]{4}(?:-[0-9a-f]{4}){3}")
         private val ROW_KEY = Regex("(?:role|field|field2|transform|stripPrefix|bind)_([0-9]+)")
         fun rows(walked: List<WalkedNode>, frame: RenderedWireframe): List<DraftNode> {
             val byPath = walked.associateBy { it.path }
@@ -136,7 +133,7 @@ class DraftForm(val nodes: List<DraftNode>) {
         }
 
         /** Persist semantic paths, never display badge numbers or secrets. */
-        fun selectionsJson(input: DraftInput, sha256: String): JsonObject = buildJsonObject {
+        fun selectionsJson(input: DraftInput): JsonObject = buildJsonObject {
             val s = input.selections
             fun ref(node: NodeRef) = JsonArray(node.path.map { JsonPrimitive(it) })
             put("screenClass", s.screenClass); put("shape", s.shape); put("intent", s.intent); put("priority", s.priority)
@@ -151,7 +148,7 @@ class DraftForm(val nodes: List<DraftNode>) {
             } }))
             put("binds", JsonArray(s.binds.map { bind -> buildJsonObject { put("node", ref(bind.node)); put("target", bind.target) } }))
             put("constants", JsonArray(s.constants.map { constant -> buildJsonObject { put("name", constant.name); put("value", constant.value) } }))
-            put("envelopeId", input.envelopeId); put("envelopeSha256", sha256); put("notes", input.notes)
+            put("envelopeId", input.envelopeId); put("notes", input.notes)
         }
     }
 }

@@ -172,6 +172,30 @@ class OpsLoginTest {
     }
 
     @Test
+    fun `login caps raw bytes before decoding and preserves first duplicate value`() = testApplication {
+        application { module(config(), db = null, clock = clock) }
+        val browser = createClient { followRedirects = false }
+        val valid = listOf("token" to token, "code" to code()).formUrlEncode()
+        val oversized = browser.post("/ops/login") {
+            contentType(ContentType.Application.FormUrlEncoded)
+            setBody(valid + "&padding=" + "%20".repeat(1400))
+        }
+        assertError(oversized, 400, "bad_request")
+        assertNull(oversized.headers[HttpHeaders.SetCookie])
+        // Unknown values have no draft-only 2,000-character cap; login retains its raw 4 KiB cap.
+        assertSessionCookie(browser.post("/ops/login") {
+            contentType(ContentType.Application.FormUrlEncoded)
+            setBody(valid + "&token=wrong&code=000000&padding=" + "x".repeat(2001))
+        })
+        instant = instant.plusSeconds(30)
+        assertFailed(browser.post("/ops/login") {
+            contentType(ContentType.Application.FormUrlEncoded)
+            setBody(listOf("token" to "wrong", "token" to token, "code" to code()).formUrlEncode())
+        })
+        assertSessionCookie(browser.login())
+    }
+
+    @Test
     fun `a token with spaces or a literal plus authenticates through the form exactly as it does as a bearer`() = testApplication {
         val spaced = "operator pass+phrase"
         application { module(Config.fromEnv(testEnvironment() + mapOf("OPERATOR_TOKEN_SHA256" to hashSecret(spaced), "OPERATOR_TOTP_SECRET" to secret)), db = null, clock = clock) }

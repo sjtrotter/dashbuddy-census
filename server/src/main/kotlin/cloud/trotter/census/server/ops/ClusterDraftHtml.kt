@@ -23,14 +23,10 @@ object ClusterDraftHtml {
         section("panel") {
             h1 { +"Classify & draft" }
             statusChip(cluster.status)
-            cluster.screenClass?.let { chip(safe(it), "neutral") }
+            classChip(cluster.screenClass)
             clusterFacts(cluster, detail = true)
             p { +"Drafts quote trusted-capture text and are operator-only. The app test suite is the gate; the server only drafts." }
             p { +"Sensitive screens usually extend the known rule in sensitive.json5. Choose a free priority." }
-        }
-        if (errors.isNotEmpty()) section("panel") {
-            h2 { +"Draft errors" }
-            ul("errors") { errors.forEach { li { +safe(it) } } }
         }
         if (frame != null) panel("wireframe", "Screen wireframe") {
             p("muted") {
@@ -43,7 +39,7 @@ object ClusterDraftHtml {
                     div("wire-box" + (if (box.label != null) " labelled" else "") + (if (box.clickable) " clickable" else "")) {
                         attributes["style"] = String.format(Locale.ROOT, "left:%.2f%%;top:%.2f%%;width:%.2f%%;height:%.2f%%",
                             box.leftPct, box.topPct, box.widthPct, box.heightPct)
-                        span("wire-n") { +"${index + 1}" }
+                        a(href = "#node-${index + 1}", classes = "wire-n") { +"${index + 1}" }
                         box.label?.let { span("wire-label") { +safe(it) } }
                     }
                 }
@@ -54,13 +50,16 @@ object ClusterDraftHtml {
             val shape = state["shape"] ?: V.DEFAULT_SHAPE_BY_CLASS[screenClass] ?: "none"
             val fields = V.FIELDS_BY_SHAPE[shape].orEmpty().map { it.name }
             form(action = if (nested) "../draft" else "draft", method = FormMethod.post) {
+                if (errors.isNotEmpty()) {
+                    h2 { +"Draft errors" }
+                    ul("errors") { attributes["role"] = "alert"; errors.forEach { li { +safe(it) } } }
+                }
                 // Browser validation must not block the pure shape refresh or a preview of an incomplete draft.
                 if (capture == null) {
                     input(type = InputType.hidden, name = "mode") { value = "classify" }
                     p { +"A trusted capture is needed to draft. You can still classify this cluster and save notes." }
                 } else {
                     input(type = InputType.hidden, name = "envelopeId") { value = capture.id.toString() }
-                    input(type = InputType.hidden, name = "envelopePin") { value = capture.pin }
                 }
                 fieldSet {
                     legend { +"Classification" }
@@ -102,18 +101,18 @@ object ClusterDraftHtml {
                             thead { tr { listOf("n", "Label", "Class", "ID", "Flags", "Assignments").forEach { th { +it } } } }
                             tbody {
                                 rows.take(DraftForm.MAX_ROWS).forEach { (n, node) -> tr {
-                                    td { +"$n" }
+                                    th { attributes["scope"] = "row"; id = "node-$n"; +"$n" }
                                     td { +safe(node.text ?: node.desc ?: node.hint ?: node.pane ?: "(no label)") }
                                     td { +safe(node.simpleClass ?: "view") }
                                     td { +safe(node.idSuffix ?: node.viewId ?: "no id") }
                                     td { +listOfNotNull(if (node.clickable) "clickable" else null, if (!node.visible) "hidden" else null).joinToString(" / ") }
                                     td {
-                                        choice("role_$n", "Role", listOf("", "anchor", "field", "bind", "redact"), state["role_$n"].orEmpty())
-                                        choice("field_$n", "Field", listOf("") + fields, state["field_$n"].orEmpty())
-                                        choice("field2_$n", "Second field", listOf("") + fields, state["field2_$n"].orEmpty())
-                                        choice("transform_$n", "Transform", listOf("default", "none") + V.TRANSFORMS, state["transform_$n"] ?: "default")
-                                        textControl("stripPrefix_$n", "Strip prefix", state["stripPrefix_$n"].orEmpty(), 40)
-                                        choice("bind_$n", "Bind", listOf("") + V.BIND_TARGETS.keys, state["bind_$n"].orEmpty())
+                                        choice("role_$n", "Role", listOf("", "anchor", "field", "bind", "redact"), state["role_$n"].orEmpty(), node = n)
+                                        choice("field_$n", "Field", listOf("") + fields, state["field_$n"].orEmpty(), node = n)
+                                        choice("field2_$n", "Second field", listOf("") + fields, state["field2_$n"].orEmpty(), node = n)
+                                        choice("transform_$n", "Transform", listOf("default", "none") + V.TRANSFORMS, state["transform_$n"] ?: "default", node = n)
+                                        textControl("stripPrefix_$n", "Strip prefix", state["stripPrefix_$n"].orEmpty(), 40, node = n)
+                                        choice("bind_$n", "Bind", listOf("") + V.BIND_TARGETS.keys, state["bind_$n"].orEmpty(), node = n)
                                     }
                                 } }
                             }
@@ -151,20 +150,31 @@ object ClusterDraftHtml {
         }
     }
 
-    private fun FlowContent.choice(key: String, title: String, choices: List<String>, current: String) {
+    private fun FlowContent.choice(key: String, title: String, choices: List<String>, current: String, node: Int? = null) {
         label {
             +title
             select { name = key
+                if (node != null) {
+                    attributes["aria-label"] = "$title for node $node"
+                    attributes["aria-describedby"] = "node-$node"
+                }
                 // Keep a previous shape's choices visible until the operator changes them; decode still validates.
                 (choices + listOf(current)).distinct().forEach { item -> option {
-                    value = safe(item); selected = item == current; +safe(item.ifEmpty { "—" })
+                    value = safeAttribute(item); selected = item == current; +safe(item.ifEmpty { "—" })
                 } }
             }
         }
     }
 
     private fun FlowContent.textControl(key: String, title: String, current: String, limit: Int,
-        type: InputType = InputType.text, extra: INPUT.() -> Unit = {}) {
-        label { +title; input(type = type, name = key) { value = safe(current); maxLength = limit.toString(); extra() } }
+        type: InputType = InputType.text, node: Int? = null, extra: INPUT.() -> Unit = {}) {
+        label { +title; input(type = type, name = key) {
+            value = safeAttribute(current); maxLength = limit.toString()
+            if (node != null) {
+                attributes["aria-label"] = "$title for node $node"
+                attributes["aria-describedby"] = "node-$node"
+            }
+            extra()
+        } }
     }
 }
