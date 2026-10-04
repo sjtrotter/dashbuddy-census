@@ -55,7 +55,14 @@ object ClusterDraftHtml {
             form(action = if (nested) "../draft" else "draft", method = FormMethod.post) {
                 if (errors.isNotEmpty()) {
                     h2 { +"Draft errors" }
-                    ul("errors") { attributes["role"] = "alert"; errors.forEach { li { +safe(it) } } }
+                    ul("errors") {
+                        attributes["role"] = "alert"
+                        errors.forEach { li { +safe(it) } }
+                        // A class can be recorded without drafting a rule; a blank intent is only a drafting problem.
+                        if (capture != null && errors.any { it.contains("intent", ignoreCase = true) }) {
+                            li { +"To record the screen class without drafting a rule, use \"Save classification only\" (no intent needed)." }
+                        }
+                    }
                 }
                 // Browser validation must not block the pure shape refresh or a preview of an incomplete draft.
                 if (capture == null) {
@@ -153,7 +160,17 @@ object ClusterDraftHtml {
                         attributes["inputmode"] = "numeric"; attributes["autocomplete"] = "one-time-code"
                     }
                 }
-                button(type = ButtonType.submit) { +"Save" }
+                if (capture == null) {
+                    button(type = ButtonType.submit) { +"Save classification" }
+                } else {
+                    // Classification is operator knowledge independent of any rule: saving it must not require a draft.
+                    button(type = ButtonType.submit) {
+                        name = "mode"; value = "classify"
+                        attributes["formnovalidate"] = "formnovalidate"
+                        +"Save classification only"
+                    }
+                    button(type = ButtonType.submit) { +"Save draft" }
+                }
             }
         }
         if (json5 != null) section("panel") {
