@@ -1,7 +1,14 @@
 package cloud.trotter.census.server.ingest
 
+import cloud.trotter.census.contract.CensusFingerprint
+
 /** Shared, pure grammars for retained wire tokens. */
 object WireGrammars {
+    fun interface TokenGrammar {
+        fun matches(value: String): Boolean
+    }
+
+    val fingerprint = TokenGrammar(CensusFingerprint::isWellFormed)
     val platform = Regex("^[a-z_][a-z0-9_]{0,31}$")
     val platformAppVersion = Regex("""^[0-9]{1,5}(\.[0-9]{1,5}){0,3}$""")
     val appVersion = Regex("""^([0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}(\+([0-9a-f]{7,40}(\.dirty)?|nogit))?|test)$""")

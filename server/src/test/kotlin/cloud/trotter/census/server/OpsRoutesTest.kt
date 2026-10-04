@@ -9,6 +9,8 @@ import cloud.trotter.census.contract.CensusHash
 import cloud.trotter.census.contract.SkeletonSchema
 import cloud.trotter.census.server.auth.hashSecret
 import cloud.trotter.census.server.db.CLUSTER_STATUSES
+import cloud.trotter.census.server.db.EnvelopeOutcome
+import cloud.trotter.census.server.db.EnvelopeStore
 import cloud.trotter.census.server.db.HealthStore
 import cloud.trotter.census.server.db.IngestOutcome
 import cloud.trotter.census.server.db.InstallStore
@@ -16,6 +18,8 @@ import cloud.trotter.census.server.db.OpsStore
 import cloud.trotter.census.server.db.SkeletonStore
 import cloud.trotter.census.server.db.update
 import cloud.trotter.census.server.ingest.BudgetPolicy
+import cloud.trotter.census.server.ingest.EnvelopeValidator
+import cloud.trotter.census.server.ingest.EnvelopeVerdict
 import cloud.trotter.census.server.ingest.ItemVerdict
 import cloud.trotter.census.server.ingest.SkeletonValidator
 import cloud.trotter.census.server.jobs.AlarmSink
@@ -621,6 +625,72 @@ class OpsRoutesTest {
         }
     }
 
+    @Test
+    fun `paired captures render only while trusted and never change detail JSON`() {
+        Database.connect(config()).use { db ->
+            val installs = InstallStore(db, clock)
+            val ops = OpsStore(db, clock, Policy())
+            val envelopes = EnvelopeStore(db, clock)
+            val id = UUID.randomUUID()
+            val key = secret(84)
+            // The staged phone capture is an uber envelope: pairing requires the cluster to share its platform.
+            val sample = fixture("Wireframe", "Ready now", platform = "uber")
+            val fingerprint = sample.item.fingerprint
+            testApplication {
+                application { module(config(), db, clock) }
+                installs.enrol(id, hashSecret(key), "1.0.0")
+                assertTrue(ops.trust(id, true))
+                assertTrue(SkeletonStore(db, clock).ingest(id, hashSecret(key), day, listOf(sample), 0, emptyMap(),
+                    "wire-skeleton", 100, BudgetPolicy()) is IngestOutcome.Stored)
+                val path = "/ops/clusters/$fingerprint"
+                val beforeResponse = client.ops(path)
+                assertEquals(200, beforeResponse.status.value)
+                val before = beforeResponse.bodyAsText()
+                assertFalse(client.ops("$path/view").bodyAsText().contains("class=\"wire-frame\""))
+                val raw = requireNotNull(javaClass.getResource("/fixtures/phone-envelope-uber-home.json")).readText()
+                val capture = JsonObject(Json.parseToJsonElement(raw).jsonObject + ("fingerprint" to JsonPrimitive(fingerprint)))
+                val uploaded = client.signed(clock, id.toString(), key, HttpMethod.Post, "/v1/envelopes",
+                    """{"batchId":"wire-capture","items":[$capture]}""")
+                assertEquals(200, uploaded.status.value)
+                val response = Json.parseToJsonElement(uploaded.bodyAsText()).jsonObject
+                assertEquals(setOf("status", "accepted", "duplicate", "rejected", "budget"), response.keys)
+                assertEquals(1, response.getValue("accepted").jsonPrimitive.int)
+                assertNull(requireNotNull(ops.cluster(fingerprint)).wireframe)
+                assertTrue(requireNotNull(ops.cluster(fingerprint, withWireframe = true)).wireframe != null)
+                val page = client.ops("$path/view").bodyAsText()
+                assertTrue(page.contains("class=\"wire-frame\""))
+                assertTrue(page.contains("class=\"wire-label\""))
+                assertTrue(page.contains("Earnings"))
+                assertFalse(page.contains(id.toString()))
+                val after = client.ops(path).bodyAsText()
+                assertEquals(before, after)
+                assertFalse(after.contains("wireframe"))
+
+                // Same-day captures use insertion order; received day takes precedence over id.
+                // The fixture is a doordash envelope: pairing is platform-coherent, so it must name the cluster's platform.
+                val latest = JsonObject(envelopeFixture() + mapOf("fingerprint" to JsonPrimitive(fingerprint), "platform" to JsonPrimitive("uber")))
+                val accepted = EnvelopeValidator.validate(latest, Policy()) as EnvelopeVerdict.Accepted
+                val stored = envelopes.ingest(id, hashSecret(key), day, listOf(accepted), emptyMap(), "wire-newest", 100, BudgetPolicy(), 30) as EnvelopeOutcome.Stored
+                assertEquals(1, stored.paired)
+                assertEquals(0, stored.unpaired)
+                assertTrue(client.ops("$path/view").bodyAsText().contains("Looking for offers"))
+                envelopes.ingest(id, hashSecret(key), day.minusDays(1), listOf(EnvelopeValidator.validate(capture, Policy()) as EnvelopeVerdict.Accepted),
+                    emptyMap(), "wire-older", 100, BudgetPolicy(), 30)
+                assertTrue(client.ops("$path/view").bodyAsText().contains("Looking for offers"))
+                assertEquals(before, client.ops(path).bodyAsText())
+
+                assertTrue(ops.trust(id, false))
+                assertFalse(client.ops("$path/view").bodyAsText().contains("class=\"wire-frame\""))
+                assertTrue(ops.trust(id, true))
+                assertTrue(client.ops("$path/view").bodyAsText().contains("class=\"wire-frame\""))
+                assertTrue(ops.revoke(id))
+                val revokedPage = client.ops("$path/view").bodyAsText()
+                assertFalse(revokedPage.contains("class=\"wire-frame\""))
+                assertTrue(revokedPage.contains("No trusted capture is paired with this cluster yet."))
+            }
+        }
+    }
+
     private suspend fun HttpClient.mutate(path: String, body: String): HttpResponse {
         instant = instant.plusSeconds(30)
         return ops(path, body, code = Totp.code(totpSecret, instant.epochSecond))
@@ -633,10 +703,10 @@ class OpsRoutesTest {
         if (body != null) { contentType(ContentType.Application.Json); setBody(body) }
     }
 
-    private fun fixture(name: String, text: String, version: String? = "8.0"): ItemVerdict.Accepted {
+    private fun fixture(name: String, text: String, version: String? = "8.0", platform: String = "doordash"): ItemVerdict.Accepted {
         val versionField = version?.let { "\"platformAppVersion\":\"$it\"," } ?: ""
         val raw = """{"schemaId":"uinode.skeleton.v1","hashDomain":1,"filterRev":1,"fingerprint":"${"0".repeat(64)}",
-            "platform":"doordash",${versionField}"engineVersion":1,"day":"$day",
+            "platform":"$platform",${versionField}"engineVersion":1,"day":"$day",
             "root":{"class":"android.widget.$name","id":"com.example:id/$name","text":{"text":{"h":"${CensusHash.of(text)}","kind":"words:2"}}}}"""
         val decoded = SkeletonSchema.deserialize(raw)
         val canonical = SkeletonSchema.serialize(decoded.copy(fingerprint = requireNotNull(CensusFingerprint.of(decoded.root))))

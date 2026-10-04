@@ -2,7 +2,25 @@
 
 DashBuddy Census will help the DashBuddy Android app understand unfamiliar screens without collecting their words. Enrolled installs will send UI skeletons containing hashes. The server will group structurally similar screens and count distinct installs for each token hash, so one noisy install cannot make a token appear common.
 
-This AGPL-3.0-only repository currently contains slice S1 (#1157): health and readiness endpoints, public policy, the database schema, and deployment scaffolding. Enrollment, ingest, promotion, withdrawal, retention jobs, and the operator dashboard are planned. The wire contract belongs to the app's separate Apache-2.0 `census-contract` included build; it is not copied into this repository.
+What is live (v0.10.0):
+
+- Enrol, rotate, revoke, and withdraw, with signed requests.
+- Skeleton ingest (`uinode.skeleton.v1`), trusted-envelope ingest (`uinode.v1`, trusted installs only, paired to existing clusters by fingerprint), and daily recognition health (`/v1/health`).
+- Structural-fingerprint clustering, k-gated label unblinding, and the vocabulary queue.
+- Health rollup and alarms delivered by email.
+- The operator dashboard, served ONLY on the WireGuard listener with bearer or TOTP session login: platform → version cluster summary, per-group review pages, and cluster detail with skeleton samples and the trusted-capture wireframe.
+- The purge job for retention enforcement.
+- AWS deployment with Terraform, SSM, an image pinned by digest, and a Caddy edge with per-IP rate limits.
+
+Versions:
+
+- v0.6.0: S7 server slice live.
+- v0.7.0: VPN-only `/ops` and TOTP login.
+- v0.8.0: human-readable dashboard and cluster detail.
+- v0.9.0: platform → version cluster summary and review pages.
+- v0.10.0: envelope → cluster pairing and the trusted-capture wireframe; the validator accepts real phone captures.
+
+This repository is AGPL-3.0-only. The wire contract belongs to the app's separate Apache-2.0 `census-contract` included build; it is not copied into this repository.
 
 ## OPERATOR TRUST STATEMENT — draft
 

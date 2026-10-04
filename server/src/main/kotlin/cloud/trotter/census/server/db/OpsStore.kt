@@ -5,7 +5,9 @@ import cloud.trotter.census.server.Database
 import cloud.trotter.census.server.Policy
 import cloud.trotter.census.server.ingest.WireGrammars
 import cloud.trotter.census.server.ops.RenderedSkeleton
+import cloud.trotter.census.server.ops.RenderedWireframe
 import cloud.trotter.census.server.ops.SkeletonRender
+import cloud.trotter.census.server.ops.WireframeRender
 import cloud.trotter.census.server.ops.unblinded
 import cloud.trotter.census.server.today
 import kotlinx.coroutines.Dispatchers
@@ -47,6 +49,7 @@ data class OpsCluster(
     val notes: String? = null,
     val notesWithheld: Boolean = false,
     val samples: List<OpsSample>? = null,
+    @kotlinx.serialization.Transient val wireframe: RenderedWireframe? = null,
 )
 
 @Serializable
@@ -141,10 +144,17 @@ class OpsStore(private val db: Database, private val clock: Clock, private val p
     private fun displayVersions(row: OpsCluster): List<String?> =
         row.versions.map { it.takeUnless { version -> version == "unknown" } }.ifEmpty { listOf(null) }
 
-    suspend fun cluster(fingerprint: String): OpsCluster? = query {
+    suspend fun cluster(fingerprint: String, withWireframe: Boolean = false): OpsCluster? = query {
         val row = clusterRows(clock.today(), fingerprint = fingerprint).singleOrNull() ?: return@query null
         val newest = row.versions.maxWithOrNull(opsVersionOrder)
-        row.copy(newWithVersion = newest != null && newWithVersion(row, newest, versionFirstDays()), samples = samples(row))
+        val wireframe = if (withWireframe) select(
+            """SELECT e.envelope, e.received_day, left(e.install_id::text, 8) AS prefix
+                FROM trusted_envelopes e JOIN installs i ON i.install_id = e.install_id
+                WHERE e.fingerprint = ? AND i.trusted AND i.revoked_at IS NULL
+                ORDER BY e.received_day DESC, e.id DESC LIMIT 1""",
+            fingerprint,
+        ) { WireframeRender.render(it.getString("envelope"), it.getString("received_day"), it.getString("prefix")) } else null
+        row.copy(newWithVersion = newest != null && newWithVersion(row, newest, versionFirstDays()), samples = samples(row), wireframe = wireframe)
     }
 
     private fun Connection.clusterRows(today: LocalDate, status: String? = null, fingerprint: String? = null): List<OpsCluster> =

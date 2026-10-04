@@ -42,7 +42,7 @@ fun Route.dashboardRoute(store: OpsStore, alarms: HealthAlarms, clock: Clock, po
     }
     get("/clusters/{fingerprint}/view") {
         val fingerprint = call.parameters["fingerprint"]
-        val cluster = if (fingerprint != null && fingerprintPattern.matches(fingerprint)) store.cluster(fingerprint) else null
+        val cluster = if (fingerprint != null && fingerprintPattern.matches(fingerprint)) store.cluster(fingerprint, withWireframe = true) else null
         val html = ClusterDetailHtml.render(policy.serverVersion, policy.k, clock.today().toString(), cluster)
         call.response.headers.append("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'")
         call.respondText(html, ContentType.Text.Html, if (cluster == null) HttpStatusCode.NotFound else HttpStatusCode.OK)

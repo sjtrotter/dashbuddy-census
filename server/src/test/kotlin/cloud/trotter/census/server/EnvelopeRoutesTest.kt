@@ -4,6 +4,7 @@ import ch.qos.logback.classic.Level
 import ch.qos.logback.classic.Logger
 import ch.qos.logback.classic.spi.ILoggingEvent
 import ch.qos.logback.core.read.ListAppender
+import cloud.trotter.census.server.auth.hashSecret
 import cloud.trotter.census.server.db.EnvelopeOutcome
 import cloud.trotter.census.server.db.EnvelopeStore
 import cloud.trotter.census.server.db.InstallStore
@@ -162,10 +163,51 @@ class EnvelopeRoutesTest {
             assertPrivateLogs(logs.list, listOf(id.toString(), key, payloadSentinel, "PRIVATE_BALANCE_SENTINEL", "DEVICE_SENTINEL", "SIGNATURE_SENTINEL", "Looking for offers"))
             val infos = logs.list.filter { it.loggerName == "Ingest" && it.level == Level.INFO }
             assertEquals(6, infos.size)
-            assertTrue(infos.all { Regex("ingest kind=envelopes install_prefix=[0-9a-f]{8} accepted=[0-9]+ duplicate=[0-9]+ rejected=[0-9]+ bytes=[0-9]+ status=(accepted|duplicate|batch_quality|budget_exhausted)").matches(it.formattedMessage) })
+            assertTrue(infos.all { Regex("ingest kind=envelopes install_prefix=[0-9a-f]{8} accepted=[0-9]+ duplicate=[0-9]+ rejected=[0-9]+ bytes=[0-9]+ status=(accepted paired=[0-9]+ unpaired=[0-9]+|duplicate|batch_quality|budget_exhausted)").matches(it.formattedMessage) })
         } finally {
             logger.detachAppender(logs)
             logs.stop()
+        }
+    }
+
+    @Test
+    fun `store pairs existing clusters and counts unknown and absent fingerprints as unpaired`() {
+        Database.connect(config()).use { db ->
+            testApplication {
+                val id = UUID.randomUUID()
+                val keyHash = hashSecret(secret(83))
+                val fingerprint = id.toString().replace("-", "").repeat(2)
+                val unknown = "f".repeat(64)
+                InstallStore(db, clock).enrol(id, keyHash, "1.0.0")
+                sql {
+                    it.update("UPDATE installs SET trusted = true WHERE install_id = ?", id)
+                    it.update("INSERT INTO clusters (fingerprint, platform, first_seen_day, last_seen_day) VALUES (?, ?, ?, ?)", fingerprint, "doordash", day, day)
+                }
+                fun accepted(fp: String?, platform: String = "doordash"): EnvelopeVerdict.Accepted {
+                    val fields = mapOf("platform" to JsonPrimitive(platform)) + (fp?.let { mapOf("fingerprint" to JsonPrimitive(it)) } ?: emptyMap())
+                    return EnvelopeValidator.validate(JsonObject(envelopeFixture() + fields), Policy()) as EnvelopeVerdict.Accepted
+                }
+                // An uber envelope naming the doordash cluster's fingerprint must land unpaired: pairing is platform-coherent.
+                val result = EnvelopeStore(db, clock).ingest(id, keyHash, day,
+                    listOf(accepted(fingerprint), accepted(unknown), accepted(null), accepted(fingerprint, platform = "uber")),
+                    emptyMap(), "pairing", 100, BudgetPolicy(), 30)
+                assertTrue(result is EnvelopeOutcome.Stored)
+                result as EnvelopeOutcome.Stored
+                assertEquals(1, result.paired)
+                assertEquals(3, result.unpaired)
+                sql { connection ->
+                    connection.prepareStatement("SELECT fingerprint FROM trusted_envelopes WHERE install_id = ? ORDER BY id").use { statement ->
+                        statement.setObject(1, id)
+                        statement.executeQuery().use { rows ->
+                            assertTrue(rows.next()); assertEquals(fingerprint, rows.getString("fingerprint"))
+                            assertTrue(rows.next()); assertNull(rows.getString("fingerprint"))
+                            assertTrue(rows.next()); assertNull(rows.getString("fingerprint"))
+                            assertTrue(rows.next()); assertNull(rows.getString("fingerprint"))
+                            assertFalse(rows.next())
+                        }
+                    }
+                }
+            }
         }
     }
 
