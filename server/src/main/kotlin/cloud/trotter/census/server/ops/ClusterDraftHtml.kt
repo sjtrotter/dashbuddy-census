@@ -29,6 +29,7 @@ object ClusterDraftHtml {
             p { +"Sensitive screens usually extend the known rule in sensitive.json5. Choose a free priority." }
         }
         if (frame != null) panel("wireframe", "Screen wireframe") {
+            val renderedRows = if (capture != null) rows.take(DraftForm.MAX_ROWS).map { it.number }.toSet() else emptySet()
             p("muted") {
                 +"Trusted capture · received "; date(frame.receivedDay)
                 +" · install ${prefix(frame.installPrefix)} · app version ${frame.platformAppVersion?.let { version(it) } ?: "Not recorded"}"
@@ -39,7 +40,8 @@ object ClusterDraftHtml {
                     div("wire-box" + (if (box.label != null) " labelled" else "") + (if (box.clickable) " clickable" else "")) {
                         attributes["style"] = String.format(Locale.ROOT, "left:%.2f%%;top:%.2f%%;width:%.2f%%;height:%.2f%%",
                             box.leftPct, box.topPct, box.widthPct, box.heightPct)
-                        a(href = "#node-${index + 1}", classes = "wire-n") { +"${index + 1}" }
+                        if (index + 1 in renderedRows) a(href = "#node-${index + 1}", classes = "wire-n") { +"${index + 1}" }
+                        else span("wire-n") { +"${index + 1}" }
                         box.label?.let { span("wire-label") { +safe(it) } }
                     }
                 }
@@ -47,7 +49,7 @@ object ClusterDraftHtml {
         }
         section("panel") {
             val screenClass = state["screenClass"] ?: cluster.screenClass ?: "unknown"
-            val shapes = V.LEGAL_SHAPES_BY_CLASS[screenClass] ?: V.SHAPES
+            val shapes = V.LEGAL_SHAPES_BY_CLASS[screenClass] ?: V.LEGAL_SHAPES_BY_CLASS.values.flatten().distinct()
             val shape = state["shape"]?.takeIf { it in shapes } ?: V.DEFAULT_SHAPE_BY_CLASS[screenClass] ?: "none"
             val fields = V.FIELDS_BY_SHAPE[shape].orEmpty().map { it.name }
             form(action = if (nested) "../draft" else "draft", method = FormMethod.post) {

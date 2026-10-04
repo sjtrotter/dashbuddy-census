@@ -138,7 +138,7 @@ internal fun isOpsPath(path: String): Boolean = path == "/ops" || path.startsWit
  * `/ops/login` deliberately stays out: its form rejections answer the JSON envelope (pinned by OpsLoginTest).
  */
 internal fun isOpsHtmlPath(path: String): Boolean {
-    val segments = decodedOpsSegments(path)?.filter { it.isNotEmpty() } ?: return false
+    val segments = decodedOpsSegments(path) ?: return false
     return segments.isEmpty() ||
         (segments.size == 2 && segments[0] == "clusters" && segments[1] == "view") ||
         (segments.size == 3 && segments[0] == "clusters" && segments[2] in setOf("view", "draft")) ||
@@ -189,13 +189,13 @@ class OpsBucket(private val capacity: Int = 60, private val perMinute: Int = 60)
     }
 }
 
-/** Only the exact decoded paths are pure; extra/empty segments and other verbs retain TOTP. */
+/** Only routed, decoded preview/shape paths are pure; extra segments and other verbs retain TOTP. */
 internal fun isPureDraftPath(path: String): Boolean = isDraftFormPath(path, pureOnly = true)
 
 private fun decodedOpsSegments(path: String): List<String>? {
     if (!isOpsPath(path)) return null
     return try {
-        path.removePrefix("/ops").split('/').drop(1).map { it.decodeURLPart() }
+        path.removePrefix("/ops").split('/').drop(1).map { it.decodeURLPart() }.filter { it.isNotEmpty() }
     } catch (_: URLDecodeException) { null }
 }
 

@@ -79,12 +79,16 @@ class OpsAuthTest {
         suspend fun send(body: String, target: String = "$path/preview") = client.post(target) {
             header(HttpHeaders.Authorization, "Bearer $token"); contentType(ContentType.Application.FormUrlEncoded); setBody(body)
         }
-        assertEquals(413, send("x=" + "x".repeat(70 * 1024)).status.value)
-        for (body in listOf((1..1001).joinToString("&") { "p$it=" }, "x=" + "x".repeat(2001), "x=1&x=2", "x=1&%78=2", "x=%QQ")) {
-            val response = send(body)
-            assertEquals(400, response.status.value)
-            assertEquals(ContentType.Text.Html, response.contentType()?.withoutParameters())
-            assertPrivate(response.bodyAsText())
+        for (target in listOf("$path/preview", "$path/preview".replace("/ops/", "/ops//"))) {
+            assertEquals(413, send("x=" + "x".repeat(70 * 1024), target).status.value)
+            // More than 4 KiB, but within draft byte, value and parameter caps, reaches the DB gate.
+            assertEquals(503, send((1..4).joinToString("&") { "p$it=" + "x".repeat(1500) }, target).status.value)
+            for (body in listOf((1..1001).joinToString("&") { "p$it=" }, "x=" + "x".repeat(2001), "x=1&x=2", "x=1&%78=2", "x=%QQ")) {
+                val response = send(body, target)
+                assertEquals(400, response.status.value)
+                assertEquals(ContentType.Text.Html, response.contentType()?.withoutParameters())
+                assertPrivate(response.bodyAsText())
+            }
         }
         val json = send("x=1&x=2", "/ops/vocabulary/resolve")
         assertEquals(400, json.status.value)
@@ -105,28 +109,31 @@ class OpsAuthTest {
                 }
             } }
         }
-        val valid = client.post("$path/preview") {
-            header(HttpHeaders.Authorization, "Bearer $token")
-            contentType(ContentType.Application.FormUrlEncoded); setBody("intent=home")
+        for (target in listOf("$path/preview", "$path/preview".replace("/ops/", "/ops//"))) {
+            val valid = client.post(target) {
+                header(HttpHeaders.Authorization, "Bearer $token")
+                contentType(ContentType.Application.FormUrlEncoded); setBody("intent=home")
+            }
+            assertEquals(200, valid.status.value)
+            assertTrue(reachedHandler)
+            reachedHandler = false
+            val response = client.post(target) {
+                header(HttpHeaders.Authorization, "Bearer $token")
+                contentType(ContentType.MultiPart.FormData.withParameter("boundary", "ops-boundary"))
+                setBody("--ops-boundary\r\nContent-Disposition: form-data; name=\"intent\"\r\n\r\nhome\r\n--ops-boundary--\r\n")
+            }
+            assertEquals(400, response.status.value)
+            assertEquals(ContentType.Text.Html, response.contentType()?.withoutParameters())
+            assertFalse(reachedHandler)
+            assertPrivate(response.bodyAsText())
         }
-        assertEquals(200, valid.status.value)
-        assertTrue(reachedHandler)
-        reachedHandler = false
-        val response = client.post("$path/preview") {
-            header(HttpHeaders.Authorization, "Bearer $token")
-            contentType(ContentType.MultiPart.FormData.withParameter("boundary", "ops-boundary"))
-            setBody("--ops-boundary\r\nContent-Disposition: form-data; name=\"intent\"\r\n\r\nhome\r\n--ops-boundary--\r\n")
-        }
-        assertEquals(400, response.status.value)
-        assertEquals(ContentType.Text.Html, response.contentType()?.withoutParameters())
-        assertFalse(reachedHandler)
-        assertPrivate(response.bodyAsText())
     }
 
     @Test
-    fun `only exact decoded pure draft paths bypass TOTP`() {
+    fun `only normalized decoded pure draft paths bypass TOTP`() {
         for (suffix in listOf("preview", "shape", "%70review")) assertTrue(isPureDraftPath("$path/$suffix"))
-        for (p in listOf(path, "$path/preview/", "$path//preview", "$path/preview/extra", path.replace("a".repeat(64), "invalid") + "/preview")) assertFalse(isPureDraftPath(p))
+        for (p in listOf("$path/preview/", "$path//preview", "$path/preview".replace("/ops/", "/ops//"))) assertTrue(isPureDraftPath(p))
+        for (p in listOf(path, "$path/preview/extra", path.replace("a".repeat(64), "invalid") + "/preview")) assertFalse(isPureDraftPath(p))
         assertFalse(isPureDraftPath("/ops/%QQ"))
         for (p in listOf("$path%2Fpreview", "$path%2fshape", "$path/preview".replace("/clusters/", "/clusters%2F"))) {
             assertFalse(isPureDraftPath(p), p)

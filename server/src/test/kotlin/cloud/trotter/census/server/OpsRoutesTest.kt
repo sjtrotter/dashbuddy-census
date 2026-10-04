@@ -18,6 +18,7 @@ import cloud.trotter.census.server.db.MutationOutcome
 import cloud.trotter.census.server.db.OpsStore
 import cloud.trotter.census.server.db.SkeletonStore
 import cloud.trotter.census.server.db.update
+import cloud.trotter.census.server.db.select
 import cloud.trotter.census.server.ingest.BudgetPolicy
 import cloud.trotter.census.server.ingest.EnvelopeValidator
 import cloud.trotter.census.server.ingest.EnvelopeVerdict
@@ -47,6 +48,11 @@ import io.ktor.server.application.ApplicationCallPipeline
 import io.ktor.server.application.call
 import io.ktor.server.testing.TestApplicationRequest
 import io.ktor.server.testing.testApplication
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -881,6 +887,55 @@ class OpsRoutesTest {
                     } }
                 }
             }
+        }
+    }
+
+    @Test
+    fun `retention clears a draft committed while its delete waits on the envelope share lock`() = runBlocking {
+        Database.connect(config()).use { db ->
+            val installs = InstallStore(db, clock)
+            val ops = OpsStore(db, clock, Policy())
+            val id = UUID.randomUUID()
+            val keyHash = hashSecret(secret(92))
+            installs.enrol(id, keyHash, "1.0.0")
+            ops.trust(id, true)
+            val sample = fixture("CleanupRace", "Ready")
+            val fp = sample.item.fingerprint
+            SkeletonStore(db, clock).ingest(id, keyHash, day, listOf(sample), 0, emptyMap(), "race-skeleton", 100, BudgetPolicy())
+            val raw = JsonObject(envelopeFixture() + ("fingerprint" to JsonPrimitive(fp)))
+            val accepted = EnvelopeValidator.validate(raw, Policy()) as EnvelopeVerdict.Accepted
+            EnvelopeStore(db, clock).ingest(id, keyHash, day.minusDays(30), listOf(accepted), emptyMap(), "race-envelope", 100, BudgetPolicy(), 30)
+            val capture = requireNotNull(ops.pinnedEnvelope(fp))
+            DriverManager.getConnection(postgres.jdbcUrl, postgres.username, postgres.password).use { save ->
+                save.autoCommit = false
+                try {
+                    // Drive the save transaction explicitly so its commit can be ordered against the real purge.
+                    // Match saveDraft's parent -> envelope -> cluster lock order on this first connection.
+                    assertNotNull(save.select("SELECT install_id FROM installs WHERE install_id = ? FOR SHARE", id) { it.getObject(1) })
+                    assertEquals(capture.id, save.select("SELECT id FROM trusted_envelopes WHERE id = ? FOR SHARE", capture.id) { it.getLong(1) })
+                    val purge = async(Dispatchers.IO) { installs.purgeTrustedEnvelopes(day.plusDays(1)) }
+                    withTimeout(10_000) {
+                        while (save.select("""SELECT EXISTS (
+                            SELECT 1 FROM pg_locks
+                            WHERE NOT granted AND pg_backend_pid() = ANY(pg_blocking_pids(pid))
+                        )""") { it.getBoolean(1) } != true) delay(10)
+                    }
+                    // DELETE already has its snapshot and is blocked. Only now write and commit the draft.
+                    val draft = """{"envelopeId":${capture.id},"json5":"saved during purge"}"""
+                    assertEquals(1, save.update("""UPDATE clusters SET screen_class = 'idle', draft = ?::jsonb,
+                        draft_day = ?, status = 'drafted' WHERE fingerprint = ?""", draft, day, fp))
+                    save.commit()
+                    assertEquals(1, withTimeout(10_000) { purge.await() })
+                } finally {
+                    save.rollback()
+                }
+            }
+            val cluster = requireNotNull(ops.cluster(fp))
+            assertEquals("idle", cluster.screenClass)
+            assertFalse(cluster.hasDraft)
+            assertNull(cluster.draftDay)
+            assertNull(ops.draftJson5(fp))
+            assertNull(ops.pinnedEnvelope(fp, capture.id))
         }
     }
 

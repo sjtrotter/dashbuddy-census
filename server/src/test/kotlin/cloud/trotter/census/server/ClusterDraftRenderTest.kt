@@ -100,11 +100,24 @@ class ClusterDraftRenderTest {
     }
 
     @Test
+    fun `unlabelled non-clickable root has a plain badge and selectable child has a link`() {
+        val page = render(1)
+        assertEquals(1, Regex("""<a href="#node-\d+" class="wire-n">""").findAll(page).count())
+        assertEquals(1, Regex("""<span class="wire-n">""").findAll(page).count())
+        assertTrue(page.contains("<span class=\"wire-n\">1</span>"))
+        assertTrue(page.contains("<a href=\"#node-2\" class=\"wire-n\">2</a>"))
+        assertPrivate(page)
+    }
+
+    @Test
     fun `150 node rows fit parser parameter budget and report remainder`() {
         val page = render(170)
         assertEquals(150, Regex("name=\"role_[0-9]+\"").findAll(page).count())
         assertTrue(page.contains("20 more nodes not shown"))
         assertEquals(171, Regex("class=\"wire-n\"").findAll(page).count())
+        assertEquals(150, Regex("""<a href="#node-\d+" class="wire-n">""").findAll(page).count())
+        assertEquals(21, Regex("""<span class="wire-n">""").findAll(page).count())
+        assertFalse(page.contains("href=\"#node-152\""))
         assertTrue(Regex("name=\"").findAll(page.substringAfter("<form action=\"draft\"")).count() <= 1000)
         assertPrivate(page)
     }
@@ -140,7 +153,8 @@ class ClusterDraftRenderTest {
             val select = Regex("""<select[^>]*name="shape"[^>]*>(.*?)</select>""", RegexOption.DOT_MATCHES_ALL)
                 .find(page)!!.groupValues[1]
             val choices = Regex("""<option value="([^"]*)"""").findAll(select).map { it.groupValues[1] }.toList()
-            assertEquals(V.LEGAL_SHAPES_BY_CLASS[screenClass] ?: V.SHAPES, choices)
+            assertEquals(V.LEGAL_SHAPES_BY_CLASS[screenClass] ?: V.LEGAL_SHAPES_BY_CLASS.values.flatten().distinct(), choices)
+            for (illegal in listOf("paused", "timeline", "ratings")) assertFalse(illegal in choices)
             if (screenClass == "task:active") assertTrue(select.contains("value=\"none\" selected"))
             assertPrivate(page)
         }
