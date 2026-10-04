@@ -655,6 +655,8 @@ class OpsRoutesTest {
                 val response = Json.parseToJsonElement(uploaded.bodyAsText()).jsonObject
                 assertEquals(setOf("status", "accepted", "duplicate", "rejected", "budget"), response.keys)
                 assertEquals(1, response.getValue("accepted").jsonPrimitive.int)
+                assertNull(requireNotNull(ops.cluster(fingerprint)).wireframe)
+                assertTrue(requireNotNull(ops.cluster(fingerprint, withWireframe = true)).wireframe != null)
                 val page = client.ops("$path/view").bodyAsText()
                 assertTrue(page.contains("class=\"wire-frame\""))
                 assertTrue(page.contains("class=\"wire-label\""))

@@ -37,7 +37,7 @@ object EnvelopeValidator {
             val value = element[key]
             if (value == null || value == JsonNull) continue
             val token = element.string(key) ?: return reject("bad_item")
-            if (!grammar.matches(token)) return reject(if (key == "ruleId") "bad_rule_id" else "bad_item")
+            if (!grammar(token)) return reject(if (key == "ruleId") "bad_rule_id" else "bad_item")
         }
         if (!metadata["engineVersion"].isInteger()) return reject("bad_item")
         val formatVersion = metadata["rulesetFormatVersion"]
@@ -101,7 +101,10 @@ object EnvelopeValidator {
         "stateMachineApiVersion", "appVersion", "deviceFingerprint", "platformAppVersion",
     )
     private val uuidPattern = Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
-    private val nullableTokens = mapOf("ruleId" to WireGrammars.ruleId, "classificationName" to WireGrammars.identifier, "fingerprint" to Regex("[0-9a-f]{64}"))
+    private val nullableTokens = mapOf(
+        "ruleId" to WireGrammars.ruleId::matches, "classificationName" to WireGrammars.identifier::matches,
+        "fingerprint" to WireGrammars.fingerprint::matches,
+    )
     private val optionalMetadataVersions = setOf("rulesetReleaseTag", "platformAppVersion")
     private val metadataVersions = mapOf(
         "rulesetReleaseTag" to WireGrammars.rulesetReleaseTag, "appVersion" to WireGrammars.appVersion,

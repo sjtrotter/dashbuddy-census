@@ -44,12 +44,13 @@ object WireframeRender {
             }
             val node = siblings.next() as? JsonObject
             visited++
+            val hidden = (node?.get("visible") as? JsonPrimitive)?.let { !it.isString && it.booleanOrNull == false } == true
             val b = node?.bounds()
             val left = maxOf(b?.left ?: 0, frame.left)
             val top = maxOf(b?.top ?: 0, frame.top)
             val right = minOf(b?.right ?: 0, frame.right)
             val bottom = minOf(b?.bottom ?: 0, frame.bottom)
-            if (node != null && b != null && b.width > 0 && b.height > 0 && right > left && bottom > top) {
+            if (node != null && !hidden && b != null && b.width > 0 && b.height > 0 && right > left && bottom > top) {
                 boxes += WireBox(
                     percent(left - frame.left, frame.width), percent(top - frame.top, frame.height),
                     percent(right - left, frame.width), percent(bottom - top, frame.height), depth,
@@ -58,8 +59,8 @@ object WireframeRender {
                     }?.let { safe(it) }?.let { s ->
                         if (s.length <= 120) s else s.take(if (Character.isHighSurrogate(s[119])) 119 else 120)
                     },
-                    node.string("class")?.let { safe(it) }?.substringAfterLast('.'),
-                    node.string("id")?.let { safe(it) }?.substringAfter(":id/"),
+                    node.string("class")?.let { safe(it) }?.substringAfterLast('.')?.take(64)?.takeIf { it.isNotEmpty() },
+                    node.string("id")?.let { safe(it) }?.substringAfter(":id/")?.take(64)?.takeIf { it.isNotEmpty() },
                     (node["isClickable"] as? JsonPrimitive)?.let { !it.isString && it.booleanOrNull == true } == true,
                 )
             } else {

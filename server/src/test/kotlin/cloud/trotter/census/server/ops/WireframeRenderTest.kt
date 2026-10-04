@@ -74,6 +74,43 @@ class WireframeRenderTest {
     }
 
     @Test
+    fun `class and id are bounded after shortening and empty suffixes become null`() {
+        val long = render(JsonObject(node() + mapOf(
+            "class" to JsonPrimitive("android.widget.${"x".repeat(200)}"),
+            "id" to JsonPrimitive("app:id/${"y".repeat(200)}"),
+        ))).boxes.single()
+        assertEquals("x".repeat(64), long.className)
+        assertEquals("y".repeat(64), long.viewId)
+        val empty = render(JsonObject(node() + mapOf(
+            "class" to JsonPrimitive("a."), "id" to JsonPrimitive("x:id/"),
+        ))).boxes.single()
+        assertNull(empty.className)
+        assertNull(empty.viewId)
+    }
+
+    @Test
+    fun `two stacked roots with one hidden draw one box`() {
+        val hidden = JsonObject(node() + ("visible" to JsonPrimitive(false)))
+        val result = render(node(right = 0, bottom = 0, children = listOf(hidden, node())))
+        assertEquals(1, result.boxes.size)
+        assertEquals(3, result.nodeCount)
+        assertEquals(2, result.skipped) // The hidden node and the zero-sized container.
+    }
+
+    @Test
+    fun `hidden parents still walk children and only boolean false hides nodes`() {
+        val result = render(JsonObject(node(children = listOf(node())) + ("visible" to JsonPrimitive(false))))
+        assertEquals(1, result.boxes.single().depth)
+        assertEquals(2, result.nodeCount)
+        assertEquals(1, result.skipped)
+        for (visible in listOf(JsonPrimitive(true), JsonPrimitive("false"), JsonPrimitive(0))) {
+            val shown = render(JsonObject(node() + ("visible" to visible)))
+            assertEquals(1, shown.boxes.size)
+            assertEquals(0, shown.skipped)
+        }
+    }
+
+    @Test
     fun `implausible frame dimensions and aspect ratios use fallback`() {
         for ((width, height) in listOf(1 to Int.MAX_VALUE, 16_385 to 16_384, 16_384 to 16_385, 1 to 9, 9 to 1)) {
             val result = render(node(right = width, bottom = height))

@@ -373,7 +373,7 @@ internal fun FlowOrPhrasingContent.yesChip(value: Boolean, tone: String) { if (v
 internal fun FlowContent.emptyState(copy: String) { p("empty") { +copy } }
 internal fun FlowOrPhrasingContent.date(value: String) { time { attributes["datetime"] = safe(value); +safe(value) } }
 internal fun number(value: Number): String = String.format(Locale.ROOT, "%,d", value.toLong())
-internal val fingerprintPattern = Regex("[0-9a-f]{64}")
+internal val fingerprintPattern = WireGrammars.fingerprint
 internal fun safe(value: String): String = value
     .replace(Regex("(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"), "[redacted]")
     .replace(Regex("(?i)[0-9a-f]{16,}"), "[redacted]")

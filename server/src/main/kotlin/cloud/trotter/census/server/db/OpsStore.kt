@@ -144,16 +144,16 @@ class OpsStore(private val db: Database, private val clock: Clock, private val p
     private fun displayVersions(row: OpsCluster): List<String?> =
         row.versions.map { it.takeUnless { version -> version == "unknown" } }.ifEmpty { listOf(null) }
 
-    suspend fun cluster(fingerprint: String): OpsCluster? = query {
+    suspend fun cluster(fingerprint: String, withWireframe: Boolean = false): OpsCluster? = query {
         val row = clusterRows(clock.today(), fingerprint = fingerprint).singleOrNull() ?: return@query null
         val newest = row.versions.maxWithOrNull(opsVersionOrder)
-        val wireframe = select(
+        val wireframe = if (withWireframe) select(
             """SELECT e.envelope, e.received_day, left(e.install_id::text, 8) AS prefix
                 FROM trusted_envelopes e JOIN installs i ON i.install_id = e.install_id
                 WHERE e.fingerprint = ? AND i.trusted AND i.revoked_at IS NULL
                 ORDER BY e.received_day DESC, e.id DESC LIMIT 1""",
             fingerprint,
-        ) { WireframeRender.render(it.getString("envelope"), it.getString("received_day"), it.getString("prefix")) }
+        ) { WireframeRender.render(it.getString("envelope"), it.getString("received_day"), it.getString("prefix")) } else null
         row.copy(newWithVersion = newest != null && newWithVersion(row, newest, versionFirstDays()), samples = samples(row), wireframe = wireframe)
     }
 
