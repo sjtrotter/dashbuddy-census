@@ -10,6 +10,7 @@ import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNull
@@ -128,6 +129,7 @@ class EnvelopeValidatorTest {
     @Test
     fun `real phone envelope validates without retaining device fingerprint`() {
         val raw = requireNotNull(javaClass.getResource("/fixtures/phone-envelope-uber-home.json")).readText()
+        assertEquals("00000000-0000-4000-8000-000000000000", Json.parseToJsonElement(raw).jsonObject.getValue("captureId").jsonPrimitive.content)
         val verdict = EnvelopeValidator.validate(Json.parseToJsonElement(raw), policy.copy(acceptedPlatforms = listOf("uber")))
         assertTrue(verdict is EnvelopeVerdict.Accepted)
         assertFalse((verdict as EnvelopeVerdict.Accepted).canonicalJson.contains("deviceFingerprint"))

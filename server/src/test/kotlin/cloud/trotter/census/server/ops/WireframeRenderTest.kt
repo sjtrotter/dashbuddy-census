@@ -4,6 +4,8 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -214,6 +216,7 @@ class WireframeRenderTest {
     @Test
     fun `real phone root node renders at least ten boxes`() {
         val raw = requireNotNull(javaClass.getResource("/fixtures/phone-envelope-uber-home.json")).readText()
+        assertEquals("00000000-0000-4000-8000-000000000000", Json.parseToJsonElement(raw).jsonObject.getValue("captureId").jsonPrimitive.content)
         val result = requireNotNull(WireframeRender.render(raw, "2026-10-02", "12345678"))
         assertTrue(result.boxes.size >= 10)
         assertEquals(1080, result.frameWidth)

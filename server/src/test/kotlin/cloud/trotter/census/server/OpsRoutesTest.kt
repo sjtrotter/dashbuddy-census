@@ -14,9 +14,11 @@ import cloud.trotter.census.server.db.EnvelopeStore
 import cloud.trotter.census.server.db.HealthStore
 import cloud.trotter.census.server.db.IngestOutcome
 import cloud.trotter.census.server.db.InstallStore
+import cloud.trotter.census.server.db.MutationOutcome
 import cloud.trotter.census.server.db.OpsStore
 import cloud.trotter.census.server.db.SkeletonStore
 import cloud.trotter.census.server.db.update
+import cloud.trotter.census.server.db.select
 import cloud.trotter.census.server.ingest.BudgetPolicy
 import cloud.trotter.census.server.ingest.EnvelopeValidator
 import cloud.trotter.census.server.ingest.EnvelopeVerdict
@@ -46,6 +48,11 @@ import io.ktor.server.application.ApplicationCallPipeline
 import io.ktor.server.application.call
 import io.ktor.server.testing.TestApplicationRequest
 import io.ktor.server.testing.testApplication
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -56,6 +63,8 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNotEquals
+import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeAll
@@ -309,6 +318,7 @@ class OpsRoutesTest {
                     connection.update("INSERT INTO clusters (fingerprint, platform, first_seen_day, last_seen_day, status) VALUES (?, 'uber', ?, ?, 'ignored')", uber, day, day)
                     connection.update("INSERT INTO cluster_sightings (fingerprint, install_id, day, platform_app_version) VALUES (?, ?, ?, '1.2')", uber, first, day)
                 }
+                assertTrue(ops.saveClassification(fresh.item.fingerprint, "idle"))
                 val summary = ops.clusterSummary()
                 assertEquals(listOf("doordash" to "8.10", "doordash" to "8.9", "doordash" to null, "uber" to "1.2"),
                     summary.map { it.platform to it.platformAppVersion })
@@ -316,16 +326,29 @@ class OpsRoutesTest {
                 assertEquals(listOf(listOf(1, 0, 0, 1, 0), listOf(1, 0, 0, 0, 0), listOf(2, 0, 0, 0, 0), listOf(0, 0, 0, 0, 1)),
                     summary.map { row -> CLUSTER_STATUSES.map { row.byStatus.getValue(it) } })
                 summary.forEach { assertEquals(CLUSTER_STATUSES.toSet(), it.byStatus.keys) }
+                assertEquals(listOf(1, 0, 0, 0), summary.map { it.byClass.getValue("idle") })
+                assertEquals(listOf(1, 1, 2, 1), summary.map { it.byClass.getValue("unclassified") })
+                summary.forEach {
+                    assertEquals(it.total, it.byClass.values.sum())
+                    assertEquals((cloud.trotter.census.contract.authoring.RuleAuthoringVocabulary.SCREEN_CLASSES + "unclassified").toSet(), it.byClass.keys)
+                }
+                val homeHtml = client.ops("/ops/").bodyAsText()
+                assertTrue(homeHtml.contains("idle: 1 · unclassified: 1")); assertPrivate(homeHtml)
+                val reviewHtml = client.ops("/ops/clusters/view?platform=doordash&version=8.10").bodyAsText()
+                assertTrue(reviewHtml.contains("Classes · idle: 1 · unclassified: 1"))
+                assertTrue(reviewHtml.contains(">idle</span>")); assertPrivate(reviewHtml)
                 val review = ops.clustersPage("doordash", "8.10", null, 1)
                 assertEquals(listOf(old.item.fingerprint, fresh.item.fingerprint), review.clusters.map { it.fingerprint })
                 assertEquals(listOf(false, true), review.clusters.map { it.newWithVersion })
                 assertTrue(review.clusters.all { it.samples == null })
+                assertEquals(summary.first().byClass, review.byClass)
                 assertEquals(2, review.total)
                 assertEquals(25, review.pageSize)
                 assertEquals(1, review.pageCount)
                 // JSON still ranks by score, even though review puts the lower-scoring new cluster first.
                 assertEquals(fresh.item.fingerprint, ops.clusters(platform = "doordash").first().clusters.first().fingerprint)
                 val lastPage = ops.clustersPage("doordash", "8.10", null, 99, pageSize = 1)
+                assertEquals(review.byClass, lastPage.byClass)
                 assertEquals(2, lastPage.page)
                 assertEquals(2, lastPage.pageCount)
                 assertEquals(2, lastPage.total)
@@ -333,6 +356,8 @@ class OpsRoutesTest {
                 assertEquals(listOf(fresh.item.fingerprint), lastPage.clusters.map { it.fingerprint })
                 assertEquals(1, ops.clustersPage("doordash", "8.10", null, 0, pageSize = 1).page)
                 val filtered = ops.clustersPage("doordash", "8.10", "resolved", 99)
+                assertEquals(1, filtered.byClass.getValue("idle"))
+                assertEquals(0, filtered.byClass.getValue("unclassified"))
                 assertEquals("resolved", filtered.status)
                 assertEquals(1, filtered.total)
                 assertEquals(1, filtered.page)
@@ -648,6 +673,7 @@ class OpsRoutesTest {
                 val before = beforeResponse.bodyAsText()
                 assertFalse(client.ops("$path/view").bodyAsText().contains("class=\"wire-frame\""))
                 val raw = requireNotNull(javaClass.getResource("/fixtures/phone-envelope-uber-home.json")).readText()
+                assertEquals("00000000-0000-4000-8000-000000000000", Json.parseToJsonElement(raw).jsonObject.getValue("captureId").jsonPrimitive.content)
                 val capture = JsonObject(Json.parseToJsonElement(raw).jsonObject + ("fingerprint" to JsonPrimitive(fingerprint)))
                 val uploaded = client.signed(clock, id.toString(), key, HttpMethod.Post, "/v1/envelopes",
                     """{"batchId":"wire-capture","items":[$capture]}""")
@@ -687,6 +713,275 @@ class OpsRoutesTest {
                 val revokedPage = client.ops("$path/view").bodyAsText()
                 assertFalse(revokedPage.contains("class=\"wire-frame\""))
                 assertTrue(revokedPage.contains("No trusted capture is paired with this cluster yet."))
+            }
+        }
+    }
+
+    @Test
+    fun `draft forms pin trusted capture preserve state save and serve exact bytes after revocation`() {
+        Database.connect(config()).use { db ->
+            val installs = InstallStore(db, clock)
+            val ops = OpsStore(db, clock, Policy())
+            val id = UUID.randomUUID()
+            val key = secret(85)
+            val sample = fixture("Drafting", "Ready now", platform = "uber")
+            val fp = sample.item.fingerprint
+            testApplication {
+                application { module(config().copy(operatorTotpSecret = totpSecret), db, clock) }
+                installs.enrol(id, hashSecret(key), "1.0.0")
+                ops.trust(id, true)
+                SkeletonStore(db, clock).ingest(id, hashSecret(key), day, listOf(sample), 0, emptyMap(), "draft-skeleton", 100, BudgetPolicy())
+                val path = "/ops/clusters/$fp"
+                val unchanged = client.ops(path).bodyAsText()
+                assertFalse(unchanged.contains("screenClass")); assertFalse(unchanged.contains("hasDraft"))
+                val raw = requireNotNull(javaClass.getResource("/fixtures/phone-envelope-uber-home.json")).readText()
+                assertEquals("00000000-0000-4000-8000-000000000000", Json.parseToJsonElement(raw).jsonObject.getValue("captureId").jsonPrimitive.content)
+                val capture = JsonObject(Json.parseToJsonElement(raw).jsonObject + ("fingerprint" to JsonPrimitive(fp)))
+                assertEquals(200, client.signed(clock, id.toString(), key, HttpMethod.Post, "/v1/envelopes",
+                    """{"batchId":"draft-capture","items":[$capture]}""").status.value)
+                assertEquals(unchanged, client.ops(path).bodyAsText())
+                val pinned = requireNotNull(ops.pinnedEnvelope(fp))
+                val envelope = Json.parseToJsonElement(pinned.bytes).jsonObject
+                val walked = cloud.trotter.census.contract.authoring.EnvelopeWalk.walk(envelope.getValue("payload").jsonObject)
+                val frame = requireNotNull(cloud.trotter.census.server.ops.WireframeRender.render(envelope, walked, pinned.receivedDay, pinned.installPrefix))
+                val rows = cloud.trotter.census.server.ops.DraftForm.rows(walked, frame)
+                val anchor = rows.first { it.node.idSuffix == "glide_bottom_nav_home" }.number
+                val page = client.ops("$path/draft")
+                assertEquals(200, page.status.value)
+                val html = page.bodyAsText()
+                assertTrue(html.contains("class=\"wire-n\"")); assertTrue(html.contains("Required fields"))
+                assertTrue(Regex("name=\"role_[0-9]+\"").findAll(html).count() <= 150)
+                assertPrivate(html)
+                assertEquals(404, client.ops("$path/draft.json5").status.value)
+                val browser = createClient { followRedirects = false }
+                val fields = linkedMapOf("envelopeId" to pinned.id.toString(),
+                    "screenClass" to "idle", "shape" to "idle", "intent" to "home", "priority" to "501",
+                    "modeHint" to "online", "offerSurface" to "", "comment" to "Review & verify", "notes" to "Saved notes",
+                    "constName_1" to "startingSession", "constValue_1" to "true", "role_$anchor" to "anchor",
+                    "field2_$anchor" to "zoneName", "stripPrefix_$anchor" to "Home")
+                suspend fun submit(suffix: String, values: Map<String, String> = fields, code: String? = null, headerCode: String? = null): HttpResponse = browser.post("$path/$suffix") {
+                    header(HttpHeaders.Authorization, "Bearer $operatorToken")
+                    if (headerCode != null) header("X-Census-Totp", headerCode)
+                    contentType(ContentType.Application.FormUrlEncoded)
+                    setBody((values + if (code == null) emptyMap() else mapOf("totp" to code)).toList().formUrlEncode())
+                }
+                val shape = submit("draft/shape", fields + mapOf("screenClass" to "task:pickup:navigation", "shape" to "task"))
+                assertEquals(200, shape.status.value)
+                val shapeHtml = shape.bodyAsText()
+                assertTrue(shapeHtml.contains("customerNameHash")); assertTrue(shapeHtml.contains("Saved notes"))
+                assertTrue(shapeHtml.contains("Review &amp; verify")); assertTrue(shapeHtml.contains("value=\"Home\""))
+                assertTrue(shapeHtml.contains("value=\"zoneName\" selected"))
+                assertPrivate(shapeHtml)
+                val preview = submit("draft/preview")
+                assertEquals(200, preview.status.value)
+                val previewHtml = preview.bodyAsText()
+                assertTrue(previewHtml.contains("<pre class=\"draft\">"))
+                assertPrivate(previewHtml)
+                val previewBytes = previewHtml.substringAfter("<pre class=\"draft\">").substringBefore("</pre>")
+                    .replace("&quot;", "\"").replace("&#39;", "'").replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+                val invalid = fields - "role_$anchor"
+                val refused = submit("draft/preview", invalid)
+                assertEquals(200, refused.status.value); assertTrue(refused.bodyAsText().contains("at least one anchor")); assertPrivate(refused.bodyAsText())
+                assertError(submit("draft"), 401, "totp_required")
+                val firstCode = Totp.code(totpSecret, instant.epochSecond)
+                val refusedSave = submit("draft", invalid, firstCode)
+                assertEquals(422, refusedSave.status.value); assertPrivate(refusedSave.bodyAsText())
+                assertNull(ops.draftJson5(fp)); assertEquals("new", requireNotNull(ops.cluster(fp)).status)
+                instant = instant.plusSeconds(30)
+                val code = Totp.code(totpSecret, instant.epochSecond)
+                assertEquals(400, submit("draft", code = code, headerCode = code).status.value)
+                val saved = submit("draft", code = code)
+                assertEquals(303, saved.status.value)
+                assertEquals("$path/view", saved.headers[HttpHeaders.Location])
+                assertError(submit("draft", code = code), 401, "totp_replayed")
+                assertEquals(previewBytes, ops.draftJson5(fp))
+                val download = client.ops("$path/draft.json5")
+                assertEquals(ContentType.Text.Plain, download.contentType()?.withoutParameters())
+                assertEquals("nosniff", download.headers["X-Content-Type-Options"])
+                assertEquals("attachment; filename=\"draft.json5\"", download.headers[HttpHeaders.ContentDisposition])
+                assertEquals(previewBytes, download.bodyAsText())
+                assertEquals("Saved notes", requireNotNull(ops.cluster(fp)).notes)
+                instant = instant.plusSeconds(30)
+                assertEquals(303, submit("draft", fields + ("notes" to ""), Totp.code(totpSecret, instant.epochSecond)).status.value)
+                assertEquals("Saved notes", requireNotNull(ops.cluster(fp)).notes)
+                val detail = Json.parseToJsonElement(client.ops(path).bodyAsText()).jsonObject
+                assertEquals("drafted", detail.getValue("status").jsonPrimitive.content)
+                assertEquals("idle", detail.getValue("screenClass").jsonPrimitive.content)
+                assertTrue(detail.getValue("hasDraft").jsonPrimitive.boolean)
+                for (privateKey in listOf("draft", "selections", "envelopeId", "envelopeSha256", "json5")) assertFalse(privateKey in detail)
+                sql { connection -> connection.prepareStatement("SELECT screen_class, draft, draft_day FROM clusters WHERE fingerprint = ?").use { statement ->
+                    statement.setString(1, fp)
+                    statement.executeQuery().use { rs ->
+                        assertTrue(rs.next()); assertEquals("idle", rs.getString(1)); assertEquals(day.toString(), rs.getString(3))
+                        val draft = Json.parseToJsonElement(rs.getString(2)).jsonObject
+                        assertEquals(previewBytes, draft.getValue("json5").jsonPrimitive.content)
+                        assertEquals(pinned.sha256Hex, draft.getValue("envelopeSha256").jsonPrimitive.content)
+                        assertFalse(draft.toString().contains("totp"))
+                    }
+                } }
+                val detailHtml = client.ops("$path/view").bodyAsText()
+                assertTrue(detailHtml.contains("Draft saved")); assertTrue(detailHtml.contains("Draft (JSON5)")); assertPrivate(detailHtml)
+                val stale = submit("draft/preview", fields + ("envelopeId" to Long.MAX_VALUE.toString()))
+                assertEquals(409, stale.status.value); assertTrue(stale.bodyAsText().contains("This capture changed — reload")); assertPrivate(stale.bodyAsText())
+                val staleHtml = stale.bodyAsText()
+                for (key in fields.keys - "envelopeId") assertTrue(staleHtml.contains("name=\"$key\""), key)
+                assertTrue(staleHtml.contains("Review &amp; verify")); assertTrue(staleHtml.contains("Saved notes"))
+                assertTrue(staleHtml.contains("Home")); assertTrue(staleHtml.contains("zoneName"))
+                instant = instant.plusSeconds(30)
+                val staleSave = submit("draft", fields + ("envelopeId" to Long.MAX_VALUE.toString()), Totp.code(totpSecret, instant.epochSecond))
+                assertEquals(409, staleSave.status.value)
+                assertTrue(staleSave.bodyAsText().contains("Review &amp; verify")); assertPrivate(staleSave.bodyAsText())
+                // A later capture must not silently change which node the pinned form selects.
+                val accepted = EnvelopeValidator.validate(capture, Policy()) as EnvelopeVerdict.Accepted
+                EnvelopeStore(db, clock).ingest(id, hashSecret(key), day, listOf(accepted), emptyMap(), "draft-later", 100, BudgetPolicy(), 30)
+                assertEquals(200, submit("draft/preview").status.value)
+                assertEquals(pinned.id, requireNotNull(ops.pinnedEnvelope(fp, pinned.id)).id)
+                assertTrue(ops.revoke(id))
+                val revoked = client.ops("$path/draft").bodyAsText()
+                assertTrue(revoked.contains("A trusted capture is needed to draft")); assertFalse(revoked.contains("Preview draft")); assertPrivate(revoked)
+                assertEquals(409, submit("draft/preview").status.value)
+                assertEquals(previewBytes, client.ops("$path/draft.json5").bodyAsText())
+                instant = instant.plusSeconds(30)
+                assertEquals(303, submit("draft", mapOf("mode" to "classify", "screenClass" to "noise", "notes" to "Classification only"), Totp.code(totpSecret, instant.epochSecond)).status.value)
+                assertEquals("drafted", requireNotNull(ops.cluster(fp)).status)
+                assertEquals(previewBytes, ops.draftJson5(fp))
+            }
+        }
+    }
+
+    @Test
+    fun `classify-only empty notes preserve notes and withheld notes cannot be overwritten`() {
+        Database.connect(config()).use { db ->
+            val installs = InstallStore(db, clock)
+            val ops = OpsStore(db, clock, Policy())
+            val id = UUID.randomUUID()
+            val keyHash = hashSecret(secret(86))
+            val sample = fixture("Notes", "Ready")
+            val fp = sample.item.fingerprint
+            testApplication {
+                application { module(config().copy(operatorTotpSecret = totpSecret), db, clock) }
+                installs.enrol(id, keyHash, "1.0.0")
+                ops.trust(id, true)
+                SkeletonStore(db, clock).ingest(id, keyHash, day, listOf(sample), 0, emptyMap(), "notes", 100, BudgetPolicy())
+                assertTrue(ops.saveClassification(fp, "idle", "Keep existing notes"))
+                val browser = createClient { followRedirects = false }
+                suspend fun save(notes: String?) = browser.post("/ops/clusters/$fp/draft") {
+                    instant = instant.plusSeconds(30)
+                    header(HttpHeaders.Authorization, "Bearer $operatorToken")
+                    contentType(ContentType.Application.FormUrlEncoded)
+                    setBody((listOf("mode" to "classify", "screenClass" to "noise", "totp" to Totp.code(totpSecret, instant.epochSecond)) +
+                        if (notes == null) emptyList() else listOf("notes" to notes)).formUrlEncode())
+                }
+                assertEquals(303, save("").status.value)
+                assertEquals("Keep existing notes", requireNotNull(ops.cluster(fp)).notes)
+                assertTrue(ops.trust(id, false))
+                assertTrue(requireNotNull(ops.cluster(fp)).notesWithheld)
+                val page = client.ops("/ops/clusters/$fp/draft").bodyAsText()
+                assertTrue(page.contains("Notes withheld below the privacy gate"))
+                assertFalse(page.contains("name=\"notes\"")); assertFalse(page.contains("Keep existing notes")); assertPrivate(page)
+                for (notes in listOf(null, "", "Attempted replacement")) {
+                    assertEquals(303, save(notes).status.value)
+                    sql { connection -> connection.prepareStatement("SELECT notes FROM clusters WHERE fingerprint = ?").use { statement ->
+                        statement.setString(1, fp)
+                        statement.executeQuery().use { rs -> assertTrue(rs.next()); assertEquals("Keep existing notes", rs.getString(1)) }
+                    } }
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `retention clears a draft committed while its delete waits on the envelope share lock`() = runBlocking {
+        Database.connect(config()).use { db ->
+            val installs = InstallStore(db, clock)
+            val ops = OpsStore(db, clock, Policy())
+            val id = UUID.randomUUID()
+            val keyHash = hashSecret(secret(92))
+            installs.enrol(id, keyHash, "1.0.0")
+            ops.trust(id, true)
+            val sample = fixture("CleanupRace", "Ready")
+            val fp = sample.item.fingerprint
+            SkeletonStore(db, clock).ingest(id, keyHash, day, listOf(sample), 0, emptyMap(), "race-skeleton", 100, BudgetPolicy())
+            val raw = JsonObject(envelopeFixture() + ("fingerprint" to JsonPrimitive(fp)))
+            val accepted = EnvelopeValidator.validate(raw, Policy()) as EnvelopeVerdict.Accepted
+            EnvelopeStore(db, clock).ingest(id, keyHash, day.minusDays(30), listOf(accepted), emptyMap(), "race-envelope", 100, BudgetPolicy(), 30)
+            val capture = requireNotNull(ops.pinnedEnvelope(fp))
+            DriverManager.getConnection(postgres.jdbcUrl, postgres.username, postgres.password).use { save ->
+                save.autoCommit = false
+                try {
+                    // Drive the save transaction explicitly so its commit can be ordered against the real purge.
+                    // Match saveDraft's parent -> envelope -> cluster lock order on this first connection.
+                    assertNotNull(save.select("SELECT install_id FROM installs WHERE install_id = ? FOR SHARE", id) { it.getObject(1) })
+                    assertEquals(capture.id, save.select("SELECT id FROM trusted_envelopes WHERE id = ? FOR SHARE", capture.id) { it.getLong(1) })
+                    val purge = async(Dispatchers.IO) { installs.purgeTrustedEnvelopes(day.plusDays(1)) }
+                    withTimeout(10_000) {
+                        while (save.select("""SELECT EXISTS (
+                            SELECT 1 FROM pg_locks
+                            WHERE NOT granted AND pg_backend_pid() = ANY(pg_blocking_pids(pid))
+                        )""") { it.getBoolean(1) } != true) delay(10)
+                    }
+                    // DELETE already has its snapshot and is blocked. Only now write and commit the draft.
+                    val draft = """{"envelopeId":${capture.id},"json5":"saved during purge"}"""
+                    assertEquals(1, save.update("""UPDATE clusters SET screen_class = 'idle', draft = ?::jsonb,
+                        draft_day = ?, status = 'drafted' WHERE fingerprint = ?""", draft, day, fp))
+                    save.commit()
+                    assertEquals(1, withTimeout(10_000) { purge.await() })
+                } finally {
+                    save.rollback()
+                }
+            }
+            val cluster = requireNotNull(ops.cluster(fp))
+            assertEquals("idle", cluster.screenClass)
+            assertFalse(cluster.hasDraft)
+            assertNull(cluster.draftDay)
+            assertNull(ops.draftJson5(fp))
+            assertNull(ops.pinnedEnvelope(fp, capture.id))
+        }
+    }
+
+    @Test
+    fun `withdrawal and retention erase only the draft from the deleted capture and preserve classification`() {
+        Database.connect(config()).use { db ->
+            val installs = InstallStore(db, clock)
+            val ops = OpsStore(db, clock, Policy())
+            testApplication {
+                application { module(config(), db, clock) }
+                for ((index, withdraw) in listOf(true, false).withIndex()) {
+                    val first = UUID.randomUUID()
+                    val second = UUID.randomUUID()
+                    val keyHash = hashSecret(secret(90 + index))
+                    for (id in listOf(first, second)) {
+                        installs.enrol(id, keyHash, "1.0.0"); ops.trust(id, true)
+                    }
+                    val sample = fixture("Cleanup$index", "Ready")
+                    SkeletonStore(db, clock).ingest(second, keyHash, day, listOf(sample), 0, emptyMap(), "cleanup-skeleton-$index", 100, BudgetPolicy())
+                    val fp = sample.item.fingerprint
+                    val raw = JsonObject(envelopeFixture() + ("fingerprint" to JsonPrimitive(fp)))
+                    val accepted = EnvelopeValidator.validate(raw, Policy()) as EnvelopeVerdict.Accepted
+                    val envelopes = EnvelopeStore(db, clock)
+                    // A expires before B; both captures belong to the same cluster but different installs.
+                    envelopes.ingest(first, keyHash, day.minusDays(30), listOf(accepted), emptyMap(), "cleanup-a-$index", 100, BudgetPolicy(), 30)
+                    val captureA = requireNotNull(ops.pinnedEnvelope(fp))
+                    envelopes.ingest(second, keyHash, day, listOf(accepted), emptyMap(), "cleanup-b-$index", 100, BudgetPolicy(), 30)
+                    val captureB = requireNotNull(ops.pinnedEnvelope(fp))
+                    assertNotEquals(captureA.id, captureB.id)
+                    val selections = kotlinx.serialization.json.buildJsonObject {
+                        put("envelopeId", JsonPrimitive(captureB.id))
+                    }
+                    assertTrue(ops.saveDraft(fp, "idle", selections, "stored artefact", day))
+                    if (withdraw) assertTrue(installs.withdraw(first, keyHash) is MutationOutcome.Applied)
+                    else assertEquals(1, installs.purgeTrustedEnvelopes(day.plusDays(1)))
+                    assertNull(ops.pinnedEnvelope(fp, captureA.id))
+                    assertNotNull(ops.pinnedEnvelope(fp, captureB.id))
+                    val surviving = requireNotNull(ops.cluster(fp))
+                    assertEquals("idle", surviving.screenClass); assertTrue(surviving.hasDraft)
+                    assertEquals(day.toString(), surviving.draftDay); assertEquals("stored artefact", ops.draftJson5(fp))
+                    if (withdraw) assertTrue(installs.withdraw(second, keyHash) is MutationOutcome.Applied)
+                    else assertEquals(1, installs.purgeTrustedEnvelopes(day.plusDays(31)))
+                    val erased = requireNotNull(ops.cluster(fp))
+                    assertEquals("idle", erased.screenClass); assertFalse(erased.hasDraft)
+                    assertNull(erased.draftDay); assertNull(ops.draftJson5(fp))
+                }
             }
         }
     }

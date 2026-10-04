@@ -26,6 +26,7 @@ object ClustersPageHtml {
             +if (page.platformAppVersion == null) "No version recorded" else "Version ${version(page.platformAppVersion)}"
         }
         p("muted") { +"${number(page.total)} clusters · ${if (page.status == null) "untriaged first, then by rank" else "by rank"}" }
+        p("muted") { +"Classes · ${classSummary(page.byClass)}" }
         nav("status-filter") {
             attributes["aria-label"] = "Status filter"
             (listOf(null) + CLUSTER_STATUSES).forEach { status ->

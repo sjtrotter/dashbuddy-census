@@ -135,7 +135,12 @@ class InstallStore(private val db: Database, private val clock: Clock) {
             active && sameHash(row.getString("key_hash"), expectedCurrentKeyHash)
         } ?: false
         if (!current) return@query MutationOutcome.StaleCredential
-        MutationOutcome.Applied(WITHDRAWAL_TABLES.associateWith { table -> update("DELETE FROM $table WHERE install_id = ?", installId) })
+        MutationOutcome.Applied(WITHDRAWAL_TABLES.associateWith { table ->
+            if (table == "trusted_envelopes") {
+                // Delete/lock envelopes before clusters, the same lock order as retention and draft saves.
+                deleteEnvelopesAndClearDrafts("DELETE FROM trusted_envelopes WHERE install_id = ? RETURNING id", installId)
+            } else update("DELETE FROM $table WHERE install_id = ?", installId)
+        })
     }
 
     suspend fun issueNonce(installId: UUID?): String = query {
@@ -171,7 +176,26 @@ class InstallStore(private val db: Database, private val clock: Clock) {
     }
 
     suspend fun purgeTrustedEnvelopes(today: LocalDate): Int = purge("envelopes") {
-        update("DELETE FROM trusted_envelopes WHERE ctid IN (SELECT ctid FROM trusted_envelopes WHERE purge_after < ? LIMIT 1000)", today)
+        deleteEnvelopesAndClearDrafts("""DELETE FROM trusted_envelopes WHERE ctid IN
+            (SELECT ctid FROM trusted_envelopes WHERE purge_after < ? LIMIT 1000) RETURNING id""", today)
+    }
+
+    private fun Connection.deleteEnvelopesAndClearDrafts(sql: String, argument: Any): Int {
+        val ids = prepareStatement(sql).use { statement ->
+            statement.setObject(1, argument)
+            statement.executeQuery().use { rows ->
+                buildList { while (rows.next()) add(rows.getString("id")) }
+            }
+        }
+        // A separate statement gets a fresh snapshot after DELETE waited for a draft save's envelope share lock.
+        // Keep both statements in this transaction, with envelopes locked before clusters.
+        val deletedIds = createArrayOf("text", ids.toTypedArray())
+        try {
+            update("UPDATE clusters SET draft = NULL, draft_day = NULL WHERE draft->>'envelopeId' = ANY(?)", deletedIds)
+        } finally {
+            deletedIds.free()
+        }
+        return ids.size
     }
 
     suspend fun purgeHealthDaily(olderThan: LocalDate): Int = purge("health") {

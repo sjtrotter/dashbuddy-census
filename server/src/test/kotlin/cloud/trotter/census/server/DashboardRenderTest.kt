@@ -16,11 +16,20 @@ import org.junit.jupiter.api.Test
 class DashboardRenderTest {
     private val empty = JsonObject(emptyMap())
     private val summaries = listOf(
-        OpsClusterSummaryRow("doordash", "8.10", 3, mapOf("new" to 2, "triaged" to 1)),
+        OpsClusterSummaryRow("doordash", "8.10", 3, mapOf("new" to 2, "triaged" to 1), mapOf("idle" to 2, "unclassified" to 1)),
         OpsClusterSummaryRow("doordash", "8.0", 1, mapOf("resolved" to 1)),
         OpsClusterSummaryRow("doordash", null, 1, mapOf("new" to 1)),
         OpsClusterSummaryRow("uber", "1.2", 1, mapOf("ignored" to 1)),
     )
+
+    @Test
+    fun `summary includes compact class counts and validates class labels`() {
+        val page = render(summaries)
+        assertTrue(page.contains("Classes")); assertTrue(page.contains("idle: 2 · unclassified: 1"))
+        val invalid = render(listOf(summaries.first().copy(byClass = mapOf("invented_class" to 1))))
+        assertFalse(invalid.contains("invented_class")); assertTrue(invalid.contains("[redacted]: 1"))
+        assertPrivate(page); assertPrivate(invalid)
+    }
 
     @Test
     fun `read only page has no raw hashes identities secrets or home samples`() {

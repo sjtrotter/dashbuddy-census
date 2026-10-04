@@ -39,12 +39,13 @@ class MigrationTest {
     }
 
     @Test
-    fun `empty database migrates once and contains exactly eleven application tables`() {
+    fun `empty database applies every migration and contains exactly eleven application tables`() {
         val flyway = Flyway.configure()
             .dataSource(postgres.jdbcUrl, postgres.username, postgres.password)
             .locations("classpath:db/migration")
             .load()
-        assertEquals(1, flyway.migrate().migrationsExecuted)
+        // V1 (schema) + V2 (cluster classification: screen_class, draft, draft_day — DashBuddy #1188).
+        assertEquals(2, flyway.migrate().migrationsExecuted)
         val expected = setOf(
             "installs", "clusters", "cluster_samples", "cluster_sightings", "token_sightings",
             "vocabulary", "trusted_envelopes", "health_daily", "health_fleet_daily", "ingest_ledger", "nonces",
@@ -58,6 +59,12 @@ class MigrationTest {
                         while (rows.next()) add(rows.getString(1))
                     }
                     assertEquals(expected, actual)
+                }
+                statement.executeQuery(
+                    "SELECT column_name FROM information_schema.columns WHERE table_name = 'clusters' AND column_name IN ('screen_class', 'draft', 'draft_day')",
+                ).use { rows ->
+                    val columns = buildSet { while (rows.next()) add(rows.getString(1)) }
+                    assertEquals(setOf("screen_class", "draft", "draft_day"), columns)
                 }
                 statement.executeQuery(
                     """

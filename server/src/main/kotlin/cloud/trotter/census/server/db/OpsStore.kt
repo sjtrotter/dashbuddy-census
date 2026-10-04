@@ -1,8 +1,10 @@
 package cloud.trotter.census.server.db
 
+import cloud.trotter.census.contract.authoring.RuleAuthoringVocabulary
 import cloud.trotter.census.server.Clock
 import cloud.trotter.census.server.Database
 import cloud.trotter.census.server.Policy
+import cloud.trotter.census.server.auth.sha256Hex
 import cloud.trotter.census.server.ingest.WireGrammars
 import cloud.trotter.census.server.ops.RenderedSkeleton
 import cloud.trotter.census.server.ops.RenderedWireframe
@@ -10,6 +12,13 @@ import cloud.trotter.census.server.ops.SkeletonRender
 import cloud.trotter.census.server.ops.WireframeRender
 import cloud.trotter.census.server.ops.unblinded
 import cloud.trotter.census.server.today
+import java.sql.Connection
+import java.sql.ResultSet
+import java.time.LocalDate
+import java.time.ZoneOffset
+import java.time.temporal.ChronoUnit
+import java.util.UUID
+import kotlin.math.log2
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
@@ -20,17 +29,11 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import org.jetbrains.exposed.v1.jdbc.transactions.transaction
-import java.sql.Connection
-import java.sql.ResultSet
-import java.time.LocalDate
-import java.time.ZoneOffset
-import java.time.temporal.ChronoUnit
-import java.util.UUID
-import kotlin.math.log2
 
 @Serializable
 data class OpsSample(val platformAppVersion: String, val receivedDay: String, val skeleton: RenderedSkeleton)
 
+@OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
 @Serializable
 data class OpsCluster(
     val fingerprint: String,
@@ -49,6 +52,10 @@ data class OpsCluster(
     val notes: String? = null,
     val notesWithheld: Boolean = false,
     val samples: List<OpsSample>? = null,
+    val screenClass: String? = null,
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val hasDraft: Boolean = false,
+    @kotlinx.serialization.Transient val draftDay: String? = null,
     @kotlinx.serialization.Transient val wireframe: RenderedWireframe? = null,
 )
 
@@ -56,10 +63,10 @@ data class OpsCluster(
 data class OpsClusterGroup(val platformAppVersion: String, val clusters: List<OpsCluster>)
 
 @Serializable
-data class OpsClusterSummaryRow(val platform: String, val platformAppVersion: String?, val total: Int, val byStatus: Map<String, Int>)
+data class OpsClusterSummaryRow(val platform: String, val platformAppVersion: String?, val total: Int, val byStatus: Map<String, Int>, val byClass: Map<String, Int> = emptyMap())
 
 @Serializable
-data class OpsClusterPage(val platform: String, val platformAppVersion: String?, val status: String?, val total: Int, val page: Int, val pageSize: Int, val pageCount: Int, val clusters: List<OpsCluster>)
+data class OpsClusterPage(val platform: String, val platformAppVersion: String?, val status: String?, val total: Int, val page: Int, val pageSize: Int, val pageCount: Int, val clusters: List<OpsCluster>, val byClass: Map<String, Int> = emptyMap())
 
 /** Hash-free vocabulary display projection; no plaintext or token identifier enters HTML. */
 data class OpsVocabularyDisplay(val kind: String, val distinctInstalls: Int, val firstDay: String, val lastDay: String)
@@ -121,7 +128,7 @@ class OpsStore(private val db: Database, private val clock: Clock, private val p
         clusterRows(clock.today()).flatMap { row ->
             displayVersions(row).map { (row.platform to it) to row }
         }.groupBy({ it.first }, { it.second }).map { (key, rows) ->
-            OpsClusterSummaryRow(key.first, key.second, rows.size, CLUSTER_STATUSES.associateWith { status -> rows.count { it.status == status } })
+            OpsClusterSummaryRow(key.first, key.second, rows.size, CLUSTER_STATUSES.associateWith { status -> rows.count { it.status == status } }, classCounts(rows))
         }.sortedWith(compareBy<OpsClusterSummaryRow> { it.platform }
             .thenBy(nullsLast(opsVersionOrder.reversed())) { it.platformAppVersion })
     }
@@ -138,11 +145,62 @@ class OpsStore(private val db: Database, private val clock: Clock, private val p
         val clusters = rows.drop((currentPage - 1) * pageSize).take(pageSize).map { row ->
             row.copy(newWithVersion = version != null && newWithVersion(row, version, firstDays), samples = null)
         }
-        OpsClusterPage(platform, version, status, rows.size, currentPage, pageSize, pageCount, clusters)
+        OpsClusterPage(platform, version, status, rows.size, currentPage, pageSize, pageCount, clusters, classCounts(rows))
     }
+
+    private fun classCounts(rows: List<OpsCluster>): Map<String, Int> =
+        (RuleAuthoringVocabulary.SCREEN_CLASSES + "unclassified").associateWith { screenClass ->
+            rows.count { (it.screenClass ?: "unclassified") == screenClass }
+        }
 
     private fun displayVersions(row: OpsCluster): List<String?> =
         row.versions.map { it.takeUnless { version -> version == "unknown" } }.ifEmpty { listOf(null) }
+
+    suspend fun pinnedEnvelope(fingerprint: String, envelopeId: Long? = null): PinnedEnvelope? = query {
+        pinned(fingerprint, envelopeId)
+    }
+
+    private fun Connection.pinned(fingerprint: String, envelopeId: Long?, lock: Boolean = false): PinnedEnvelope? = select(
+        """SELECT e.id, e.envelope::text AS bytes, e.received_day, left(e.install_id::text, 8) AS prefix,
+            e.envelope->'metadata'->>'platformAppVersion' AS version
+            FROM trusted_envelopes e JOIN installs i ON i.install_id = e.install_id
+            WHERE e.fingerprint = ? AND i.trusted AND i.revoked_at IS NULL
+            AND (?::bigint IS NULL OR e.id = ?) ORDER BY e.received_day DESC, e.id DESC LIMIT 1""" +
+            if (lock) " FOR SHARE OF e" else "",
+        fingerprint, envelopeId, envelopeId,
+    ) { PinnedEnvelope(it.getLong("id"), it.getString("bytes"), sha256Hex(it.getString("bytes").toByteArray(Charsets.UTF_8)),
+        it.getString("received_day"), it.getString("prefix"), it.getString("version")) }
+
+    suspend fun saveClassification(fp: String, screenClass: String?, notes: String? = null): Boolean = query {
+        require(screenClass == null || screenClass in RuleAuthoringVocabulary.SCREEN_CLASSES)
+        require(notes == null || notes.length <= 2000)
+        update("UPDATE clusters SET screen_class = ?, notes = COALESCE(?, notes) WHERE fingerprint = ?", screenClass, notes, fp) == 1
+    }
+
+    /** Pin metadata travels separately from selections in the stored document; never through a DTO. */
+    suspend fun saveDraft(fp: String, screenClass: String, selectionsJson: JsonObject, json5: String, day: LocalDate): Boolean = query {
+        require(screenClass in RuleAuthoringVocabulary.SCREEN_CLASSES)
+        val id = (selectionsJson["envelopeId"] as? JsonPrimitive)?.content?.toLongOrNull() ?: return@query false
+        // Lock the install before the envelope, matching withdrawal's parent-first lock order.
+        // Lock provenance through commit: withdrawal/revocation and retention cannot race a successful save.
+        val eligible = select("""SELECT i.install_id FROM installs i
+            WHERE i.install_id = (SELECT install_id FROM trusted_envelopes WHERE id = ? AND fingerprint = ?)
+            AND i.trusted AND i.revoked_at IS NULL FOR SHARE""", id, fp) { true } ?: false
+        if (!eligible) return@query false
+        val pinned = pinned(fp, id, lock = true) ?: return@query false
+        val notes = (selectionsJson["notes"] as? JsonPrimitive)?.content
+        require(notes == null || notes.length <= 2000)
+        val draft = buildJsonObject {
+            put("selections", JsonObject(selectionsJson - setOf("envelopeId", "envelopeSha256", "notes")))
+            put("json5", json5); put("envelopeId", id); put("envelopeSha256", pinned.sha256Hex)
+        }
+        update("""UPDATE clusters SET screen_class = ?, draft = ?::jsonb, draft_day = ?, status = 'drafted',
+            notes = COALESCE(?, notes) WHERE fingerprint = ?""", screenClass, draft.toString(), day, notes, fp) == 1
+    }
+
+    suspend fun draftJson5(fp: String): String? = query {
+        select("SELECT draft->>'json5' FROM clusters WHERE fingerprint = ?", fp) { it.getString(1) }
+    }
 
     suspend fun cluster(fingerprint: String, withWireframe: Boolean = false): OpsCluster? = query {
         val row = clusterRows(clock.today(), fingerprint = fingerprint).singleOrNull() ?: return@query null
@@ -159,7 +217,8 @@ class OpsStore(private val db: Database, private val clock: Clock, private val p
 
     private fun Connection.clusterRows(today: LocalDate, status: String? = null, fingerprint: String? = null): List<OpsCluster> =
         select(
-            """SELECT c.*, count(DISTINCT s.install_id) FILTER (WHERE NOT i.trusted AND s.day >= ? AND s.day <= ?) AS installs,
+            """SELECT c.fingerprint, c.platform, c.status, c.first_seen_day, c.last_seen_day, c.resolved_rule_id, c.notes,
+                c.screen_class, c.draft IS NOT NULL AS has_draft, c.draft_day, count(DISTINCT s.install_id) FILTER (WHERE NOT i.trusted AND s.day >= ? AND s.day <= ?) AS installs,
                 COALESCE(bool_or(i.trusted), false) AS trusted,
                 COALESCE(sum(s.count) FILTER (WHERE s.day >= ? AND s.day <= ?), 0) AS sightings,
                 COALESCE(jsonb_agg(DISTINCT s.platform_app_version) FILTER (WHERE s.platform_app_version IS NOT NULL), '[]'::jsonb) AS versions
@@ -179,6 +238,7 @@ class OpsStore(private val db: Database, private val clock: Clock, private val p
                     rows.getString("first_seen_day"), rows.getString("last_seen_day"), count, trusted, rows.getLong("sightings"),
                     Json.decodeFromString<List<String>>(rows.getString("versions")).sortedWith(opsVersionOrder.reversed()),
                     false, visible, rows.getString("resolved_rule_id"), notes?.takeIf { visible }, notesWithheld = notes != null && !visible,
+                    screenClass = rows.getString("screen_class"), hasDraft = rows.getBoolean("has_draft"), draftDay = rows.getString("draft_day"),
                 ))
             } while (rows.next())
         } } ?: emptyList()
@@ -312,3 +372,9 @@ class OpsStore(private val db: Database, private val clock: Clock, private val p
             GROUP BY t.token_hash HAVING count(DISTINCT t.install_id) >= ?"""
     }
 }
+
+/** Private capture provenance, deliberately not serializable. */
+data class PinnedEnvelope(
+    val id: Long, val bytes: String, val sha256Hex: String, val receivedDay: String,
+    val installPrefix: String, val platformAppVersion: String?,
+)

@@ -2,7 +2,7 @@
 
 DashBuddy Census will help the DashBuddy Android app understand unfamiliar screens without collecting their words. Enrolled installs will send UI skeletons containing hashes. The server will group structurally similar screens and count distinct installs for each token hash, so one noisy install cannot make a token appear common.
 
-What is live (v0.10.0):
+What is live (v0.11.0):
 
 - Enrol, rotate, revoke, and withdraw, with signed requests.
 - Skeleton ingest (`uinode.skeleton.v1`), trusted-envelope ingest (`uinode.v1`, trusted installs only, paired to existing clusters by fingerprint), and daily recognition health (`/v1/health`).
@@ -19,6 +19,7 @@ Versions:
 - v0.8.0: human-readable dashboard and cluster detail.
 - v0.9.0: platform → version cluster summary and review pages.
 - v0.10.0: envelope → cluster pairing and the trusted-capture wireframe; the validator accepts real phone captures.
+- v0.11.0: classify & draft a rule from the trusted-capture wireframe.
 
 This repository is AGPL-3.0-only. The wire contract belongs to the app's separate Apache-2.0 `census-contract` included build; it is not copied into this repository.
 
@@ -62,7 +63,7 @@ Check out the app at the agreed pinned revision as `../DashBuddy`; its `census-c
 ./gradlew :server:installDist
 ```
 
-An alternate checkout uses `-PcensusContractPath=/absolute/path/to/census-contract`. Foojay provisions JDK 21. The distribution is `server/build/install/server/`; there is no fat JAR. Migration tests require Docker in CI and visibly skip locally when it is unavailable; route and configuration tests need no database. Both CI workflows pin `DASHBUDDY_CONTRACT_SHA` to `3275ad6b6dad827155d1b4cf8b33fbcef8bc64d0` and use the contract checkout at that revision.
+An alternate checkout uses `-PcensusContractPath=/absolute/path/to/census-contract`. Foojay provisions JDK 21. The distribution is `server/build/install/server/`; there is no fat JAR. Migration tests require Docker in CI and visibly skip locally when it is unavailable; route and configuration tests need no database. Both CI workflows pin `DASHBUDDY_CONTRACT_SHA` to `75923ccc864c79c9b69477624bf27e2e1016696f` and use the contract checkout at that revision.
 
 Versions were pinned offline on 2026-10-01. Gradle, Kotlin, serialization, Ktor, Exposed, and the other catalog versions need validation together on the first build. Bump exact pins if necessary; do not replace them with ranges. The absent sibling contract also means `hashDomain` uses the explicit `census.v1` TODO fallback until its API is inspected.
 
