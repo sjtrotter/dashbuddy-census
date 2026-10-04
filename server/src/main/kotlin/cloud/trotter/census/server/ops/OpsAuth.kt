@@ -200,6 +200,9 @@ private fun decodedOpsSegments(path: String): List<String>? {
 }
 
 private fun isDraftFormPath(path: String, pureOnly: Boolean = false): Boolean {
+    // The TOTP exemption must be no wider than the route: Ktor keeps a terminal empty segment (no IgnoreTrailingSlash is
+    // installed), so `…/draft/preview/` routes to the 404 fallback and must NOT be classified pure (Astra, round 3).
+    if (pureOnly && path.endsWith("/")) return false
     val segments = decodedOpsSegments(path) ?: return false
     return segments.size in 3..4 && segments[0] == "clusters" && fingerprintPattern.matches(segments[1]) &&
         segments[2] == "draft" && (if (segments.size == 4) segments[3] in setOf("preview", "shape") else !pureOnly)

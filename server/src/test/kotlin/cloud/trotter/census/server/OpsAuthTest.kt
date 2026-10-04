@@ -132,8 +132,9 @@ class OpsAuthTest {
     @Test
     fun `only normalized decoded pure draft paths bypass TOTP`() {
         for (suffix in listOf("preview", "shape", "%70review")) assertTrue(isPureDraftPath("$path/$suffix"))
-        for (p in listOf("$path/preview/", "$path//preview", "$path/preview".replace("/ops/", "/ops//"))) assertTrue(isPureDraftPath(p))
-        for (p in listOf(path, "$path/preview/extra", path.replace("a".repeat(64), "invalid") + "/preview")) assertFalse(isPureDraftPath(p))
+        for (p in listOf("$path//preview", "$path/preview".replace("/ops/", "/ops//"))) assertTrue(isPureDraftPath(p))
+        // A trailing slash routes to the 404 fallback (no IgnoreTrailingSlash), so it must not be TOTP-exempt either.
+        for (p in listOf(path, "$path/preview/", "$path/preview/extra", path.replace("a".repeat(64), "invalid") + "/preview")) assertFalse(isPureDraftPath(p))
         assertFalse(isPureDraftPath("/ops/%QQ"))
         for (p in listOf("$path%2Fpreview", "$path%2fshape", "$path/preview".replace("/clusters/", "/clusters%2F"))) {
             assertFalse(isPureDraftPath(p), p)
