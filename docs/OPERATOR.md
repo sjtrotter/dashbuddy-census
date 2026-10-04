@@ -231,12 +231,14 @@ and `shipped` export remain M4/#641.
 
 ## Classify & draft
 
-Open **Classify & draft** on a cluster detail page. This is a server-rendered form with no Two saves exist on a cluster that has a trusted capture: **Save classification only** records the screen class (and notes) with no draft and no intent — the right action for a `noise` or `sensitive` screen — while **Save draft** runs the generator and needs an intent, at least one anchor and the shape's required fields.
+Open **Classify & draft** on a cluster detail page. This is a server-rendered form with no
 JavaScript and the same restrictive CSP as the dashboard. With no currently trusted,
 unrevoked paired capture, it offers classification and notes only. Saving classification
 alone leaves the cluster status and any saved draft unchanged; “unknown” clears the class.
 Cluster cards show the class beside status; the dashboard summary and review header show
 counts by class, including unclassified clusters.
+
+Two saves exist on a cluster that has a trusted capture: **Save classification only** records the screen class (and notes) with no draft and no intent — the right action for a `noise` or `sensitive` screen — while **Save draft** runs the generator and needs an intent, at least one anchor and the shape's required fields.
 
 With an eligible capture, the page numbers the drawn wireframe boxes. Choose a screen class,
 shape, intent and priority, then mark anchors, fields, binds and redactions by those numbers.

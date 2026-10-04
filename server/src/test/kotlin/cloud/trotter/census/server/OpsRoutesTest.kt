@@ -803,12 +803,15 @@ class OpsRoutesTest {
                 assertEquals("Saved notes", requireNotNull(ops.cluster(fp)).notes)
                 // Classification is operator knowledge: with a trusted capture on the page, "Save classification only" must
                 // record the class with NO intent (the dev's first field use: a blank placeholder frame classified as noise).
+                // The earlier draft save in this flow must be untouched by a classification-only save: read it BEFORE.
+                val draftBefore = requireNotNull(ops.draftJson5(fp))
+                val statusBefore = requireNotNull(ops.cluster(fp)).status
                 instant = instant.plusSeconds(30)
                 assertEquals(303, submit("draft", fields + mapOf("mode" to "classify", "screenClass" to "noise", "intent" to ""),
                     Totp.code(totpSecret, instant.epochSecond)).status.value)
-                // The earlier draft save in this flow is untouched by a classification-only save.
-                val draftBefore = ops.draftJson5(fp)
-                requireNotNull(ops.cluster(fp)).let { classified -> assertEquals("noise", classified.screenClass) }
+                requireNotNull(ops.cluster(fp)).let { classified ->
+                    assertEquals("noise", classified.screenClass); assertEquals(statusBefore, classified.status)
+                }
                 assertEquals(draftBefore, ops.draftJson5(fp))
                 instant = instant.plusSeconds(30)
                 assertEquals(303, submit("draft", fields + ("notes" to ""), Totp.code(totpSecret, instant.epochSecond)).status.value)

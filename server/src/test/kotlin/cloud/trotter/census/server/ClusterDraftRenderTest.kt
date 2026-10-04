@@ -220,8 +220,10 @@ class ClusterDraftRenderTest {
     @Test
     fun `a capture-bearing page offers classification-only and draft saves and hints at it on a blank intent`() {
         val page = render()
-        assertTrue(page.contains("name=\"mode\" value=\"classify\""))
-        assertTrue(page.contains("Save classification only")); assertTrue(page.contains("Save draft"))
+        assertTrue(Regex("<button[^>]*name=\"mode\"[^>]*value=\"classify\"[^>]*formnovalidate[^>]*>Save classification only</button>").containsMatchIn(page)
+            || Regex("<button[^>]*formnovalidate[^>]*name=\"mode\"[^>]*value=\"classify\"[^>]*>Save classification only</button>").containsMatchIn(page))
+        assertFalse(page.contains("<input type=\"hidden\" name=\"mode\""))
+        assertTrue(page.contains("Save draft"))
         assertFalse(page.contains("To record the screen class without drafting"))
         val envelope = envelope(1)
         val nodes = EnvelopeWalk.walk(envelope.getValue("payload").jsonObject)
