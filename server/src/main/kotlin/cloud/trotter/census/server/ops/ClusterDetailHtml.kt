@@ -42,6 +42,8 @@ object ClusterDetailHtml {
                 attributes["aria-labelledby"] = "cluster-heading"
                 h1 { id = "cluster-heading"; +"Cluster detail" }
                 statusChip(cluster.status)
+                cluster.screenClass?.let { chip(safe(it), "neutral") }
+                cluster.draftDay?.let { day -> p { +"Draft saved "; date(day) } }
                 clusterFacts(cluster, detail = true)
                 p("notice") { +visibility(cluster, k) }
             }
@@ -118,6 +120,8 @@ object ClusterDetailHtml {
                 }
             }
             if (fingerprintPattern.matches(cluster.fingerprint)) {
+                a(href = "/ops/clusters/${cluster.fingerprint}/draft", classes = "action") { +"Classify & draft" }
+                if (cluster.hasDraft) a(href = "/ops/clusters/${cluster.fingerprint}/draft.json5", classes = "action") { +"Draft (JSON5)" }
                 a(href = "/ops/clusters/${cluster.fingerprint}", classes = "action") { +"Cluster JSON" }
             }
         }

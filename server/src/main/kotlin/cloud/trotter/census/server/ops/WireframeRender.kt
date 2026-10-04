@@ -1,5 +1,6 @@
 package cloud.trotter.census.server.ops
 
+import cloud.trotter.census.contract.authoring.WalkedNode
 import cloud.trotter.census.server.ingest.parseBounded
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -12,6 +13,7 @@ import kotlin.math.round
 data class WireBox(
     val leftPct: Double, val topPct: Double, val widthPct: Double, val heightPct: Double, val depth: Int,
     val label: String?, val className: String?, val viewId: String?, val clickable: Boolean,
+    val path: List<Int> = emptyList(),
 )
 
 data class RenderedWireframe(
@@ -73,6 +75,32 @@ object WireframeRender {
             receivedDay, installPrefix, (envelope["metadata"] as? JsonObject)?.string("platformAppVersion"),
             frame.width.toInt(), frame.height.toInt(), boxes, visited, skipped, frameFallback = !validFrame,
         )
+    }
+
+    /** Authoring uses exactly the contract walk for both badge identity and geometry. */
+    fun render(envelope: JsonObject, nodes: List<WalkedNode>, receivedDay: String, installPrefix: String): RenderedWireframe? {
+        val root = envelope["payload"] as? JsonObject ?: return null
+        val bounds = root.bounds()
+        val validFrame = bounds != null && bounds.width in 1..16_384L && bounds.height in 1..16_384L &&
+            minOf(bounds.width, bounds.height) * 8 >= maxOf(bounds.width, bounds.height)
+        val frame = if (validFrame) requireNotNull(bounds) else Bounds(0, 0, 1080, 2400)
+        val boxes = nodes.mapNotNull { node ->
+            val b = node.bounds ?: return@mapNotNull null
+            val left = maxOf(b.left.toLong(), frame.left)
+            val top = maxOf(b.top.toLong(), frame.top)
+            val right = minOf(b.right.toLong(), frame.right)
+            val bottom = minOf(b.bottom.toLong(), frame.bottom)
+            if (!node.visible || right <= left || bottom <= top) return@mapNotNull null
+            WireBox(percent(left - frame.left, frame.width), percent(top - frame.top, frame.height),
+                percent(right - left, frame.width), percent(bottom - top, frame.height), node.path.size,
+                listOf(node.text, node.desc, node.hint, node.pane).firstOrNull { !it.isNullOrBlank() }
+                    ?.let { cut(safe(it), 120) },
+                node.className?.let { cut(safe(it).substringAfterLast('.'), 64) },
+                node.viewId?.let { cut(safe(it).substringAfter(":id/"), 64) }, node.clickable, node.path)
+        }
+        return RenderedWireframe(receivedDay, installPrefix,
+            (envelope["metadata"] as? JsonObject)?.string("platformAppVersion"), frame.width.toInt(), frame.height.toInt(),
+            boxes, nodes.size, nodes.size - boxes.size, frameFallback = !validFrame)
     }
 
     private data class Bounds(val left: Long, val top: Long, val right: Long, val bottom: Long) {

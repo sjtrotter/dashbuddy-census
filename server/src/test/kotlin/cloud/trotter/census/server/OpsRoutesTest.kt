@@ -691,6 +691,152 @@ class OpsRoutesTest {
         }
     }
 
+    @Test
+    fun `draft forms pin trusted capture preserve state save and serve exact bytes after revocation`() {
+        Database.connect(config()).use { db ->
+            val installs = InstallStore(db, clock)
+            val ops = OpsStore(db, clock, Policy())
+            val id = UUID.randomUUID()
+            val key = secret(85)
+            val sample = fixture("Drafting", "Ready now", platform = "uber")
+            val fp = sample.item.fingerprint
+            testApplication {
+                application { module(config().copy(operatorTotpSecret = totpSecret), db, clock) }
+                installs.enrol(id, hashSecret(key), "1.0.0")
+                ops.trust(id, true)
+                SkeletonStore(db, clock).ingest(id, hashSecret(key), day, listOf(sample), 0, emptyMap(), "draft-skeleton", 100, BudgetPolicy())
+                val path = "/ops/clusters/$fp"
+                val unchanged = client.ops(path).bodyAsText()
+                assertFalse(unchanged.contains("screenClass")); assertFalse(unchanged.contains("hasDraft"))
+                val raw = requireNotNull(javaClass.getResource("/fixtures/phone-envelope-uber-home.json")).readText()
+                val capture = JsonObject(Json.parseToJsonElement(raw).jsonObject + ("fingerprint" to JsonPrimitive(fp)))
+                assertEquals(200, client.signed(clock, id.toString(), key, HttpMethod.Post, "/v1/envelopes",
+                    """{"batchId":"draft-capture","items":[$capture]}""").status.value)
+                assertEquals(unchanged, client.ops(path).bodyAsText())
+                val pinned = requireNotNull(ops.pinnedEnvelope(fp))
+                val envelope = Json.parseToJsonElement(pinned.bytes).jsonObject
+                val walked = cloud.trotter.census.contract.authoring.EnvelopeWalk.walk(envelope.getValue("payload").jsonObject)
+                val frame = requireNotNull(cloud.trotter.census.server.ops.WireframeRender.render(envelope, walked, pinned.receivedDay, pinned.installPrefix))
+                val rows = cloud.trotter.census.server.ops.DraftForm.rows(walked, frame)
+                val anchor = rows.first { it.node.idSuffix == "glide_bottom_nav_home" }.number
+                val page = client.ops("$path/draft")
+                assertEquals(200, page.status.value)
+                val html = page.bodyAsText()
+                assertTrue(html.contains("class=\"wire-n\"")); assertTrue(html.contains("Required fields"))
+                assertTrue(Regex("name=\"role_[0-9]+\"").findAll(html).count() <= 150)
+                assertPrivate(html)
+                assertEquals(404, client.ops("$path/draft.json5").status.value)
+                val browser = createClient { followRedirects = false }
+                val fields = linkedMapOf("envelopeId" to pinned.id.toString(), "envelopePin" to pinned.pin,
+                    "screenClass" to "idle", "shape" to "idle", "intent" to "home", "priority" to "501",
+                    "modeHint" to "online", "offerSurface" to "", "comment" to "Review & verify", "notes" to "Saved notes",
+                    "constName_1" to "startingSession", "constValue_1" to "true", "role_$anchor" to "anchor",
+                    "field2_$anchor" to "zoneName", "stripPrefix_$anchor" to "Home")
+                suspend fun submit(suffix: String, values: Map<String, String> = fields, code: String? = null, headerCode: String? = null): HttpResponse = browser.post("$path/$suffix") {
+                    header(HttpHeaders.Authorization, "Bearer $operatorToken")
+                    if (headerCode != null) header("X-Census-Totp", headerCode)
+                    contentType(ContentType.Application.FormUrlEncoded)
+                    setBody((values + if (code == null) emptyMap() else mapOf("totp" to code)).toList().formUrlEncode())
+                }
+                val shape = submit("draft/shape", fields + ("shape" to "task"))
+                assertEquals(200, shape.status.value)
+                val shapeHtml = shape.bodyAsText()
+                assertTrue(shapeHtml.contains("customerNameHash")); assertTrue(shapeHtml.contains("Saved notes"))
+                assertTrue(shapeHtml.contains("Review &amp; verify")); assertTrue(shapeHtml.contains("value=\"Home\""))
+                assertTrue(shapeHtml.contains("value=\"zoneName\" selected"))
+                assertPrivate(shapeHtml)
+                val preview = submit("draft/preview")
+                assertEquals(200, preview.status.value)
+                val previewHtml = preview.bodyAsText()
+                assertTrue(previewHtml.contains("<pre class=\"draft\">"))
+                assertPrivate(previewHtml)
+                val previewBytes = previewHtml.substringAfter("<pre class=\"draft\">").substringBefore("</pre>")
+                    .replace("&quot;", "\"").replace("&#39;", "'").replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+                val invalid = fields - "role_$anchor"
+                val refused = submit("draft/preview", invalid)
+                assertEquals(200, refused.status.value); assertTrue(refused.bodyAsText().contains("at least one anchor")); assertPrivate(refused.bodyAsText())
+                assertError(submit("draft"), 401, "totp_required")
+                val firstCode = Totp.code(totpSecret, instant.epochSecond)
+                val refusedSave = submit("draft", invalid, firstCode)
+                assertEquals(422, refusedSave.status.value); assertPrivate(refusedSave.bodyAsText())
+                assertNull(ops.draftJson5(fp)); assertEquals("new", requireNotNull(ops.cluster(fp)).status)
+                instant = instant.plusSeconds(30)
+                val code = Totp.code(totpSecret, instant.epochSecond)
+                assertEquals(400, submit("draft", code = code, headerCode = code).status.value)
+                val saved = submit("draft", code = code)
+                assertEquals(303, saved.status.value)
+                assertEquals("$path/view", saved.headers[HttpHeaders.Location])
+                assertError(submit("draft", code = code), 401, "totp_replayed")
+                assertEquals(previewBytes, ops.draftJson5(fp))
+                val download = client.ops("$path/draft.json5")
+                assertEquals(ContentType.Text.Plain, download.contentType()?.withoutParameters())
+                assertEquals(previewBytes, download.bodyAsText())
+                val detail = Json.parseToJsonElement(client.ops(path).bodyAsText()).jsonObject
+                assertEquals("drafted", detail.getValue("status").jsonPrimitive.content)
+                assertEquals("idle", detail.getValue("screenClass").jsonPrimitive.content)
+                assertTrue(detail.getValue("hasDraft").jsonPrimitive.boolean)
+                for (privateKey in listOf("draft", "selections", "envelopeId", "envelopeSha256", "json5")) assertFalse(privateKey in detail)
+                sql { connection -> connection.prepareStatement("SELECT screen_class, draft, draft_day FROM clusters WHERE fingerprint = ?").use { statement ->
+                    statement.setString(1, fp)
+                    statement.executeQuery().use { rs ->
+                        assertTrue(rs.next()); assertEquals("idle", rs.getString(1)); assertEquals(day.toString(), rs.getString(3))
+                        val draft = Json.parseToJsonElement(rs.getString(2)).jsonObject
+                        assertEquals(previewBytes, draft.getValue("json5").jsonPrimitive.content)
+                        assertEquals(pinned.sha256Hex, draft.getValue("envelopeSha256").jsonPrimitive.content)
+                        assertFalse(draft.toString().contains("totp"))
+                    }
+                } }
+                val detailHtml = client.ops("$path/view").bodyAsText()
+                assertTrue(detailHtml.contains("Draft saved")); assertTrue(detailHtml.contains("Draft (JSON5)")); assertPrivate(detailHtml)
+                val stale = submit("draft/preview", fields + ("envelopePin" to "0000-0000-0000-0000"))
+                assertEquals(409, stale.status.value); assertTrue(stale.bodyAsText().contains("This capture changed — reload")); assertPrivate(stale.bodyAsText())
+                // A later capture must not silently change which node the pinned form selects.
+                val accepted = EnvelopeValidator.validate(capture, Policy()) as EnvelopeVerdict.Accepted
+                EnvelopeStore(db, clock).ingest(id, hashSecret(key), day, listOf(accepted), emptyMap(), "draft-later", 100, BudgetPolicy(), 30)
+                assertEquals(200, submit("draft/preview").status.value)
+                assertEquals(pinned.id, requireNotNull(ops.pinnedEnvelope(fp, pinned.id)).id)
+                assertTrue(ops.revoke(id))
+                val revoked = client.ops("$path/draft").bodyAsText()
+                assertTrue(revoked.contains("A trusted capture is needed to draft")); assertFalse(revoked.contains("Preview draft")); assertPrivate(revoked)
+                assertEquals(409, submit("draft/preview").status.value)
+                assertEquals(previewBytes, client.ops("$path/draft.json5").bodyAsText())
+                instant = instant.plusSeconds(30)
+                assertEquals(303, submit("draft", mapOf("mode" to "classify", "screenClass" to "noise", "notes" to "Classification only"), Totp.code(totpSecret, instant.epochSecond)).status.value)
+                assertEquals("drafted", requireNotNull(ops.cluster(fp)).status)
+                assertEquals(previewBytes, ops.draftJson5(fp))
+            }
+        }
+    }
+
+    @Test
+    fun `withdrawal and envelope retention clear classification and draft in their delete transaction`() {
+        Database.connect(config()).use { db ->
+            val installs = InstallStore(db, clock)
+            val ops = OpsStore(db, clock, Policy())
+            testApplication {
+                application { module(config(), db, clock) }
+                for ((index, withdraw) in listOf(true, false).withIndex()) {
+                    val id = UUID.randomUUID()
+                    val keyHash = hashSecret(secret(90 + index))
+                    installs.enrol(id, keyHash, "1.0.0"); ops.trust(id, true)
+                    val sample = fixture("Cleanup$index", "Ready")
+                    SkeletonStore(db, clock).ingest(id, keyHash, day, listOf(sample), 0, emptyMap(), "cleanup-skeleton-$index", 100, BudgetPolicy())
+                    val fp = sample.item.fingerprint
+                    val raw = JsonObject(envelopeFixture() + ("fingerprint" to JsonPrimitive(fp)))
+                    EnvelopeStore(db, clock).ingest(id, keyHash, day, listOf(EnvelopeValidator.validate(raw, Policy()) as EnvelopeVerdict.Accepted), emptyMap(), "cleanup-envelope-$index", 100, BudgetPolicy(), 30)
+                    val capture = requireNotNull(ops.pinnedEnvelope(fp))
+                    val selections = kotlinx.serialization.json.buildJsonObject {
+                        put("envelopeId", JsonPrimitive(capture.id)); put("envelopeSha256", JsonPrimitive(capture.sha256Hex))
+                    }
+                    assertTrue(ops.saveDraft(fp, "idle", selections, "stored artefact", day))
+                    if (withdraw) installs.withdraw(id, keyHash) else assertEquals(1, installs.purgeTrustedEnvelopes(day.plusDays(31)))
+                    val cluster = requireNotNull(ops.cluster(fp))
+                    assertNull(cluster.screenClass); assertFalse(cluster.hasDraft); assertNull(cluster.draftDay); assertNull(ops.draftJson5(fp))
+                }
+            }
+        }
+    }
+
     private suspend fun HttpClient.mutate(path: String, body: String): HttpResponse {
         instant = instant.plusSeconds(30)
         return ops(path, body, code = Totp.code(totpSecret, instant.epochSecond))

@@ -20,6 +20,8 @@ For recovery, use a fresh PostgreSQL volume/database, start only `postgres`, and
 
 ```sql
 BEGIN;
+UPDATE clusters SET screen_class = NULL, draft = NULL, draft_day = NULL
+WHERE fingerprint IN (SELECT fingerprint FROM trusted_envelopes WHERE install_id = '<uuid>');
 DELETE FROM trusted_envelopes WHERE install_id = '<uuid>';
 DELETE FROM health_daily      WHERE install_id = '<uuid>';
 DELETE FROM token_sightings   WHERE install_id = '<uuid>';
@@ -226,3 +228,58 @@ most 128 characters. Resolution proves `CensusHash.of(clearText) == tokenHash`; 
 422 `hash_mismatch`. Rejection stores NULL clear text. Resolution requires current non-trusted
 k eligibility, and never overwrites an existing vocabulary row. Queue promotion/nightly work
 and `shipped` export remain M4/#641.
+
+## Classify & draft
+
+Open **Classify & draft** on a cluster detail page. This is a server-rendered form with no
+JavaScript and the same restrictive CSP as the dashboard. With no currently trusted,
+unrevoked paired capture, it offers classification and notes only. Saving classification
+alone leaves the cluster status and any saved draft unchanged; “unknown” clears the class.
+
+With an eligible capture, the page numbers the drawn wireframe boxes. Choose a screen class,
+shape, intent and priority, then mark anchors, fields, binds and redactions by those numbers.
+Each field row has a second field slot and an optional strip prefix (up to 40 characters),
+so one label can supply two fields and a fused label can have its fixed prefix removed.
+Both field slots share the row's transform and prefix. Up to four typed constants are
+available; only plain boolean, integer and string fields of the chosen shape qualify.
+The required-field checklist also includes the shape's one-of requirements.
+
+**Apply shape** refreshes the available fields and preserves the other controls, including
+choices that need correction for the new shape. **Preview draft** shows either generator
+refusals or JSON5 and warnings. Both operations are pure and require authentication and
+rate admission, but no TOTP. **Save** requires a fresh six-digit code in its TOTP field.
+The field shares replay protection with login and the header-based API; sending a code
+in both places is refused. Codes are never echoed on a re-rendered page. A successful save
+redirects to cluster detail, which offers **Draft (JSON5)**.
+
+The form pins its capture using a private row reference and the first sixteen hexadecimal
+digits of the stored bytes' digest, grouped into four short groups in the hidden pin value.
+The server reloads that exact row and checks its pin, trust and revocation before preview
+or save. A newer upload does not replace an open form's capture. A stale or ineligible
+capture produces “This capture changed — reload”. Node selections resolve through the
+contract walk's child-index paths, never through labels or display numbers alone.
+
+Forms are bounded to 64 KiB, 1,000 unique parameters and 2,000 characters per value. At most
+150 eligible drawn nodes appear in the table, with a remainder count; six controls per row
+keep a full form below the parameter limit. At most 64 active assignments are allowed,
+counting both field slots and constants separately. All processing stays on the server.
+
+Each cluster has one replaceable draft. Successful generation and save atomically set the
+classification, selections, JSON5, private capture provenance, save day and `drafted` status;
+the resolved rule stays unchanged. Notes use the existing gated notes column. Refusals
+store nothing. Download serves the stored JSON5 bytes exactly as previewed. JSON cluster
+responses never contain drafts, selections or capture provenance; classification and draft
+presence are the only new public DTO fields. Empty defaults remain omitted, preserving the
+previous response for an unclassified cluster without a draft.
+
+A saved draft is an operator-owned artefact: it remains downloadable after install
+revocation or removal of trust, even though the drafting page becomes classify-only when
+no eligible capture remains. Install withdrawal and envelope retention clear classification,
+draft and save day in the same transaction as deletion of the affected capture rows.
+
+Drafts quote trusted-capture text and remain operator-only. Display strings are masked and
+HTML-escaped, hidden pins are abbreviated and grouped, and form actions are relative.
+The generator refuses weak anchors; the server also refuses generated output containing
+identifiers that would violate the page's privacy rules, keeping preview and download bytes
+identical. A draft does not prove recognition safety: **the APP test suite is the gate**,
+including compilation and positive/negative corpus checks. The server only drafts.

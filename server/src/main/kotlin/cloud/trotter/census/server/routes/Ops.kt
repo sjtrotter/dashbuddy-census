@@ -13,6 +13,7 @@ import cloud.trotter.census.server.ingest.WireGrammars
 import cloud.trotter.census.server.ingest.parseBounded
 import cloud.trotter.census.server.jobs.HealthAlarms
 import cloud.trotter.census.server.ops.LoginHtml
+import cloud.trotter.census.server.ops.OpsForm
 import cloud.trotter.census.server.ops.OpsAuth
 import cloud.trotter.census.server.ops.OpsSessions
 import cloud.trotter.census.server.ops.TotpDecision
@@ -24,7 +25,6 @@ import io.ktor.http.ContentType
 import io.ktor.http.Cookie
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
-import io.ktor.http.parseUrlEncodedParameters
 import io.ktor.server.application.ApplicationCall
 import io.ktor.server.application.install
 import io.ktor.server.plugins.BadRequestException
@@ -78,14 +78,9 @@ fun Route.opsRoutes(
         }
         post("/login") {
             call.loginHeaders()
-            val bytes = call.readLimitedBody() ?: return@post
-            if (bytes.size > 4096 || call.request.contentType().withoutParameters() != ContentType.Application.FormUrlEncoded) badRequest()
-            // application/x-www-form-urlencoded: a browser sends a space as `+` (a literal plus arrives as %2B), and
-            // Ktor's parser keeps `+` literal — translate it BEFORE percent-decoding so a token that authenticates
-            // as a bearer also authenticates through the form (review, Astra).
-            val fields = try {
-                bytes.toString(Charsets.UTF_8).replace('+', ' ').parseUrlEncodedParameters()
-            } catch (_: IllegalArgumentException) { badRequest() }
+            if (call.request.contentType().withoutParameters() != ContentType.Application.FormUrlEncoded) badRequest()
+            val fields = call.attributes.getOrNull(OpsForm) ?: badRequest()
+            if (fields.entries().sumOf { (key, values) -> key.length + values.sumOf { it.length } } > 4096) badRequest()
             val token = fields["token"] ?: badRequest()
             val code = fields["code"] ?: badRequest()
             if (token.length > MAX_TOKEN_LENGTH || !Regex("[0-9]{6}").matches(code)) badRequest()
@@ -140,6 +135,7 @@ fun Route.opsRoutes(
                 call.mutation(store.trust(call.installId(), request.trusted))
             }
             post("/installs/{uuid}/revoke") {
+                if (call.attributes.contains(OpsForm)) badRequest()
                 val bytes = call.readLimitedBody() ?: return@post
                 // This action has no body. If one is supplied it must still pass the bounded parser, then be refused.
                 if (bytes.isNotEmpty()) { parseBounded(bytes); badRequest() }
@@ -211,6 +207,8 @@ private suspend fun ApplicationCall.mutation(found: Boolean) {
     if (found) respond(HttpStatusCode.NoContent) else respond(HttpStatusCode.NotFound, ErrorResponse("not_found"))
 }
 private suspend inline fun <reified T> ApplicationCall.opsBody(): T? {
+    // Form bodies have already been consumed by OpsAuth; JSON endpoints do not reinterpret them.
+    if (attributes.contains(OpsForm)) badRequest()
     val bytes = readLimitedBody() ?: return null
     val element = parseBounded(bytes) ?: badRequest()
     return try { opsJson.decodeFromJsonElement(kotlinx.serialization.serializer<T>(), element) } catch (_: SerializationException) { badRequest() }

@@ -210,7 +210,7 @@ class ClusterDetailRenderTest {
         assertFalse(page.contains("<script"))
         assertTrue(page.contains("1.2.3+[build withheld]"))
         assertTrue(page.contains("name=\"color-scheme\" content=\"dark light\""))
-        val withoutLinks = page.replace(Regex("href=\"/ops/clusters/[0-9a-f]{64}\""), "")
+        val withoutLinks = page.replace(Regex("href=\"/ops/clusters/[0-9a-f]{64}(?:/draft|/draft\\.json5)?\""), "")
         assertFalse(Regex("(?i)[0-9a-f]{16}").containsMatchIn(withoutLinks))
         assertFalse(Regex("(?i)[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}").containsMatchIn(page))
     }

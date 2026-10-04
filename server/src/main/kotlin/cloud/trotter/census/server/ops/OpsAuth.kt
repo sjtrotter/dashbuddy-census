@@ -3,22 +3,38 @@ package cloud.trotter.census.server.ops
 import cloud.trotter.census.server.Clock
 import cloud.trotter.census.server.Config
 import cloud.trotter.census.server.ErrorResponse
+import cloud.trotter.census.server.Policy
 import cloud.trotter.census.server.SystemClock
+import cloud.trotter.census.server.auth.BODY_READ_TIMEOUT_MS
+import cloud.trotter.census.server.auth.BoundedRead
 import cloud.trotter.census.server.auth.hashSecret
+import cloud.trotter.census.server.auth.readBounded
+import cloud.trotter.census.server.today
+import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
+import io.ktor.http.Parameters
+import io.ktor.http.ParametersBuilder
 import io.ktor.http.URLDecodeException
 import io.ktor.http.decodeURLPart
+import io.ktor.server.application.ApplicationCall
 import io.ktor.server.application.createApplicationPlugin
 import io.ktor.server.application.createRouteScopedPlugin
 import io.ktor.server.application.hooks.ResponseSent
 import io.ktor.server.application.isHandled
+import io.ktor.server.plugins.BadRequestException
+import io.ktor.server.request.contentType
 import io.ktor.server.request.httpMethod
 import io.ktor.server.request.path
+import io.ktor.server.request.receiveChannel
 import io.ktor.server.response.respond
-import org.slf4j.LoggerFactory
+import io.ktor.server.response.respondText
+import io.ktor.util.AttributeKey
 import java.security.MessageDigest
+import org.slf4j.LoggerFactory
+
+val OpsForm = AttributeKey<Parameters>("OpsForm")
 
 class OpsAuthConfig {
     var config: Config? = null
@@ -45,7 +61,13 @@ val OpsAuth = createRouteScopedPlugin("OpsAuth", ::OpsAuthConfig) {
         }
         val path = call.request.path()
         val method = call.request.httpMethod
-        if (path == "/ops/login" && method in setOf(HttpMethod.Get, HttpMethod.Post)) return@onCall
+        // Login consumes the same bounded form, but authenticates its own token before TOTP.
+        if (path == "/ops/login" && method in setOf(HttpMethod.Get, HttpMethod.Post)) {
+            if (method == HttpMethod.Post && call.request.contentType().withoutParameters() == ContentType.Application.FormUrlEncoded) {
+                if (!call.readOpsForm()) return@onCall
+            }
+            return@onCall
+        }
         val header = call.request.headers[HttpHeaders.Authorization]
         val token = header?.takeIf { it.startsWith("Bearer ", ignoreCase = true) }?.substring(7)
         // An explicit bad Authorization header must never fall back to a session cookie.
@@ -67,13 +89,28 @@ val OpsAuth = createRouteScopedPlugin("OpsAuth", ::OpsAuthConfig) {
         }
         // Everything an authenticated operator reads may now render in a browser: never cache it past logout.
         call.response.headers.append(HttpHeaders.CacheControl, "no-store")
+        if (method == HttpMethod.Post && call.request.contentType().withoutParameters() == ContentType.Application.FormUrlEncoded) {
+            if (!call.readOpsForm()) return@onCall
+        }
+        val form = call.attributes.getOrNull(OpsForm)
+        val headerCode = call.request.headers["X-Census-Totp"]
+        if (headerCode != null && form?.contains("totp") == true) {
+            if (isOpsHtmlPath(path)) {
+                call.response.headers.append("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'")
+                call.respondText(opsPage(headerContent = { metadata(config.serverVersion, Policy().k, clock.today().toString()) }) {
+                    emptyState("totp_conflict")
+                }, ContentType.Text.Html, HttpStatusCode.BadRequest)
+            } else call.respond(HttpStatusCode.BadRequest, ErrorResponse("totp_conflict"))
+            return@onCall
+        }
+        if (method == HttpMethod.Post && isPureDraftPath(path)) return@onCall
         if (method.value !in setOf("GET", "HEAD", "OPTIONS") && !(path == "/ops/logout" && method == HttpMethod.Post)) {
             val secret = config.operatorTotpSecret
             if (secret == null) {
                 call.respond(HttpStatusCode.ServiceUnavailable, ErrorResponse("totp_unconfigured"))
                 return@onCall
             }
-            when (replay.verify(secret, call.request.headers["X-Census-Totp"], clock.now())) {
+            when (replay.verify(secret, headerCode ?: form?.get("totp"), clock.now())) {
                 TotpDecision.Accepted -> Unit
                 TotpDecision.Required -> call.respond(HttpStatusCode.Unauthorized, ErrorResponse("totp_required"))
                 TotpDecision.Replayed -> call.respond(HttpStatusCode.Unauthorized, ErrorResponse("totp_replayed"))
@@ -104,7 +141,8 @@ internal fun isOpsHtmlPath(path: String): Boolean {
     }
     return segments.isEmpty() ||
         (segments.size == 2 && segments[0] == "clusters" && segments[1] == "view") ||
-        (segments.size == 3 && segments[0] == "clusters" && segments[2] == "view")
+        (segments.size == 3 && segments[0] == "clusters" && segments[2] in setOf("view", "draft")) ||
+        (segments.size == 4 && segments[0] == "clusters" && segments[2] == "draft" && segments[3] in setOf("preview", "shape"))
 }
 
 /** Unknown first segments are also suppressed: an arbitrary path segment can itself be a credential. */
@@ -149,4 +187,37 @@ class OpsBucket(private val capacity: Int = 60, private val perMinute: Int = 60)
         milliTokens -= 1_000L
         return true
     }
+}
+
+/** Only the exact decoded paths are pure; extra/empty segments and other verbs retain TOTP. */
+internal fun isPureDraftPath(path: String): Boolean = try {
+    Regex("^/ops/clusters/[0-9a-f]{64}/draft/(preview|shape)$").matches(path.decodeURLPart())
+} catch (_: URLDecodeException) { false }
+
+/** Explicit bounds, including duplicates after decoding. Unknown fields still consume the parser budget. */
+internal fun parseOpsForm(body: String): Parameters {
+    val fields = if (body.isEmpty()) emptyList() else body.split('&')
+    if (fields.size > 1000) throw BadRequestException("Invalid operator form")
+    val builder = ParametersBuilder()
+    for (field in fields) {
+        val key: String
+        val value: String
+        try {
+            key = field.substringBefore('=').replace('+', ' ').decodeURLPart()
+            value = field.substringAfter('=', "").replace('+', ' ').decodeURLPart()
+        } catch (_: URLDecodeException) { throw BadRequestException("Invalid operator form") }
+        catch (_: IllegalArgumentException) { throw BadRequestException("Invalid operator form") }
+        if (value.length > 2000 || builder.contains(key)) throw BadRequestException("Invalid operator form")
+        builder.append(key, value)
+    }
+    return builder.build()
+}
+
+private suspend fun ApplicationCall.readOpsForm(): Boolean {
+    when (val read = readBounded(receiveChannel(), 64 * 1024, BODY_READ_TIMEOUT_MS)) {
+        is BoundedRead.Ok -> attributes.put(OpsForm, parseOpsForm(read.bytes.toString(Charsets.UTF_8)))
+        BoundedRead.TooLarge -> { respond(HttpStatusCode.PayloadTooLarge, ErrorResponse("payload_too_large")); return false }
+        BoundedRead.Timeout -> { respond(HttpStatusCode.RequestTimeout, ErrorResponse("request_timeout")); return false }
+    }
+    return true
 }

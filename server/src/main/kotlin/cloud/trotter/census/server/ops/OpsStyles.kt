@@ -115,6 +115,17 @@ caption { text-align:left; padding:0 0 .75rem; font-size:.875rem; }
 .wire-box.labelled { border-color:var(--accent); }
 .wire-box.clickable { border-color:var(--warn); }
 .wire-label { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.wire-n { position:absolute; top:0; left:0; padding:.1rem; background:var(--surface); color:var(--warn); font-size:.625rem; }
+.wire-box:has(.wire-n) .wire-label { padding-left:1.5rem; }
+.draft { white-space:pre-wrap; overflow-wrap:anywhere; max-height:40rem; overflow:auto; }
+.nodes { border-collapse:collapse; width:100%; font-size:.8125rem; }
+.nodes td,.nodes th { border-bottom:1px solid var(--line); padding:.3rem; vertical-align:top; text-align:left; }
+.nodes label { margin:.2rem 0; }
+.nodes select,.nodes input { max-width:16rem; }
+select,textarea { color:var(--text); background:var(--surface2); border:1px solid var(--line-strong); padding:.3rem; }
+textarea { display:block; width:100%; min-height:5rem; }
+fieldset { margin:1rem 0; border:1px solid var(--line-strong); }
+.req .chip { margin:.25rem; }
 .wire-list { font-size:.75rem; }
 .sample + .sample { border-top:1px solid var(--line); padding-top:1rem; margin-top:1rem; }
 .sample > * + * { margin-top:.5rem; }

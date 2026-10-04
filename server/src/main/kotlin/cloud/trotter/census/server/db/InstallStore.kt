@@ -135,7 +135,17 @@ class InstallStore(private val db: Database, private val clock: Clock) {
             active && sameHash(row.getString("key_hash"), expectedCurrentKeyHash)
         } ?: false
         if (!current) return@query MutationOutcome.StaleCredential
-        MutationOutcome.Applied(WITHDRAWAL_TABLES.associateWith { table -> update("DELETE FROM $table WHERE install_id = ?", installId) })
+        MutationOutcome.Applied(WITHDRAWAL_TABLES.associateWith { table ->
+            if (table == "trusted_envelopes") {
+                // Delete/lock envelopes before clusters, the same lock order as retention and draft saves.
+                select("""WITH deleted AS (
+                    DELETE FROM trusted_envelopes WHERE install_id = ? RETURNING fingerprint
+                ), cleared AS (
+                    UPDATE clusters SET screen_class = NULL, draft = NULL, draft_day = NULL
+                    WHERE fingerprint IN (SELECT fingerprint FROM deleted)
+                ) SELECT count(*) FROM deleted""", installId) { it.getInt(1) } ?: 0
+            } else update("DELETE FROM $table WHERE install_id = ?", installId)
+        })
     }
 
     suspend fun issueNonce(installId: UUID?): String = query {
@@ -171,7 +181,13 @@ class InstallStore(private val db: Database, private val clock: Clock) {
     }
 
     suspend fun purgeTrustedEnvelopes(today: LocalDate): Int = purge("envelopes") {
-        update("DELETE FROM trusted_envelopes WHERE ctid IN (SELECT ctid FROM trusted_envelopes WHERE purge_after < ? LIMIT 1000)", today)
+        select("""WITH deleted AS (
+            DELETE FROM trusted_envelopes WHERE ctid IN
+                (SELECT ctid FROM trusted_envelopes WHERE purge_after < ? LIMIT 1000) RETURNING fingerprint
+            ), cleared AS (
+                UPDATE clusters SET screen_class = NULL, draft = NULL, draft_day = NULL
+                WHERE fingerprint IN (SELECT fingerprint FROM deleted)
+            ) SELECT count(*) FROM deleted""", today) { it.getInt(1) } ?: 0
     }
 
     suspend fun purgeHealthDaily(olderThan: LocalDate): Int = purge("health") {
