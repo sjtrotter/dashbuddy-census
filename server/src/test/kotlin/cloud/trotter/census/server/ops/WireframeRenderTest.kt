@@ -146,6 +146,19 @@ class WireframeRenderTest {
     }
 
     @Test
+    fun `class and id cuts never split a surrogate pair`() {
+        val astral = "\uD801\uDC00"
+        val box = render(JsonObject(node() + mapOf(
+            "class" to JsonPrimitive("x".repeat(63) + astral),
+            "id" to JsonPrimitive("app:id/" + "y".repeat(63) + astral),
+        ))).boxes.single()
+        assertEquals("x".repeat(63), box.className)
+        assertEquals("y".repeat(63), box.viewId)
+        val kept = render(JsonObject(node() + ("class" to JsonPrimitive("x".repeat(62) + astral + "tail")))).boxes.single()
+        assertEquals("x".repeat(62) + astral, kept.className)
+    }
+
+    @Test
     fun `label truncation never splits an emoji surrogate pair`() {
         for ((input, expected) in listOf(
             "x".repeat(119) + "😀" to "x".repeat(119),

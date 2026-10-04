@@ -56,11 +56,9 @@ object WireframeRender {
                     percent(right - left, frame.width), percent(bottom - top, frame.height), depth,
                     listOf("text", "desc", "hint", "pane").firstNotNullOfOrNull { key ->
                         node.string(key)?.trim()?.takeIf { it.isNotEmpty() }
-                    }?.let { safe(it) }?.let { s ->
-                        if (s.length <= 120) s else s.take(if (Character.isHighSurrogate(s[119])) 119 else 120)
-                    },
-                    node.string("class")?.let { safe(it) }?.substringAfterLast('.')?.take(64)?.takeIf { it.isNotEmpty() },
-                    node.string("id")?.let { safe(it) }?.substringAfter(":id/")?.take(64)?.takeIf { it.isNotEmpty() },
+                    }?.let { safe(it) }?.let { cut(it, 120) },
+                    node.string("class")?.let { safe(it) }?.substringAfterLast('.')?.let { cut(it, 64) }?.takeIf { it.isNotEmpty() },
+                    node.string("id")?.let { safe(it) }?.substringAfter(":id/")?.let { cut(it, 64) }?.takeIf { it.isNotEmpty() },
                     (node["isClickable"] as? JsonPrimitive)?.let { !it.isString && it.booleanOrNull == true } == true,
                 )
             } else {
@@ -90,5 +88,9 @@ object WireframeRender {
     }
 
     private fun JsonObject.string(key: String): String? = (this[key] as? JsonPrimitive)?.takeIf { it.isString }?.content
+    /** Cut on a code-point boundary: never leave a lone high surrogate at the end (titles and the text list render it). */
+    private fun cut(s: String, max: Int): String =
+        if (s.length <= max) s else s.take(if (Character.isHighSurrogate(s[max - 1])) max - 1 else max)
+
     private fun percent(value: Long, extent: Long): Double = round(value.toDouble() / extent * 10_000) / 100
 }
