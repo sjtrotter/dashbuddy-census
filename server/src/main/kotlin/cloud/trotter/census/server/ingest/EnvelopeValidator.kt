@@ -13,7 +13,7 @@ import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.longOrNull
 
 sealed interface EnvelopeVerdict {
-    data class Accepted(val canonicalJson: String, val fingerprint: String? = null) : EnvelopeVerdict {
+    data class Accepted(val canonicalJson: String, val platform: String, val fingerprint: String? = null) : EnvelopeVerdict {
         override fun toString(): String = "Accepted(canonicalJson=[redacted])"
     }
     data class Rejected(val reason: String, val marker: String? = null) : EnvelopeVerdict
@@ -87,7 +87,8 @@ object EnvelopeValidator {
         }
         if (Json.encodeToString(JsonElement.serializer(), element).toByteArray().size > 262_144) return reject("too_large")
         val pruned = JsonObject(element + ("metadata" to JsonObject(metadata - "deviceFingerprint" - "rulesetSignature")))
-        return EnvelopeVerdict.Accepted(Json.encodeToString(JsonObject.serializer(), pruned), element.string("fingerprint"))
+        return EnvelopeVerdict.Accepted(Json.encodeToString(JsonObject.serializer(), pruned),
+            requireNotNull(element.string("platform")), element.string("fingerprint"))
     }
 
     private fun reject(reason: String): EnvelopeVerdict.Rejected = EnvelopeVerdict.Rejected(reason)

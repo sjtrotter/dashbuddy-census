@@ -633,7 +633,8 @@ class OpsRoutesTest {
             val envelopes = EnvelopeStore(db, clock)
             val id = UUID.randomUUID()
             val key = secret(84)
-            val sample = fixture("Wireframe", "Ready now")
+            // The staged phone capture is an uber envelope: pairing requires the cluster to share its platform.
+            val sample = fixture("Wireframe", "Ready now", platform = "uber")
             val fingerprint = sample.item.fingerprint
             testApplication {
                 application { module(config(), db, clock) }
@@ -656,14 +657,16 @@ class OpsRoutesTest {
                 assertEquals(1, response.getValue("accepted").jsonPrimitive.int)
                 val page = client.ops("$path/view").bodyAsText()
                 assertTrue(page.contains("class=\"wire-frame\""))
-                assertTrue(page.contains("Home"))
+                assertTrue(page.contains("class=\"wire-label\""))
+                assertTrue(page.contains("Earnings"))
                 assertFalse(page.contains(id.toString()))
                 val after = client.ops(path).bodyAsText()
                 assertEquals(before, after)
                 assertFalse(after.contains("wireframe"))
 
                 // Same-day captures use insertion order; received day takes precedence over id.
-                val latest = JsonObject(envelopeFixture() + ("fingerprint" to JsonPrimitive(fingerprint)))
+                // The fixture is a doordash envelope: pairing is platform-coherent, so it must name the cluster's platform.
+                val latest = JsonObject(envelopeFixture() + mapOf("fingerprint" to JsonPrimitive(fingerprint), "platform" to JsonPrimitive("uber")))
                 val accepted = EnvelopeValidator.validate(latest, Policy()) as EnvelopeVerdict.Accepted
                 val stored = envelopes.ingest(id, hashSecret(key), day, listOf(accepted), emptyMap(), "wire-newest", 100, BudgetPolicy(), 30) as EnvelopeOutcome.Stored
                 assertEquals(1, stored.paired)
@@ -698,10 +701,10 @@ class OpsRoutesTest {
         if (body != null) { contentType(ContentType.Application.Json); setBody(body) }
     }
 
-    private fun fixture(name: String, text: String, version: String? = "8.0"): ItemVerdict.Accepted {
+    private fun fixture(name: String, text: String, version: String? = "8.0", platform: String = "doordash"): ItemVerdict.Accepted {
         val versionField = version?.let { "\"platformAppVersion\":\"$it\"," } ?: ""
         val raw = """{"schemaId":"uinode.skeleton.v1","hashDomain":1,"filterRev":1,"fingerprint":"${"0".repeat(64)}",
-            "platform":"doordash",${versionField}"engineVersion":1,"day":"$day",
+            "platform":"$platform",${versionField}"engineVersion":1,"day":"$day",
             "root":{"class":"android.widget.$name","id":"com.example:id/$name","text":{"text":{"h":"${CensusHash.of(text)}","kind":"words:2"}}}}"""
         val decoded = SkeletonSchema.deserialize(raw)
         val canonical = SkeletonSchema.serialize(decoded.copy(fingerprint = requireNotNull(CensusFingerprint.of(decoded.root))))

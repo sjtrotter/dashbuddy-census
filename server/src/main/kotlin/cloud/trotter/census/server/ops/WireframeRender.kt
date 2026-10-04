@@ -1,6 +1,6 @@
 package cloud.trotter.census.server.ops
 
-import kotlinx.serialization.json.Json
+import cloud.trotter.census.server.ingest.parseBounded
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -17,19 +17,18 @@ data class WireBox(
 data class RenderedWireframe(
     val receivedDay: String, val installPrefix: String, val platformAppVersion: String?,
     val frameWidth: Int, val frameHeight: Int, val boxes: List<WireBox>, val nodeCount: Int, val skipped: Int,
+    val frameFallback: Boolean = false,
 )
 
 /** Pure, bounded projection of the phone's root-node payload. No envelope identifiers enter the projection. */
 object WireframeRender {
     fun render(envelopeJson: String, receivedDay: String, installPrefix: String): RenderedWireframe? {
-        val envelope = try {
-            Json.parseToJsonElement(envelopeJson) as? JsonObject
-        } catch (_: Exception) {
-            null
-        } ?: return null
+        // Each tree level has a node object and children array; allow the 64-level walk plus a small margin.
+        val envelope = parseBounded(envelopeJson.toByteArray(), maxDepth = 144) as? JsonObject ?: return null
         val root = envelope["payload"] as? JsonObject ?: return null
         val bounds = root.bounds()
-        val validFrame = bounds != null && bounds.width in 1..Int.MAX_VALUE.toLong() && bounds.height in 1..Int.MAX_VALUE.toLong()
+        val validFrame = bounds != null && bounds.width in 1..16_384L && bounds.height in 1..16_384L &&
+            minOf(bounds.width, bounds.height) * 8 >= maxOf(bounds.width, bounds.height)
         val frame = if (validFrame) requireNotNull(bounds) else Bounds(0, 0, 1080, 2400)
         val boxes = mutableListOf<WireBox>()
         // Iterator stack preserves pre-order without queuing arbitrarily wide child arrays.
@@ -56,8 +55,11 @@ object WireframeRender {
                     percent(right - left, frame.width), percent(bottom - top, frame.height), depth,
                     listOf("text", "desc", "hint", "pane").firstNotNullOfOrNull { key ->
                         node.string(key)?.trim()?.takeIf { it.isNotEmpty() }
-                    }?.take(120),
-                    node.string("class")?.substringAfterLast('.'), node.string("id")?.substringAfter(":id/"),
+                    }?.let { safe(it) }?.let { s ->
+                        if (s.length <= 120) s else s.take(if (Character.isHighSurrogate(s[119])) 119 else 120)
+                    },
+                    node.string("class")?.let { safe(it) }?.substringAfterLast('.'),
+                    node.string("id")?.let { safe(it) }?.substringAfter(":id/"),
                     (node["isClickable"] as? JsonPrimitive)?.let { !it.isString && it.booleanOrNull == true } == true,
                 )
             } else {
@@ -70,7 +72,7 @@ object WireframeRender {
         }
         return RenderedWireframe(
             receivedDay, installPrefix, (envelope["metadata"] as? JsonObject)?.string("platformAppVersion"),
-            frame.width.toInt(), frame.height.toInt(), boxes, visited, skipped,
+            frame.width.toInt(), frame.height.toInt(), boxes, visited, skipped, frameFallback = !validFrame,
         )
     }
 

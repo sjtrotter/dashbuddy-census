@@ -2,7 +2,7 @@
 
 DashBuddy Census will help the DashBuddy Android app understand unfamiliar screens without collecting their words. Enrolled installs will send UI skeletons containing hashes. The server will group structurally similar screens and count distinct installs for each token hash, so one noisy install cannot make a token appear common.
 
-What is live (v0.9.0 + this PR):
+What is live (v0.10.0):
 
 - Enrol, rotate, revoke, and withdraw, with signed requests.
 - Skeleton ingest (`uinode.skeleton.v1`), trusted-envelope ingest (`uinode.v1`, trusted installs only, paired to existing clusters by fingerprint), and daily recognition health (`/v1/health`).
@@ -18,7 +18,7 @@ Versions:
 - v0.7.0: VPN-only `/ops` and TOTP login.
 - v0.8.0: human-readable dashboard and cluster detail.
 - v0.9.0: platform → version cluster summary and review pages.
-- Next: envelope pairing and wireframe (this PR).
+- v0.10.0: envelope → cluster pairing and the trusted-capture wireframe; the validator accepts real phone captures.
 
 This repository is AGPL-3.0-only. The wire contract belongs to the app's separate Apache-2.0 `census-contract` included build; it is not copied into this repository.
 

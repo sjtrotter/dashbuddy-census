@@ -2,10 +2,16 @@ package cloud.trotter.census.server
 
 import cloud.trotter.census.server.db.OpsCluster
 import cloud.trotter.census.server.db.OpsSample
+import cloud.trotter.census.server.ingest.EnvelopeValidator
+import cloud.trotter.census.server.ingest.EnvelopeVerdict
 import cloud.trotter.census.server.ops.ClusterDetailHtml
 import cloud.trotter.census.server.ops.RenderedSkeleton
 import cloud.trotter.census.server.ops.RenderedWireframe
 import cloud.trotter.census.server.ops.WireBox
+import cloud.trotter.census.server.ops.WireframeRender
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -96,7 +102,7 @@ class ClusterDetailRenderTest {
         }
         assertTrue(page.indexOf("Screen wireframe") < page.indexOf("Skeleton samples"))
         assertTrue(page.contains("class=\"wire-frame\" style=\"aspect-ratio:1080/2400\""))
-        assertTrue(page.contains("class=\"wire-box clickable\""))
+        assertTrue(page.contains("class=\"wire-box labelled clickable\""))
         assertTrue(page.contains("left:10.25%;top:20.50%;width:30.00%;height:40.00%"))
         assertTrue(page.contains("title=\"Button · go\""))
         assertTrue(page.contains("title=\"view · no id\""))
@@ -108,6 +114,71 @@ class ClusterDetailRenderTest {
         val numericStyles = Regex("""^(aspect-ratio:[0-9]+/[0-9]+|((left|top|width|height):[0-9]+(\.[0-9]+)?%;?)+)$""")
         assertTrue(styles.all { numericStyles.matches(it) })
         assertTrue(render(cluster.copy(wireframe = wireframe.copy(platformAppVersion = null))).contains("app version Not recorded"))
+        val fallback = render(cluster.copy(wireframe = wireframe.copy(frameFallback = true)))
+        assertTrue(fallback.contains("nodes drawn · default frame</figcaption>"))
+        assertShellAndPrivacy(fallback)
+        val invalidPrefix = render(cluster.copy(wireframe = wireframe.copy(installPrefix = "not-hex!")))
+        assertTrue(invalidPrefix.contains("install [redacted] · app version"))
+        assertFalse(invalidPrefix.contains("not-hex!"))
+        assertShellAndPrivacy(invalidPrefix)
+        assertShellAndPrivacy(page)
+    }
+
+    @Test
+    fun `accepted envelope renders private escaped accessible boxes and every node in order`() {
+        val identity = "12345678-1234-4234-8234-123456789abc"
+        val bounds = buildJsonObject { put("left", 0); put("top", 0); put("right", 1080); put("bottom", 2400) }
+        val envelope = buildJsonObject {
+            put("captureId", identity)
+            put("schemaId", "uinode.v1")
+            put("pipelineId", "accessibility.window")
+            put("platform", "doordash")
+            put("timestamp", 1789689600000L)
+            put("fingerprint", fingerprint)
+            put("metadata", buildJsonObject {
+                put("engineVersion", 1)
+                put("pipelineVersions", buildJsonObject { put("accessibility.window", 1) })
+                put("stateMachineApiVersion", "1.0")
+                put("appVersion", "1.0.0")
+            })
+            put("payload", buildJsonObject {
+                put("bounds", bounds)
+                put("children", JsonArray(listOf(
+                    buildJsonObject {
+                        put("bounds", bounds)
+                        put("text", "x".repeat(85) + identity)
+                        put("class", "android.widget.$identity")
+                        put("id", "app:id/${"b".repeat(16)}")
+                    },
+                    buildJsonObject {
+                        put("bounds", bounds)
+                        put("class", "x\"y&z")
+                        put("isClickable", true)
+                    },
+                )))
+            })
+        }
+        val accepted = EnvelopeValidator.validate(envelope, Policy())
+        assertTrue(accepted is EnvelopeVerdict.Accepted)
+        val wireframe = requireNotNull(WireframeRender.render((accepted as EnvelopeVerdict.Accepted).canonicalJson,
+            "2026-10-02", "12345678"))
+        val page = render(cluster.copy(wireframe = wireframe))
+        assertEquals(3, wireframe.boxes.size)
+        assertTrue(page.contains("<figure>"))
+        assertTrue(page.contains("<figcaption class=\"muted\">Trusted capture"))
+        assertTrue(page.contains("role=\"group\" aria-label=\"Wireframe: 3 of 3 nodes drawn\""))
+        assertTrue(page.contains("title=\"x&quot;y&amp;z · no id\""))
+        assertTrue(page.contains("class=\"wire-box labelled\""))
+        assertTrue(page.contains("class=\"wire-box clickable\""))
+        assertTrue(page.contains("<details>"))
+        assertFalse(Regex("<details[^>]*\\bopen\\b").containsMatchIn(page))
+        assertTrue(page.contains("<summary>Nodes as text</summary>"))
+        val list = page.substringAfter("<ul class=\"wire-list\">").substringBefore("</ul>")
+        assertEquals(listOf(
+            "(no label) · view · no id",
+            "— ${"x".repeat(85)}[redacted] · [redacted] · [redacted]",
+            "— (no label) · x&quot;y&amp;z · no id · Clickable",
+        ), Regex("<li>(.*?)</li>", RegexOption.DOT_MATCHES_ALL).findAll(list).map { it.groupValues[1].trim() }.toList())
         assertShellAndPrivacy(page)
     }
 
@@ -132,6 +203,8 @@ class ClusterDetailRenderTest {
     private fun render(value: OpsCluster?): String = ClusterDetailHtml.render("1.2.3+abc1234", 10, "2026-10-02", value)
 
     private fun assertShellAndPrivacy(page: String) {
+        val numericStyles = Regex("""^(aspect-ratio:[0-9]+/[0-9]+|((left|top|width|height):[0-9]+(\.[0-9]+)?%;?)+)$""")
+        assertTrue(Regex("style=\"([^\"]*)\"").findAll(page).all { numericStyles.matches(it.groupValues[1]) })
         assertEquals(1, Regex("<style\\b").findAll(page).count())
         assertEquals(1, Regex("<form\\b").findAll(page).count())
         assertFalse(page.contains("<script"))

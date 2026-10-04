@@ -7,6 +7,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
@@ -27,6 +28,7 @@ class WireframeRenderTest {
         val result = render(node(children = listOf(node(108, 600, 648, 1800), node(-108, -240, 1200, 2600), node(1, 1, 2, 2))))
         assertEquals(1080, result.frameWidth)
         assertEquals(2400, result.frameHeight)
+        assertFalse(result.frameFallback)
         assertEquals("2026-10-02", result.receivedDay)
         assertEquals("12345678", result.installPrefix)
         assertEquals("8.10", result.platformAppVersion)
@@ -42,6 +44,7 @@ class WireframeRenderTest {
     @Test
     fun `zero root bounds use phone sized fallback and invalid nodes are skipped`() {
         val result = render(node(right = 0, bottom = 0, children = listOf(node(540, 1200), node(1080, 0, 1100, 10), node(0, 0, 0, 10), JsonObject(emptyMap()))))
+        assertTrue(result.frameFallback)
         assertEquals(1080, result.frameWidth)
         assertEquals(2400, result.frameHeight)
         assertEquals(5, result.nodeCount)
@@ -68,6 +71,62 @@ class WireframeRenderTest {
         assertNull(render(node()).boxes.single().label)
         assertNull(render(node()).boxes.single().className)
         assertNull(render(node()).boxes.single().viewId)
+    }
+
+    @Test
+    fun `implausible frame dimensions and aspect ratios use fallback`() {
+        for ((width, height) in listOf(1 to Int.MAX_VALUE, 16_385 to 16_384, 16_384 to 16_385, 1 to 9, 9 to 1)) {
+            val result = render(node(right = width, bottom = height))
+            assertTrue(result.frameFallback)
+            assertEquals(1080, result.frameWidth)
+            assertEquals(2400, result.frameHeight)
+        }
+        for ((width, height) in listOf(1 to 8, 8 to 1, 16_384 to 16_384, 1 to 1)) {
+            val result = render(node(right = width, bottom = height))
+            assertFalse(result.frameFallback)
+            assertEquals(width, result.frameWidth)
+            assertEquals(height, result.frameHeight)
+        }
+    }
+
+    @Test
+    fun `box strings mask identifiers before labels are truncated`() {
+        val identity = "12345678-1234-4234-8234-123456789abc"
+        val label = "x".repeat(85) + identity
+        val box = render(JsonObject(node() + mapOf(
+            "text" to JsonPrimitive(" $label "),
+            "class" to JsonPrimitive("android.widget.$identity"),
+            "id" to JsonPrimitive("app:id/${"b".repeat(16)}"),
+        ))).boxes.single()
+        val boxLabel = requireNotNull(box.label)
+        assertEquals("x".repeat(85) + "[redacted]", boxLabel)
+        assertFalse(Regex("(?i)[0-9a-f]{8,}").containsMatchIn(boxLabel))
+        assertFalse(boxLabel.contains(identity.take(8)))
+        assertEquals("[redacted]", box.className)
+        assertEquals("[redacted]", box.viewId)
+        val hexLabel = render(JsonObject(node() + ("text" to JsonPrimitive("x".repeat(110) + "a".repeat(16))))).boxes.single().label
+        assertEquals("x".repeat(110) + "[redacted]", hexLabel)
+    }
+
+    @Test
+    fun `label truncation never splits an emoji surrogate pair`() {
+        for ((input, expected) in listOf(
+            "x".repeat(119) + "😀" to "x".repeat(119),
+            "x".repeat(118) + "😀tail" to "x".repeat(118) + "😀",
+        )) {
+            val label = requireNotNull(render(JsonObject(node() + ("text" to JsonPrimitive(input)))).boxes.single().label)
+            assertEquals(expected, label)
+            assertTrue(label.codePoints().toArray().none { it in 0xD800..0xDFFF })
+        }
+    }
+
+    @Test
+    fun `deep raw arrays inside and outside the tree are refused without throwing`() {
+        val arrays = "[".repeat(10_000) + "0" + "]".repeat(10_000)
+        for (raw in listOf(
+            """{"payload":{"children":$arrays}}""",
+            """{"payload":{},"metadata":{"extra":$arrays}}""",
+        )) assertNull(WireframeRender.render(raw, "2026-10-02", "12345678"))
     }
 
     @Test
