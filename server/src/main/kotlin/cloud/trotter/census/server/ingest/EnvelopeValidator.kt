@@ -13,7 +13,7 @@ import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.longOrNull
 
 sealed interface EnvelopeVerdict {
-    data class Accepted(val canonicalJson: String) : EnvelopeVerdict {
+    data class Accepted(val canonicalJson: String, val fingerprint: String? = null) : EnvelopeVerdict {
         override fun toString(): String = "Accepted(canonicalJson=[redacted])"
     }
     data class Rejected(val reason: String, val marker: String? = null) : EnvelopeVerdict
@@ -43,11 +43,13 @@ object EnvelopeValidator {
         val formatVersion = metadata["rulesetFormatVersion"]
         if (formatVersion != null && formatVersion != JsonNull && !formatVersion.isInteger()) return reject("bad_item")
         for ((key, grammar) in metadataVersions) {
+            // Real phone captures may omit these version hints; supplied values remain strictly typed.
+            if (key in optionalMetadataVersions && key !in metadata) continue
             val version = metadata.string(key) ?: return reject("bad_item")
             if (!grammar.matches(version)) return reject("bad_version")
         }
         val pipelines = metadata["pipelineVersions"] as? JsonObject ?: return reject("bad_item")
-        if (pipelines.size > 32 || pipelines.any { (key, value) -> !WireGrammars.textKeyShape.matches(key) || !value.isInteger() }) {
+        if (pipelines.size > 32 || pipelines.any { (key, value) -> !WireGrammars.pipelineId.matches(key) || !value.isInteger() }) {
             return reject("bad_item")
         }
 
@@ -85,20 +87,21 @@ object EnvelopeValidator {
         }
         if (Json.encodeToString(JsonElement.serializer(), element).toByteArray().size > 262_144) return reject("too_large")
         val pruned = JsonObject(element + ("metadata" to JsonObject(metadata - "deviceFingerprint" - "rulesetSignature")))
-        return EnvelopeVerdict.Accepted(Json.encodeToString(JsonObject.serializer(), pruned))
+        return EnvelopeVerdict.Accepted(Json.encodeToString(JsonObject.serializer(), pruned), element.string("fingerprint"))
     }
 
     private fun reject(reason: String): EnvelopeVerdict.Rejected = EnvelopeVerdict.Rejected(reason)
     private fun JsonObject.string(key: String): String? = (this[key] as? JsonPrimitive)?.takeIf { it.isString }?.content
     private fun JsonElement?.isInteger(): Boolean = this is JsonPrimitive && !isString && intOrNull != null
     private val requiredStrings = setOf("captureId", "pipelineId", "schemaId", "platform")
-    private val fields = requiredStrings + setOf("timestamp", "ruleId", "classificationName", "metadata", "payload", "windowContext")
+    private val fields = requiredStrings + setOf("timestamp", "ruleId", "classificationName", "metadata", "payload", "windowContext", "fingerprint")
     private val metadataFields = setOf(
         "engineVersion", "rulesetFormatVersion", "rulesetReleaseTag", "rulesetSignature", "pipelineVersions",
         "stateMachineApiVersion", "appVersion", "deviceFingerprint", "platformAppVersion",
     )
     private val uuidPattern = Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
-    private val nullableTokens = mapOf("ruleId" to WireGrammars.ruleId, "classificationName" to WireGrammars.identifier)
+    private val nullableTokens = mapOf("ruleId" to WireGrammars.ruleId, "classificationName" to WireGrammars.identifier, "fingerprint" to Regex("[0-9a-f]{64}"))
+    private val optionalMetadataVersions = setOf("rulesetReleaseTag", "platformAppVersion")
     private val metadataVersions = mapOf(
         "rulesetReleaseTag" to WireGrammars.rulesetReleaseTag, "appVersion" to WireGrammars.appVersion,
         "platformAppVersion" to WireGrammars.platformAppVersion, "stateMachineApiVersion" to WireGrammars.stateMachineApiVersion,

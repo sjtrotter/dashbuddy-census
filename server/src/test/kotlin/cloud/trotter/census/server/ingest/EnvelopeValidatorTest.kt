@@ -12,6 +12,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
@@ -86,7 +87,7 @@ class EnvelopeValidatorTest {
         reject("bad_item", metadata("pipelineVersions", JsonArray(emptyList())))
         reject("bad_item", metadata("pipelineVersions", JsonObject((1..33).associate { "p$it" to JsonPrimitive(1) })))
         assertTrue(EnvelopeValidator.validate(metadata("pipelineVersions", JsonObject((1..32).associate { "p$it" to JsonPrimitive(1) })), policy) is EnvelopeVerdict.Accepted)
-        for (key in listOf("Screen", "screen.name", "p".repeat(17))) {
+        for (key in listOf("Screen", "Bad.Key", "p".repeat(65))) {
             reject("bad_item", metadata("pipelineVersions", JsonObject(mapOf(key to JsonPrimitive(1)))))
         }
         reject("bad_item", metadata("pipelineVersions", JsonObject(mapOf("screen" to JsonPrimitive("1")))))
@@ -99,6 +100,44 @@ class EnvelopeValidatorTest {
         }
         assertTrue(EnvelopeValidator.validate(window("windowTitle", JsonNull), policy) is EnvelopeVerdict.Accepted)
         assertTrue(EnvelopeValidator.validate(item("windowContext", JsonNull), policy) is EnvelopeVerdict.Accepted)
+    }
+
+    @Test
+    fun `pipeline IDs permit dotted keys and reject non integer versions`() {
+        for (key in listOf("screen.name", "accessibility.window", "p".repeat(17), "p".repeat(64))) {
+            assertTrue(EnvelopeValidator.validate(metadata("pipelineVersions", JsonObject(mapOf(key to JsonPrimitive(1)))), policy) is EnvelopeVerdict.Accepted)
+        }
+        for (value in listOf(JsonPrimitive(1.5), JsonPrimitive(true), JsonNull, JsonPrimitive(2_147_483_648L))) {
+            reject("bad_item", metadata("pipelineVersions", JsonObject(mapOf("accessibility.window" to value))))
+        }
+    }
+
+    @Test
+    fun `fingerprint is optional nullable and strictly lowercase sha256`() {
+        assertNull((EnvelopeValidator.validate(fixture, policy) as EnvelopeVerdict.Accepted).fingerprint)
+        assertNull((EnvelopeValidator.validate(item("fingerprint", JsonNull), policy) as EnvelopeVerdict.Accepted).fingerprint)
+        val fingerprint = "abcdef0123456789".repeat(4)
+        val accepted = EnvelopeValidator.validate(item("fingerprint", JsonPrimitive(fingerprint)), policy) as EnvelopeVerdict.Accepted
+        assertEquals(fingerprint, accepted.fingerprint)
+        assertFalse(accepted.toString().contains(fingerprint))
+        for (value in listOf(JsonPrimitive("a".repeat(63)), JsonPrimitive(fingerprint.uppercase()), JsonPrimitive(123), JsonArray(emptyList()))) {
+            reject("bad_item", item("fingerprint", value))
+        }
+    }
+
+    @Test
+    fun `real phone envelope validates without retaining device fingerprint`() {
+        val raw = requireNotNull(javaClass.getResource("/fixtures/phone-envelope-uber-home.json")).readText()
+        val verdict = EnvelopeValidator.validate(Json.parseToJsonElement(raw), policy.copy(acceptedPlatforms = listOf("uber")))
+        assertTrue(verdict is EnvelopeVerdict.Accepted)
+        assertFalse((verdict as EnvelopeVerdict.Accepted).canonicalJson.contains("deviceFingerprint"))
+        val metadata = fixture.getValue("metadata").jsonObject
+        for (key in listOf("rulesetReleaseTag", "platformAppVersion")) {
+            assertTrue(EnvelopeValidator.validate(item("metadata", JsonObject(metadata - key)), policy) is EnvelopeVerdict.Accepted)
+        }
+        for (key in listOf("appVersion", "stateMachineApiVersion")) {
+            reject("bad_item", item("metadata", JsonObject(metadata - key)))
+        }
     }
 
     @Test

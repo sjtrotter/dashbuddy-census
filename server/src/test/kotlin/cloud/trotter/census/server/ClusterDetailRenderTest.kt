@@ -4,10 +4,13 @@ import cloud.trotter.census.server.db.OpsCluster
 import cloud.trotter.census.server.db.OpsSample
 import cloud.trotter.census.server.ops.ClusterDetailHtml
 import cloud.trotter.census.server.ops.RenderedSkeleton
+import cloud.trotter.census.server.ops.RenderedWireframe
+import cloud.trotter.census.server.ops.WireBox
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import java.util.Locale
 
 class ClusterDetailRenderTest {
     private val fingerprint = "a".repeat(64)
@@ -73,6 +76,47 @@ class ClusterDetailRenderTest {
         assertFalse(page.contains("class=\"redacted\""))
         assertTrue(render(visible.copy(notes = null, samples = emptyList())).contains("No operator notes."))
         assertTrue(render(visible.copy(notes = "", samples = null)).contains("No skeleton samples retained for this cluster."))
+        assertShellAndPrivacy(page)
+    }
+
+    @Test
+    fun `wireframe precedes samples with sanitized labels titles facts and numeric styles`() {
+        val identity = "12345678-1234-4234-8234-123456789abc"
+        val wireframe = RenderedWireframe("2026-10-02", "12345678", "8.10", 1080, 2400, listOf(
+            WireBox(0.0, 0.0, 100.0, 100.0, 0, null, null, null, false),
+            WireBox(10.25, 20.5, 30.0, 40.0, 1, "Go $identity <script>", "Button", "go", true),
+            WireBox(0.0, 0.0, 1.0, 1.0, 1, null, identity, "b".repeat(64), false),
+        ), 4, 1)
+        val originalLocale = Locale.getDefault()
+        val page = try {
+            Locale.setDefault(Locale.GERMANY)
+            render(cluster.copy(wireframe = wireframe))
+        } finally {
+            Locale.setDefault(originalLocale)
+        }
+        assertTrue(page.indexOf("Screen wireframe") < page.indexOf("Skeleton samples"))
+        assertTrue(page.contains("class=\"wire-frame\" style=\"aspect-ratio:1080/2400\""))
+        assertTrue(page.contains("class=\"wire-box clickable\""))
+        assertTrue(page.contains("left:10.25%;top:20.50%;width:30.00%;height:40.00%"))
+        assertTrue(page.contains("title=\"Button · go\""))
+        assertTrue(page.contains("title=\"view · no id\""))
+        assertTrue(page.contains("title=\"[redacted] · [redacted]\""))
+        assertTrue(page.contains("Go [redacted] &lt;script&gt;"))
+        assertTrue(page.contains("Trusted capture · received <time datetime=\"2026-10-02\">2026-10-02</time> · install 12345678 · app version <code>8.10</code> · 3 of 4 nodes drawn"))
+        val styles = Regex("style=\"([^\"]*)\"").findAll(page).map { it.groupValues[1] }.toList()
+        assertEquals(4, styles.size)
+        val numericStyles = Regex("""^(aspect-ratio:[0-9]+/[0-9]+|((left|top|width|height):[0-9]+(\.[0-9]+)?%;?)+)$""")
+        assertTrue(styles.all { numericStyles.matches(it) })
+        assertTrue(render(cluster.copy(wireframe = wireframe.copy(platformAppVersion = null))).contains("app version Not recorded"))
+        assertShellAndPrivacy(page)
+    }
+
+    @Test
+    fun `wireframe empty state explains pairing and has no inline styles`() {
+        val page = render(cluster)
+        assertTrue(page.contains("Screen wireframe"))
+        assertTrue(page.contains("No trusted capture is paired with this cluster yet. A wireframe appears once a trusted install uploads a capture that names this cluster."))
+        assertFalse(page.contains("style=\""))
         assertShellAndPrivacy(page)
     }
 

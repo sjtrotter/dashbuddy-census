@@ -60,10 +60,10 @@ fun Route.envelopeRoutes(envelopes: EnvelopeStore, clock: Clock, policy: Policy)
                 }
             }
         }
-        fun logBatch(count: Int, duplicate: Int, reasons: Map<String, Int>, status: String) {
+        fun logBatch(count: Int, duplicate: Int, reasons: Map<String, Int>, status: String, paired: Int = 0, unpaired: Int = 0) {
             envelopeLog.info(
-                "ingest kind=envelopes install_prefix={} accepted={} duplicate={} rejected={} bytes={} status={}",
-                install.id.toString().take(8), count, duplicate, reasons.values.sum(), rawBody.size, status,
+                "ingest kind=envelopes install_prefix={} accepted={} duplicate={} rejected={} bytes={} status={} paired={} unpaired={}",
+                install.id.toString().take(8), count, duplicate, reasons.values.sum(), rawBody.size, status, paired, unpaired,
             )
             envelopeLog.debug("ingest kind=envelopes rejected_by_reason={}", reasons)
         }
@@ -88,7 +88,7 @@ fun Route.envelopeRoutes(envelopes: EnvelopeStore, clock: Clock, policy: Policy)
                 call.respond(HttpStatusCode.TooManyRequests, ErrorResponse("budget_exhausted"))
             }
             is EnvelopeOutcome.Stored -> {
-                logBatch(accepted.size, 0, rejected, "accepted")
+                logBatch(accepted.size, 0, rejected, "accepted", result.paired, result.unpaired)
                 val budget = result.consumed
                 call.respond(SkeletonBatchResponse("accepted", accepted.size, 0, rejected, SkeletonBudgetResponse(
                     budget.skeletonsRemaining, budget.bytesRemaining, budget.batchesRemaining, secondsToUtcMidnight(now),

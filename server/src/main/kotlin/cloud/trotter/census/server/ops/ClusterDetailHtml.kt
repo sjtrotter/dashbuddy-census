@@ -14,6 +14,7 @@ import kotlinx.html.p
 import kotlinx.html.section
 import kotlinx.html.span
 import kotlinx.html.ul
+import java.util.Locale
 
 /** Samples consume only the gated projection, never stored skeleton JSON. */
 object ClusterDetailHtml {
@@ -45,6 +46,34 @@ object ClusterDetailHtml {
                     cluster.notesWithheld -> p { +"Notes withheld below the privacy gate." }
                     !cluster.notes.isNullOrEmpty() -> p("notes") { +safe(cluster.notes) }
                     else -> p { +"No operator notes." }
+                }
+            }
+            panel("wireframe", "Screen wireframe") {
+                val wireframe = cluster.wireframe
+                if (wireframe == null) {
+                    emptyState("No trusted capture is paired with this cluster yet. A wireframe appears once a trusted install uploads a capture that names this cluster.")
+                } else {
+                    p("muted") {
+                        +"Trusted capture · received "; date(wireframe.receivedDay)
+                        +" · install ${safe(wireframe.installPrefix.take(8))} · app version "
+                        val appVersion = wireframe.platformAppVersion
+                        if (appVersion == null) +"Not recorded" else code { +version(appVersion) }
+                        +" · ${number(wireframe.boxes.size)} of ${number(wireframe.nodeCount)} nodes drawn"
+                    }
+                    // The only inline style attributes on ops pages: numeric geometry only.
+                    // The existing CSP permits these via style-src 'unsafe-inline'.
+                    div("wire-frame") {
+                        attributes["style"] = "aspect-ratio:${wireframe.frameWidth}/${wireframe.frameHeight}"
+                        wireframe.boxes.forEach { box ->
+                            div(if (box.clickable) "wire-box clickable" else "wire-box") {
+                                attributes["style"] = String.format(Locale.ROOT,
+                                    "left:%.2f%%;top:%.2f%%;width:%.2f%%;height:%.2f%%",
+                                    box.leftPct, box.topPct, box.widthPct, box.heightPct)
+                                attributes["title"] = "${safe(box.className ?: "view")} · ${safe(box.viewId ?: "no id")}"
+                                box.label?.let { span("wire-label") { +safe(it) } }
+                            }
+                        }
+                    }
                 }
             }
             panel("samples", "Skeleton samples") {

@@ -18,7 +18,7 @@ sealed interface EnvelopeOutcome {
     data object NotTrusted : EnvelopeOutcome
     data object BatchQuality : EnvelopeOutcome
     data object Duplicate : EnvelopeOutcome
-    data class Stored(val consumed: ConsumeOutcome.Consumed) : EnvelopeOutcome
+    data class Stored(val consumed: ConsumeOutcome.Consumed, val paired: Int, val unpaired: Int) : EnvelopeOutcome
     data class BudgetExhausted(val retryAfterSeconds: Long) : EnvelopeOutcome
 }
 
@@ -68,14 +68,17 @@ class EnvelopeStore(private val db: Database, private val clock: Clock) {
             is ConsumeOutcome.BudgetExhausted -> return@query EnvelopeOutcome.BudgetExhausted(result.retryAfterSeconds)
             is ConsumeOutcome.Consumed -> result
         }
+        var paired = 0
         for (item in accepted) {
-            update(
+            val isPaired = select(
                 """INSERT INTO trusted_envelopes (install_id, fingerprint, envelope, received_day, purge_after)
-                    VALUES (?, NULL, ?::jsonb, ?, ?)""",
-                installId, item.canonicalJson, day, day.plusDays(retentionDays.toLong()),
-            )
+                    VALUES (?, (SELECT fingerprint FROM clusters WHERE fingerprint = ?), ?::jsonb, ?, ?)
+                    RETURNING fingerprint IS NOT NULL AS paired""",
+                installId, item.fingerprint, item.canonicalJson, day, day.plusDays(retentionDays.toLong()),
+            ) { it.getBoolean("paired") }
+            if (isPaired == true) paired++
         }
         recordIngestCounters(installId, day, 0, rejected)
-        EnvelopeOutcome.Stored(consumed)
+        EnvelopeOutcome.Stored(consumed, paired, accepted.size - paired)
     }
 }

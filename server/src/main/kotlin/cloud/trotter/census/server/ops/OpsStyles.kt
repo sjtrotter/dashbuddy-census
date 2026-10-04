@@ -110,6 +110,10 @@ caption { text-align:left; padding:0 0 .75rem; font-size:.875rem; }
 .totals dt { font-size:.8125rem; }
 .totals dd { margin-top:.25rem; }
 .notes { white-space:pre-wrap; overflow-wrap:anywhere; }
+.wire-frame { position:relative; width:100%; max-width:24rem; border:1px solid var(--line); background:var(--surface2); border-radius:.5rem; overflow:hidden; }
+.wire-box { position:absolute; box-sizing:border-box; border:1px solid var(--accent); overflow:hidden; font-size:.625rem; line-height:1.1; padding:.1rem .15rem; color:var(--text); }
+.wire-box.clickable { border-color:var(--warn); }
+.wire-label { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .sample + .sample { border-top:1px solid var(--line); padding-top:1rem; margin-top:1rem; }
 .sample > * + * { margin-top:.5rem; }
 .tree-wrap { max-width:100%; overflow:auto; padding:.75rem; background:var(--bg); border:1px solid var(--line); border-radius:.5rem; }

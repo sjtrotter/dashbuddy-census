@@ -9,6 +9,8 @@ import cloud.trotter.census.contract.CensusHash
 import cloud.trotter.census.contract.SkeletonSchema
 import cloud.trotter.census.server.auth.hashSecret
 import cloud.trotter.census.server.db.CLUSTER_STATUSES
+import cloud.trotter.census.server.db.EnvelopeOutcome
+import cloud.trotter.census.server.db.EnvelopeStore
 import cloud.trotter.census.server.db.HealthStore
 import cloud.trotter.census.server.db.IngestOutcome
 import cloud.trotter.census.server.db.InstallStore
@@ -16,6 +18,8 @@ import cloud.trotter.census.server.db.OpsStore
 import cloud.trotter.census.server.db.SkeletonStore
 import cloud.trotter.census.server.db.update
 import cloud.trotter.census.server.ingest.BudgetPolicy
+import cloud.trotter.census.server.ingest.EnvelopeValidator
+import cloud.trotter.census.server.ingest.EnvelopeVerdict
 import cloud.trotter.census.server.ingest.ItemVerdict
 import cloud.trotter.census.server.ingest.SkeletonValidator
 import cloud.trotter.census.server.jobs.AlarmSink
@@ -617,6 +621,67 @@ class OpsRoutesTest {
                 assertError(browser.get("$path/view"), 401, "unauthorized")
                 val display = ops.vocabularyQueueDisplay()
                 assertTrue(display.isEmpty()) // One non-trusted install is below the vocabulary gate.
+            }
+        }
+    }
+
+    @Test
+    fun `paired captures render only while trusted and never change detail JSON`() {
+        Database.connect(config()).use { db ->
+            val installs = InstallStore(db, clock)
+            val ops = OpsStore(db, clock, Policy())
+            val envelopes = EnvelopeStore(db, clock)
+            val id = UUID.randomUUID()
+            val key = secret(84)
+            val sample = fixture("Wireframe", "Ready now")
+            val fingerprint = sample.item.fingerprint
+            testApplication {
+                application { module(config(), db, clock) }
+                installs.enrol(id, hashSecret(key), "1.0.0")
+                assertTrue(ops.trust(id, true))
+                assertTrue(SkeletonStore(db, clock).ingest(id, hashSecret(key), day, listOf(sample), 0, emptyMap(),
+                    "wire-skeleton", 100, BudgetPolicy()) is IngestOutcome.Stored)
+                val path = "/ops/clusters/$fingerprint"
+                val beforeResponse = client.ops(path)
+                assertEquals(200, beforeResponse.status.value)
+                val before = beforeResponse.bodyAsText()
+                assertFalse(client.ops("$path/view").bodyAsText().contains("class=\"wire-frame\""))
+                val raw = requireNotNull(javaClass.getResource("/fixtures/phone-envelope-uber-home.json")).readText()
+                val capture = JsonObject(Json.parseToJsonElement(raw).jsonObject + ("fingerprint" to JsonPrimitive(fingerprint)))
+                val uploaded = client.signed(clock, id.toString(), key, HttpMethod.Post, "/v1/envelopes",
+                    """{"batchId":"wire-capture","items":[$capture]}""")
+                assertEquals(200, uploaded.status.value)
+                val response = Json.parseToJsonElement(uploaded.bodyAsText()).jsonObject
+                assertEquals(setOf("status", "accepted", "duplicate", "rejected", "budget"), response.keys)
+                assertEquals(1, response.getValue("accepted").jsonPrimitive.int)
+                val page = client.ops("$path/view").bodyAsText()
+                assertTrue(page.contains("class=\"wire-frame\""))
+                assertTrue(page.contains("Home"))
+                assertFalse(page.contains(id.toString()))
+                val after = client.ops(path).bodyAsText()
+                assertEquals(before, after)
+                assertFalse(after.contains("wireframe"))
+
+                // Same-day captures use insertion order; received day takes precedence over id.
+                val latest = JsonObject(envelopeFixture() + ("fingerprint" to JsonPrimitive(fingerprint)))
+                val accepted = EnvelopeValidator.validate(latest, Policy()) as EnvelopeVerdict.Accepted
+                val stored = envelopes.ingest(id, hashSecret(key), day, listOf(accepted), emptyMap(), "wire-newest", 100, BudgetPolicy(), 30) as EnvelopeOutcome.Stored
+                assertEquals(1, stored.paired)
+                assertEquals(0, stored.unpaired)
+                assertTrue(client.ops("$path/view").bodyAsText().contains("Looking for offers"))
+                envelopes.ingest(id, hashSecret(key), day.minusDays(1), listOf(EnvelopeValidator.validate(capture, Policy()) as EnvelopeVerdict.Accepted),
+                    emptyMap(), "wire-older", 100, BudgetPolicy(), 30)
+                assertTrue(client.ops("$path/view").bodyAsText().contains("Looking for offers"))
+                assertEquals(before, client.ops(path).bodyAsText())
+
+                assertTrue(ops.trust(id, false))
+                assertFalse(client.ops("$path/view").bodyAsText().contains("class=\"wire-frame\""))
+                assertTrue(ops.trust(id, true))
+                assertTrue(client.ops("$path/view").bodyAsText().contains("class=\"wire-frame\""))
+                assertTrue(ops.revoke(id))
+                val revokedPage = client.ops("$path/view").bodyAsText()
+                assertFalse(revokedPage.contains("class=\"wire-frame\""))
+                assertTrue(revokedPage.contains("No trusted capture is paired with this cluster yet."))
             }
         }
     }
