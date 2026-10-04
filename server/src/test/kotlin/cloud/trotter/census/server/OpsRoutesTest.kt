@@ -759,7 +759,7 @@ class OpsRoutesTest {
                     contentType(ContentType.Application.FormUrlEncoded)
                     setBody((values + if (code == null) emptyMap() else mapOf("totp" to code)).toList().formUrlEncode())
                 }
-                val shape = submit("draft/shape", fields + ("shape" to "task"))
+                val shape = submit("draft/shape", fields + mapOf("screenClass" to "task:pickup:navigation", "shape" to "task"))
                 assertEquals(200, shape.status.value)
                 val shapeHtml = shape.bodyAsText()
                 assertTrue(shapeHtml.contains("customerNameHash")); assertTrue(shapeHtml.contains("Saved notes"))
@@ -791,7 +791,13 @@ class OpsRoutesTest {
                 assertEquals(previewBytes, ops.draftJson5(fp))
                 val download = client.ops("$path/draft.json5")
                 assertEquals(ContentType.Text.Plain, download.contentType()?.withoutParameters())
+                assertEquals("nosniff", download.headers["X-Content-Type-Options"])
+                assertEquals("attachment; filename=\"draft.json5\"", download.headers[HttpHeaders.ContentDisposition])
                 assertEquals(previewBytes, download.bodyAsText())
+                assertEquals("Saved notes", requireNotNull(ops.cluster(fp)).notes)
+                instant = instant.plusSeconds(30)
+                assertEquals(303, submit("draft", fields + ("notes" to ""), Totp.code(totpSecret, instant.epochSecond)).status.value)
+                assertEquals("Saved notes", requireNotNull(ops.cluster(fp)).notes)
                 val detail = Json.parseToJsonElement(client.ops(path).bodyAsText()).jsonObject
                 assertEquals("drafted", detail.getValue("status").jsonPrimitive.content)
                 assertEquals("idle", detail.getValue("screenClass").jsonPrimitive.content)
@@ -811,6 +817,14 @@ class OpsRoutesTest {
                 assertTrue(detailHtml.contains("Draft saved")); assertTrue(detailHtml.contains("Draft (JSON5)")); assertPrivate(detailHtml)
                 val stale = submit("draft/preview", fields + ("envelopeId" to Long.MAX_VALUE.toString()))
                 assertEquals(409, stale.status.value); assertTrue(stale.bodyAsText().contains("This capture changed — reload")); assertPrivate(stale.bodyAsText())
+                val staleHtml = stale.bodyAsText()
+                for (key in fields.keys - "envelopeId") assertTrue(staleHtml.contains("name=\"$key\""), key)
+                assertTrue(staleHtml.contains("Review &amp; verify")); assertTrue(staleHtml.contains("Saved notes"))
+                assertTrue(staleHtml.contains("Home")); assertTrue(staleHtml.contains("zoneName"))
+                instant = instant.plusSeconds(30)
+                val staleSave = submit("draft", fields + ("envelopeId" to Long.MAX_VALUE.toString()), Totp.code(totpSecret, instant.epochSecond))
+                assertEquals(409, staleSave.status.value)
+                assertTrue(staleSave.bodyAsText().contains("Review &amp; verify")); assertPrivate(staleSave.bodyAsText())
                 // A later capture must not silently change which node the pinned form selects.
                 val accepted = EnvelopeValidator.validate(capture, Policy()) as EnvelopeVerdict.Accepted
                 EnvelopeStore(db, clock).ingest(id, hashSecret(key), day, listOf(accepted), emptyMap(), "draft-later", 100, BudgetPolicy(), 30)
@@ -825,6 +839,47 @@ class OpsRoutesTest {
                 assertEquals(303, submit("draft", mapOf("mode" to "classify", "screenClass" to "noise", "notes" to "Classification only"), Totp.code(totpSecret, instant.epochSecond)).status.value)
                 assertEquals("drafted", requireNotNull(ops.cluster(fp)).status)
                 assertEquals(previewBytes, ops.draftJson5(fp))
+            }
+        }
+    }
+
+    @Test
+    fun `classify-only empty notes preserve notes and withheld notes cannot be overwritten`() {
+        Database.connect(config()).use { db ->
+            val installs = InstallStore(db, clock)
+            val ops = OpsStore(db, clock, Policy())
+            val id = UUID.randomUUID()
+            val keyHash = hashSecret(secret(86))
+            val sample = fixture("Notes", "Ready")
+            val fp = sample.item.fingerprint
+            testApplication {
+                application { module(config().copy(operatorTotpSecret = totpSecret), db, clock) }
+                installs.enrol(id, keyHash, "1.0.0")
+                ops.trust(id, true)
+                SkeletonStore(db, clock).ingest(id, keyHash, day, listOf(sample), 0, emptyMap(), "notes", 100, BudgetPolicy())
+                assertTrue(ops.saveClassification(fp, "idle", "Keep existing notes"))
+                val browser = createClient { followRedirects = false }
+                suspend fun save(notes: String?) = browser.post("/ops/clusters/$fp/draft") {
+                    instant = instant.plusSeconds(30)
+                    header(HttpHeaders.Authorization, "Bearer $operatorToken")
+                    contentType(ContentType.Application.FormUrlEncoded)
+                    setBody((listOf("mode" to "classify", "screenClass" to "noise", "totp" to Totp.code(totpSecret, instant.epochSecond)) +
+                        if (notes == null) emptyList() else listOf("notes" to notes)).formUrlEncode())
+                }
+                assertEquals(303, save("").status.value)
+                assertEquals("Keep existing notes", requireNotNull(ops.cluster(fp)).notes)
+                assertTrue(ops.trust(id, false))
+                assertTrue(requireNotNull(ops.cluster(fp)).notesWithheld)
+                val page = client.ops("/ops/clusters/$fp/draft").bodyAsText()
+                assertTrue(page.contains("Notes withheld below the privacy gate"))
+                assertFalse(page.contains("name=\"notes\"")); assertFalse(page.contains("Keep existing notes")); assertPrivate(page)
+                for (notes in listOf(null, "", "Attempted replacement")) {
+                    assertEquals(303, save(notes).status.value)
+                    sql { connection -> connection.prepareStatement("SELECT notes FROM clusters WHERE fingerprint = ?").use { statement ->
+                        statement.setString(1, fp)
+                        statement.executeQuery().use { rs -> assertTrue(rs.next()); assertEquals("Keep existing notes", rs.getString(1)) }
+                    } }
+                }
             }
         }
     }

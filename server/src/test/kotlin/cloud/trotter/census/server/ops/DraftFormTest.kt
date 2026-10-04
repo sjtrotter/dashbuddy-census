@@ -18,13 +18,13 @@ class DraftFormTest {
     private val rows = nodes().mapIndexed { i, node -> DraftNode(i + 1, node) }
     private val codec = DraftForm(rows)
     private val selections = Selections("task:dropoff:navigation", "task", "dropoff", 501,
-        modeHint = "online", anchors = listOf(NodeRef(rows[0].node.path)),
+        modeHint = "online", anchors = listOf(PathRef(rows[0].node.path)),
         fields = listOf(
-            FieldAssignment(NodeRef(rows[1].node.path), "deadlineText", null, "Dropoff: "),
-            FieldAssignment(NodeRef(rows[1].node.path), "deadlineMillis", null, "Dropoff: "),
-            FieldAssignment(NodeRef(rows[2].node.path), "storeName", emptyList()),
-        ), binds = listOf(BindAssignment(NodeRef(rows[3].node.path), "acceptButton")),
-        redacts = listOf(NodeRef(rows[4].node.path)), constants = listOf(Constant("arrivalConfirmed", JsonPrimitive(true))),
+            FieldAssignment(PathRef(rows[1].node.path), "deadlineText", null, "Dropoff: "),
+            FieldAssignment(PathRef(rows[1].node.path), "deadlineMillis", null, "Dropoff: "),
+            FieldAssignment(PathRef(rows[2].node.path), "storeName", emptyList()),
+        ), binds = listOf(BindAssignment(PathRef(rows[3].node.path), "acceptButton")),
+        redacts = listOf(PathRef(rows[4].node.path)), constants = listOf(Constant("arrivalConfirmed", JsonPrimitive(true))),
         comment = "Check the negative corpus")
 
     private fun Parameters.changed(vararg entries: Pair<String, String>): Parameters = ParametersBuilder().apply {
@@ -39,8 +39,39 @@ class DraftFormTest {
         assertEquals(selections, result.value.selections)
         assertEquals("Review", result.value.notes)
         assertEquals(7L, result.value.envelopeId)
-        val single = selections.copy(fields = listOf(FieldAssignment(NodeRef(rows[1].node.path), "storeName", listOf("trim"))))
+        val single = selections.copy(fields = listOf(FieldAssignment(PathRef(rows[1].node.path), "storeName", listOf("trim"))))
         assertEquals(single, (codec.decode(codec.encode(single).changed("envelopeId" to "7")) as DraftDecode.Ok).value.selections)
+    }
+
+    @Test
+    fun `empty and missing notes do not encode an update`() {
+        for (params in listOf(base().changed("notes" to ""), codec.encode(selections).changed("envelopeId" to "7"))) {
+            val input = (codec.decode(params) as DraftDecode.Ok).value
+            assertNull(input.notes)
+            assertFalse("notes" in DraftForm.selectionsJson(input))
+        }
+    }
+
+    @Test
+    fun `click action alone makes an otherwise unlabelled node selectable`() {
+        val envelope = buildJsonObject {
+            put("payload", buildJsonObject {
+                put("class", "Frame")
+                put("bounds", buildJsonObject { put("left", 0); put("top", 0); put("right", 100); put("bottom", 100) })
+                put("children", JsonArray(listOf(buildJsonObject {
+                    put("class", "Button"); put("isClickable", false); put("clickAction", true)
+                    put("bounds", buildJsonObject { put("left", 0); put("top", 0); put("right", 50); put("bottom", 50) })
+                })))
+            })
+        }
+        val walked = EnvelopeWalk.walk(envelope.getValue("payload").jsonObject)
+        val frame = requireNotNull(WireframeRender.render(envelope, walked, "2026-10-02", "12345678"))
+        val row = DraftForm.rows(walked, frame).single()
+        assertEquals(2, row.number)
+        assertEquals(listOf(0), row.node.path)
+        assertFalse(row.node.clickable)
+        assertTrue(row.node.takesClick)
+        assertTrue(frame.boxes.last().clickable)
     }
 
     @Test
@@ -73,14 +104,14 @@ class DraftFormTest {
     @Test
     fun `64 assignment cap counts each field slot and constants`() {
         val many = DraftForm(nodes(65).mapIndexed { i, n -> DraftNode(i + 1, n) })
-        fun selected(n: Int) = Selections("idle", "idle", "home", 500, anchors = many.nodes.take(n).map { NodeRef(it.node.path) })
+        fun selected(n: Int) = Selections("idle", "idle", "home", 500, anchors = many.nodes.take(n).map { PathRef(it.node.path) })
         fun decode(s: Selections) = many.decode(many.encode(s).changed("envelopeId" to "7"))
         assertTrue(decode(selected(64)) is DraftDecode.Ok)
         assertTrue(decode(selected(65)) is DraftDecode.Errors)
         assertTrue(decode(selected(64).copy(constants = listOf(Constant("startingSession", JsonPrimitive(true))))) is DraftDecode.Errors)
         assertTrue(decode(selected(63).copy(fields = listOf(
-            FieldAssignment(NodeRef(many.nodes.last().node.path), "zoneName"),
-            FieldAssignment(NodeRef(many.nodes.last().node.path), "sessionType"),
+            FieldAssignment(PathRef(many.nodes.last().node.path), "zoneName"),
+            FieldAssignment(PathRef(many.nodes.last().node.path), "sessionType"),
         ))) is DraftDecode.Errors)
     }
 

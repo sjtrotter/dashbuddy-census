@@ -90,6 +90,10 @@ val OpsAuth = createRouteScopedPlugin("OpsAuth", ::OpsAuthConfig) {
         }
         // Everything an authenticated operator reads may now render in a browser: never cache it past logout.
         call.response.headers.append(HttpHeaders.CacheControl, "no-store")
+        if (method == HttpMethod.Post && isDraftFormPath(path) &&
+            call.request.contentType().withoutParameters() != ContentType.Application.FormUrlEncoded) {
+            throw BadRequestException("Expected operator form")
+        }
         if (method == HttpMethod.Post && call.request.contentType().withoutParameters() == ContentType.Application.FormUrlEncoded) {
             if (!call.readOpsForm()) return@onCall
         }
@@ -134,12 +138,7 @@ internal fun isOpsPath(path: String): Boolean = path == "/ops" || path.startsWit
  * `/ops/login` deliberately stays out: its form rejections answer the JSON envelope (pinned by OpsLoginTest).
  */
 internal fun isOpsHtmlPath(path: String): Boolean {
-    if (path != "/ops" && !path.startsWith("/ops/")) return false
-    val segments = try {
-        path.removePrefix("/ops").split('/').filter { it.isNotEmpty() }.map { it.decodeURLPart() }
-    } catch (_: URLDecodeException) {
-        return false
-    }
+    val segments = decodedOpsSegments(path)?.filter { it.isNotEmpty() } ?: return false
     return segments.isEmpty() ||
         (segments.size == 2 && segments[0] == "clusters" && segments[1] == "view") ||
         (segments.size == 3 && segments[0] == "clusters" && segments[2] in setOf("view", "draft")) ||
@@ -191,9 +190,20 @@ class OpsBucket(private val capacity: Int = 60, private val perMinute: Int = 60)
 }
 
 /** Only the exact decoded paths are pure; extra/empty segments and other verbs retain TOTP. */
-internal fun isPureDraftPath(path: String): Boolean = try {
-    Regex("^/ops/clusters/[0-9a-f]{64}/draft/(preview|shape)$").matches(path.decodeURLPart())
-} catch (_: URLDecodeException) { false }
+internal fun isPureDraftPath(path: String): Boolean = isDraftFormPath(path, pureOnly = true)
+
+private fun decodedOpsSegments(path: String): List<String>? {
+    if (!isOpsPath(path)) return null
+    return try {
+        path.removePrefix("/ops").split('/').drop(1).map { it.decodeURLPart() }
+    } catch (_: URLDecodeException) { null }
+}
+
+private fun isDraftFormPath(path: String, pureOnly: Boolean = false): Boolean {
+    val segments = decodedOpsSegments(path) ?: return false
+    return segments.size in 3..4 && segments[0] == "clusters" && fingerprintPattern.matches(segments[1]) &&
+        segments[2] == "draft" && (if (segments.size == 4) segments[3] in setOf("preview", "shape") else !pureOnly)
+}
 
 /** Explicit bounds, including duplicates after decoding. Unknown fields still consume the parser budget. */
 internal fun parseOpsForm(body: String, draftLimits: Boolean = true): Parameters {
@@ -215,9 +225,7 @@ internal fun parseOpsForm(body: String, draftLimits: Boolean = true): Parameters
 }
 
 private suspend fun ApplicationCall.readOpsForm(): Boolean {
-    val draft = try {
-        Regex("^/ops/clusters/[0-9a-f]{64}/draft(?:/(?:preview|shape))?$").matches(request.path().decodeURLPart())
-    } catch (_: URLDecodeException) { false }
+    val draft = isDraftFormPath(request.path())
     when (val read = readBounded(receiveChannel(), if (draft) 64 * 1024 else 4096, BODY_READ_TIMEOUT_MS)) {
         is BoundedRead.Ok -> {
             val body = read.bytes.toString(Charsets.UTF_8)

@@ -8,7 +8,7 @@ import kotlinx.serialization.json.*
 
 /** A badge is presentation only; a node's original child-index path is its identity. */
 data class DraftNode(val number: Int, val node: WalkedNode)
-data class DraftInput(val selections: Selections, val envelopeId: Long, val notes: String)
+data class DraftInput(val selections: Selections, val envelopeId: Long, val notes: String?)
 sealed interface DraftDecode {
     data class Ok(val value: DraftInput) : DraftDecode
     data class Errors(val errors: List<String>) : DraftDecode
@@ -39,14 +39,14 @@ class DraftForm(val nodes: List<DraftNode>) {
         val mode = choice("modeHint", V.MODES, true).ifEmpty { null }
         val surface = choice("offerSurface", V.OFFER_SURFACES, true).ifEmpty { null }
         val comment = text("comment", 500).ifEmpty { null }
-        val notes = text("notes", 2000)
+        val notes = text("notes", 2000).ifEmpty { null }
         val envelopeId = params["envelopeId"]?.takeIf { Regex("[1-9][0-9]{0,18}").matches(it) }?.toLongOrNull()
         if (envelopeId == null) errors += "Invalid capture reference"
         val specs = if (shapeRefresh) V.FIELDS_BY_SHAPE.values.flatten() else V.FIELDS_BY_SHAPE[shape].orEmpty()
-        val anchors = mutableListOf<NodeRef>()
+        val anchors = mutableListOf<PathRef>()
         val fields = mutableListOf<FieldAssignment>()
         val binds = mutableListOf<BindAssignment>()
-        val redacts = mutableListOf<NodeRef>()
+        val redacts = mutableListOf<PathRef>()
         // Recognized node controls outside the displayed mapping are rejected, never reinterpreted.
         val shown = nodes.map { it.number }.toSet()
         params.names().forEach { key ->
@@ -60,7 +60,7 @@ class DraftForm(val nodes: List<DraftNode>) {
             val transform = choice("transform_$n", listOf("default", "none") + V.TRANSFORMS, true)
             val bind = choice("bind_$n", V.BIND_TARGETS.keys, true)
             val stripPrefix = text("stripPrefix_$n", 40).ifEmpty { null }
-            val ref = NodeRef(node.path)
+            val ref = PathRef(node.path)
             when (role) {
                 "anchor" -> anchors += ref
                 "redact" -> redacts += ref
@@ -102,7 +102,7 @@ class DraftForm(val nodes: List<DraftNode>) {
         append("modeHint", selections.modeHint.orEmpty()); append("offerSurface", selections.offerSurface.orEmpty())
         append("comment", selections.comment.orEmpty())
         for ((n, node) in nodes) {
-            val ref = NodeRef(node.path)
+            val ref = PathRef(node.path)
             val fields = selections.fields.filter { it.node == ref }
             val bind = selections.binds.firstOrNull { it.node == ref }
             val role = when { ref in selections.anchors -> "anchor"; fields.isNotEmpty() -> "field"
@@ -124,7 +124,7 @@ class DraftForm(val nodes: List<DraftNode>) {
         fun rows(walked: List<WalkedNode>, frame: RenderedWireframe): List<DraftNode> {
             val byPath = walked.associateBy { it.path }
             return frame.boxes.mapIndexedNotNull { index, box ->
-                byPath[box.path]?.takeIf { it.viewId != null || it.text != null || it.desc != null || it.clickable }
+                byPath[box.path]?.takeIf { it.viewId != null || it.text != null || it.desc != null || it.takesClick }
                     ?.let { DraftNode(index + 1, it) }
             }
         }
@@ -135,7 +135,7 @@ class DraftForm(val nodes: List<DraftNode>) {
         /** Persist semantic paths, never display badge numbers or secrets. */
         fun selectionsJson(input: DraftInput): JsonObject = buildJsonObject {
             val s = input.selections
-            fun ref(node: NodeRef) = JsonArray(node.path.map { JsonPrimitive(it) })
+            fun ref(node: PathRef) = JsonArray(node.path.map { JsonPrimitive(it) })
             put("screenClass", s.screenClass); put("shape", s.shape); put("intent", s.intent); put("priority", s.priority)
             s.modeHint?.let { put("modeHint", it) }; s.offerSurface?.let { put("offerSurface", it) }
             s.comment?.let { put("comment", it) }
@@ -148,7 +148,7 @@ class DraftForm(val nodes: List<DraftNode>) {
             } }))
             put("binds", JsonArray(s.binds.map { bind -> buildJsonObject { put("node", ref(bind.node)); put("target", bind.target) } }))
             put("constants", JsonArray(s.constants.map { constant -> buildJsonObject { put("name", constant.name); put("value", constant.value) } }))
-            put("envelopeId", input.envelopeId); put("notes", input.notes)
+            put("envelopeId", input.envelopeId); input.notes?.ifEmpty { null }?.let { put("notes", it) }
         }
     }
 }

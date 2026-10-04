@@ -250,6 +250,8 @@ The required-field checklist also includes the shape's one-of requirements.
 choices that need correction for the new shape. **Preview draft** shows either generator
 refusals or JSON5 and warnings. Both operations are pure and require authentication and
 rate admission, but no TOTP. **Save** requires a fresh six-digit code in its TOTP field.
+A TOTP is consumed when the gate accepts the request, even if the handler then refuses
+the save (400/409/422), so a refused save needs the next code.
 The field shares replay protection with login and the header-based API; sending a code
 in both places is refused. Codes are never echoed on a re-rendered page. A successful save
 redirects to cluster detail, which offers **Draft (JSON5)**.

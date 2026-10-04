@@ -94,9 +94,43 @@ class OpsAuthTest {
     }
 
     @Test
+    fun `multipart preview is rejected as HTML before the handler`() = testApplication {
+        var reachedHandler = false
+        application {
+            module(config(), db = null, clock = clock)
+            routing { route("/ops") {
+                post("/clusters/{fingerprint}/draft/preview") {
+                    reachedHandler = true
+                    call.respondText("accepted")
+                }
+            } }
+        }
+        val valid = client.post("$path/preview") {
+            header(HttpHeaders.Authorization, "Bearer $token")
+            contentType(ContentType.Application.FormUrlEncoded); setBody("intent=home")
+        }
+        assertEquals(200, valid.status.value)
+        assertTrue(reachedHandler)
+        reachedHandler = false
+        val response = client.post("$path/preview") {
+            header(HttpHeaders.Authorization, "Bearer $token")
+            contentType(ContentType.MultiPart.FormData.withParameter("boundary", "ops-boundary"))
+            setBody("--ops-boundary\r\nContent-Disposition: form-data; name=\"intent\"\r\n\r\nhome\r\n--ops-boundary--\r\n")
+        }
+        assertEquals(400, response.status.value)
+        assertEquals(ContentType.Text.Html, response.contentType()?.withoutParameters())
+        assertFalse(reachedHandler)
+        assertPrivate(response.bodyAsText())
+    }
+
+    @Test
     fun `only exact decoded pure draft paths bypass TOTP`() {
         for (suffix in listOf("preview", "shape", "%70review")) assertTrue(isPureDraftPath("$path/$suffix"))
         for (p in listOf(path, "$path/preview/", "$path//preview", "$path/preview/extra", path.replace("a".repeat(64), "invalid") + "/preview")) assertFalse(isPureDraftPath(p))
         assertFalse(isPureDraftPath("/ops/%QQ"))
+        for (p in listOf("$path%2Fpreview", "$path%2fshape", "$path/preview".replace("/clusters/", "/clusters%2F"))) {
+            assertFalse(isPureDraftPath(p), p)
+            assertFalse(isOpsHtmlPath(p), p)
+        }
     }
 }

@@ -47,7 +47,8 @@ object ClusterDraftHtml {
         }
         section("panel") {
             val screenClass = state["screenClass"] ?: cluster.screenClass ?: "unknown"
-            val shape = state["shape"] ?: V.DEFAULT_SHAPE_BY_CLASS[screenClass] ?: "none"
+            val shapes = V.LEGAL_SHAPES_BY_CLASS[screenClass] ?: V.SHAPES
+            val shape = state["shape"]?.takeIf { it in shapes } ?: V.DEFAULT_SHAPE_BY_CLASS[screenClass] ?: "none"
             val fields = V.FIELDS_BY_SHAPE[shape].orEmpty().map { it.name }
             form(action = if (nested) "../draft" else "draft", method = FormMethod.post) {
                 if (errors.isNotEmpty()) {
@@ -65,14 +66,15 @@ object ClusterDraftHtml {
                     legend { +"Classification" }
                     choice("screenClass", "Screen class", listOf("unknown") + V.SCREEN_CLASSES, screenClass)
                     if (capture != null) {
-                        choice("shape", "Shape", V.SHAPES, shape)
+                        choice("shape", "Shape", shapes, shape)
                         textControl("intent", "Intent", state["intent"].orEmpty(), 48) { pattern = V.INTENT.pattern }
                         textControl("priority", "Priority", state["priority"] ?: "500", 3, InputType.number) { min = "1"; max = "998" }
                         choice("modeHint", "Mode hint", listOf("") + V.MODES, state["modeHint"].orEmpty())
                         choice("offerSurface", "Offer surface", listOf("") + V.OFFER_SURFACES, state["offerSurface"].orEmpty())
                         label { +"Comment"; textArea { name = "comment"; maxLength = "500"; +safe(state["comment"].orEmpty()) } }
                     }
-                    label { +"Notes"; textArea { name = "notes"; maxLength = "2000"; +safe(state["notes"] ?: cluster.notes.orEmpty()) } }
+                    if (cluster.notesWithheld) p { +"Notes withheld below the privacy gate" }
+                    else label { +"Notes"; textArea { name = "notes"; maxLength = "2000"; +safe(state["notes"] ?: cluster.notes.orEmpty()) } }
                 }
                 if (capture != null) {
                     fieldSet {
@@ -105,7 +107,7 @@ object ClusterDraftHtml {
                                     td { +safe(node.text ?: node.desc ?: node.hint ?: node.pane ?: "(no label)") }
                                     td { +safe(node.simpleClass ?: "view") }
                                     td { +safe(node.idSuffix ?: node.viewId ?: "no id") }
-                                    td { +listOfNotNull(if (node.clickable) "clickable" else null, if (!node.visible) "hidden" else null).joinToString(" / ") }
+                                    td { +listOfNotNull(if (node.takesClick) "clickable" else null, if (!node.visible) "hidden" else null).joinToString(" / ") }
                                     td {
                                         choice("role_$n", "Role", listOf("", "anchor", "field", "bind", "redact"), state["role_$n"].orEmpty(), node = n)
                                         choice("field_$n", "Field", listOf("") + fields, state["field_$n"].orEmpty(), node = n)
@@ -130,6 +132,18 @@ object ClusterDraftHtml {
                         +"Preview draft"
                     }
                 }
+                if (capture == null && state["envelopeId"] != null) {
+                    // Preserve typed entries without exposing an ineligible capture or repinning its node numbers.
+                    fieldSet {
+                        legend { +"Unsaved draft entries" }
+                        p { +"Copy these entries before reloading; node numbers must be checked against the new capture." }
+                        state.entries().forEach { (key, values) ->
+                            recoveryTitle(key)?.let { title ->
+                                label { +title; textArea { name = key; attributes["readonly"] = "readonly"; +safe(values.single()) } }
+                            }
+                        }
+                    }
+                }
                 label {
                     +"TOTP for Save"
                     input(type = InputType.text, name = "totp") {
@@ -148,6 +162,17 @@ object ClusterDraftHtml {
             h2 { +"Warnings" }
             ul { warnings.forEach { li { +safe(it) } } }
         }
+    }
+
+    private val RECOVERY_FIELDS = mapOf("shape" to "Shape", "intent" to "Intent", "priority" to "Priority",
+        "modeHint" to "Mode hint", "offerSurface" to "Offer surface", "comment" to "Comment") +
+        (1..4).flatMap { listOf("constName_$it" to "Constant $it name", "constValue_$it" to "Constant $it value") }
+    private val RECOVERY_ROW = Regex("(role|field|field2|transform|stripPrefix|bind)_([1-9][0-9]{0,3})")
+    private val ROW_TITLES = mapOf("role" to "Role", "field" to "Field", "field2" to "Second field",
+        "transform" to "Transform", "stripPrefix" to "Strip prefix", "bind" to "Bind")
+
+    private fun recoveryTitle(key: String): String? = RECOVERY_FIELDS[key] ?: RECOVERY_ROW.matchEntire(key)?.let {
+        "${ROW_TITLES.getValue(it.groupValues[1])} for node ${it.groupValues[2]}"
     }
 
     private fun FlowContent.choice(key: String, title: String, choices: List<String>, current: String, node: Int? = null) {

@@ -18,8 +18,8 @@ Versions:
 - v0.7.0: VPN-only `/ops` and TOTP login.
 - v0.8.0: human-readable dashboard and cluster detail.
 - v0.9.0: platform → version cluster summary and review pages.
-- v0.11.0: classify & draft a rule from the trusted-capture wireframe.
 - v0.10.0: envelope → cluster pairing and the trusted-capture wireframe; the validator accepts real phone captures.
+- v0.11.0: classify & draft a rule from the trusted-capture wireframe.
 
 This repository is AGPL-3.0-only. The wire contract belongs to the app's separate Apache-2.0 `census-contract` included build; it is not copied into this repository.
 

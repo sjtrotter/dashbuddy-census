@@ -1,6 +1,7 @@
 package cloud.trotter.census.server
 
 import cloud.trotter.census.contract.authoring.EnvelopeWalk
+import cloud.trotter.census.contract.authoring.RuleAuthoringVocabulary as V
 import cloud.trotter.census.server.db.OpsCluster
 import cloud.trotter.census.server.db.PinnedEnvelope
 import cloud.trotter.census.server.ops.*
@@ -130,6 +131,65 @@ class ClusterDraftRenderTest {
         assertEquals(JsonPrimitive(true), after["hasDraft"])
         assertFalse("draftDay" in after)
         assertFalse("draft" in after)
+    }
+
+    @Test
+    fun `shape choices follow class legality including active and unknown`() {
+        for (screenClass in V.SCREEN_CLASSES + "unknown") {
+            val page = render(state = Parameters.build { append("screenClass", screenClass) })
+            val select = Regex("""<select[^>]*name="shape"[^>]*>(.*?)</select>""", RegexOption.DOT_MATCHES_ALL)
+                .find(page)!!.groupValues[1]
+            val choices = Regex("""<option value="([^"]*)"""").findAll(select).map { it.groupValues[1] }.toList()
+            assertEquals(V.LEGAL_SHAPES_BY_CLASS[screenClass] ?: V.SHAPES, choices)
+            if (screenClass == "task:active") assertTrue(select.contains("value=\"none\" selected"))
+            assertPrivate(page)
+        }
+        val changed = render(state = Parameters.build { append("screenClass", "idle"); append("shape", "ratings") })
+        assertFalse(changed.contains("value=\"ratings\""))
+    }
+
+    @Test
+    fun `click action alone is flagged clickable in the node table`() {
+        val node = EnvelopeWalk.walk(buildJsonObject {
+            put("class", "Button"); put("isClickable", false); put("clickAction", true)
+        }).single()
+        val page = ClusterDraftHtml.render("0.11.0", 10, "2026-10-02", cluster, capture, null, listOf(DraftNode(1, node)))
+        assertTrue(Regex("<td>clickable</td>").containsMatchIn(page))
+        assertPrivate(page)
+    }
+
+    @Test
+    fun `withheld notes have no control and never echo stored or posted text`() {
+        for (pinned in listOf(null, capture)) {
+            val page = ClusterDraftHtml.render("0.11.0", 10, "2026-10-02",
+                cluster.copy(notes = "Private stored notes", notesWithheld = true), pinned, null, emptyList(),
+                Parameters.build { append("notes", "Private submitted notes") })
+            assertTrue(page.contains("Notes withheld below the privacy gate"))
+            assertFalse(page.contains("name=\"notes\""))
+            assertFalse(page.contains("Private stored notes")); assertFalse(page.contains("Private submitted notes"))
+            assertPrivate(page)
+        }
+    }
+
+    @Test
+    fun `stale capture preserves typed draft entries without capture data or TOTP`() {
+        val state = Parameters.build {
+            append("envelopeId", "7"); append("screenClass", "idle"); append("shape", "idle")
+            append("intent", "home"); append("priority", "601"); append("modeHint", "online")
+            append("offerSurface", "card"); append("comment", "Review comment"); append("notes", "Review notes")
+            append("constName_1", "zoneName"); append("constValue_1", "Midtown")
+            append("role_2", "field"); append("field_2", "zoneName"); append("field2_2", "sessionType")
+            append("transform_2", "trim"); append("stripPrefix_2", "Zone: "); append("bind_2", "acceptButton")
+            append("totp", "654321"); append("unknown_control", identity)
+        }
+        val page = ClusterDraftHtml.render("0.11.0", 10, "2026-10-02", cluster, null, null, emptyList(), state)
+        for ((key, values) in state.entries()) if (key !in setOf("envelopeId", "totp", "unknown_control")) {
+            assertTrue(page.contains("name=\"$key\""), key)
+            assertTrue(page.contains(values.single()), key)
+        }
+        assertFalse(page.contains("name=\"envelopeId\"")); assertFalse(page.contains("654321"))
+        assertFalse(page.contains(identity)); assertFalse(page.contains("unknown_control"))
+        assertPrivate(page)
     }
 
     @Test

@@ -96,7 +96,7 @@ object WireframeRender {
                 listOf(node.text, node.desc, node.hint, node.pane).firstOrNull { !it.isNullOrBlank() }
                     ?.let { cut(safe(it), 120) },
                 node.className?.let { cut(safe(it).substringAfterLast('.'), 64) },
-                node.viewId?.let { cut(safe(it).substringAfter(":id/"), 64) }, node.clickable, node.path)
+                node.viewId?.let { cut(safe(it).substringAfter(":id/"), 64) }, node.takesClick, node.path)
         }
         return RenderedWireframe(receivedDay, installPrefix,
             (envelope["metadata"] as? JsonObject)?.string("platformAppVersion"), frame.width.toInt(), frame.height.toInt(),

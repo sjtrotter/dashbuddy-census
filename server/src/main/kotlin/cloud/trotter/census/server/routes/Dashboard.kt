@@ -89,10 +89,10 @@ fun Route.dashboardRoute(store: OpsStore, alarms: HealthAlarms, clock: Clock, po
             val params = call.attributes.getOrNull(OpsForm) ?: throw BadRequestException("Expected operator form")
             if (operation == "save" && params["mode"] == "classify") {
                 val screenClass = params["screenClass"]?.takeUnless { it == "unknown" }
-                val notes = params["notes"].orEmpty()
+                val notes = if (cluster.notesWithheld) "" else params["notes"].orEmpty()
                 if ((screenClass != null && screenClass !in RuleAuthoringVocabulary.SCREEN_CLASSES) || notes.length > 2000) {
                     call.draftPage(policy, clock, cluster, null, params, listOf("Invalid classification or notes"), status = HttpStatusCode.BadRequest)
-                } else if (store.saveClassification(fp, screenClass, notes)) call.draftRedirect(fp)
+                } else if (store.saveClassification(fp, screenClass, notes.ifEmpty { null })) call.draftRedirect(fp)
                 else call.draftMissing(policy, clock)
                 return@post
             }
@@ -100,7 +100,7 @@ fun Route.dashboardRoute(store: OpsStore, alarms: HealthAlarms, clock: Clock, po
             val capture = id?.let { store.pinnedEnvelope(fp, it) }
             val context = capture?.let { draftContext(it) }
             if (context == null) {
-                call.draftPage(policy, clock, cluster, null, errors = listOf("This capture changed — reload"),
+                call.draftPage(policy, clock, cluster, null, params, errors = listOf("This capture changed — reload"),
                     nested = operation != "save", status = HttpStatusCode.Conflict)
                 return@post
             }
@@ -118,7 +118,8 @@ fun Route.dashboardRoute(store: OpsStore, alarms: HealthAlarms, clock: Clock, po
                     nested = operation != "save", status = HttpStatusCode.BadRequest)
                 return@post
             }
-            val input = (decoded as DraftDecode.Ok).value
+            val decodedInput = (decoded as DraftDecode.Ok).value
+            val input = decodedInput.copy(notes = decodedInput.notes?.ifEmpty { null }?.takeUnless { cluster.notesWithheld })
             val pinned = context.capture
             val generated = RuleDraft.generate(context.envelope, input.selections, platform(cluster.platform),
                 pinned.platformAppVersion?.let { version(it) }, pinned.receivedDay)
@@ -134,7 +135,7 @@ fun Route.dashboardRoute(store: OpsStore, alarms: HealthAlarms, clock: Clock, po
                 } else {
                     if (store.saveDraft(fp, input.selections.screenClass, DraftForm.selectionsJson(input), result.json5, clock.today())) {
                         call.draftRedirect(fp)
-                    } else call.draftPage(policy, clock, cluster, null, errors = listOf("This capture changed — reload"), status = HttpStatusCode.Conflict)
+                    } else call.draftPage(policy, clock, cluster, null, params, errors = listOf("This capture changed — reload"), status = HttpStatusCode.Conflict)
                 }
             }
         }
@@ -143,7 +144,11 @@ fun Route.dashboardRoute(store: OpsStore, alarms: HealthAlarms, clock: Clock, po
         // An operator-saved artefact survives revocation; withdrawal and retention delete it transactionally.
         val draft = store.draftJson5(call.draftFingerprint())
         if (draft == null) call.respond(HttpStatusCode.NotFound)
-        else call.respondText(draft, ContentType.Text.Plain.withCharset(Charsets.UTF_8))
+        else {
+            call.response.headers.append("X-Content-Type-Options", "nosniff")
+            call.response.headers.append(HttpHeaders.ContentDisposition, "attachment; filename=\"draft.json5\"")
+            call.respondText(draft, ContentType.Text.Plain.withCharset(Charsets.UTF_8))
+        }
     }
 
 }
