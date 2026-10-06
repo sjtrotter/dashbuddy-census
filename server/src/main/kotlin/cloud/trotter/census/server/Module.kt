@@ -146,7 +146,7 @@ fun Application.module(config: Config, db: Database?, clock: Clock = SystemClock
         val health = db?.let { HealthStore(it, clock) }
         val alarms = alarmEvaluator ?: health?.let { HealthAlarms(it, clock) }
         opsRoutes(config, db?.let { OpsStore(it, clock, policy) }, alarms, clock, policy)
-        identityRoutes(store, clock, policy) {
+        identityRoutes(store, clock, policy, alarms) {
             if (store != null && skeletons != null) skeletonRoutes(store, skeletons, clock, policy)
             if (envelopes != null) envelopeRoutes(envelopes, clock, policy)
             if (health != null && alarms != null) healthReportRoutes(health, alarms, clock, policy)

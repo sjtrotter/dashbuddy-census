@@ -62,7 +62,7 @@ class ConformanceReplayTest {
         val golden = GZIPInputStream(Files.newInputStream(
             Path.of(System.getProperty("census.contractDir"), "conformance", "skeletons.jsonl.gz"),
         )).bufferedReader().useLines { lines -> lines.map { Json.parseToJsonElement(it).jsonObject }.toList() }
-        assertEquals(876, golden.size)
+        assertEquals(879, golden.size) // 2026-10-05: the app corpus gained 3 fixtures (DashBuddy PRs #1216/#1220)
         val items = golden.map { it.getValue("skeleton").jsonObject }
         val day = LocalDate.parse(items.first().getValue("day").jsonPrimitive.content)
         val clock = object : Clock {
