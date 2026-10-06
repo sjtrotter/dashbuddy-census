@@ -210,6 +210,8 @@ write_files:
       names = ['public_host', 'acme_email', 'postgres_password', 'operator_token_sha256']
       optional = {
           'operator_totp_secret': ('OPERATOR_TOTP_SECRET', r'^[A-Z2-7]{16,64}$'),
+          'census_notifications_enabled': ('CENSUS_NOTIFICATIONS_ENABLED', r'^(true|false)$'),
+          'census_min_filter_rev': ('CENSUS_MIN_FILTER_REV', r'^[1-9][0-9]{0,9}$'),
           'alerts_topic_arn': ('ALERTS_TOPIC_ARN', r'^arn:aws:sns:[a-z0-9-]+:[0-9]{12}:[A-Za-z0-9_-]{1,256}$'),
       }
       result = json.loads(subprocess.check_output([
@@ -240,6 +242,8 @@ write_files:
           'DATABASE_USER': 'census',
           'OPERATOR_TOKEN_SHA256': values['operator_token_sha256'],
           'CENSUS_IMAGE_TAG': tag,
+          'CENSUS_NOTIFICATIONS_ENABLED': 'false',
+          'CENSUS_MIN_FILTER_REV': '1',
           # #1181: /ops is published only on the WireGuard address when the VPN is configured, else loopback.
           'OPS_BIND_IP': '10.8.0.1' if os.path.exists('/etc/wireguard/wg0.conf') else '127.0.0.1',
       }
@@ -290,7 +294,7 @@ write_files:
       # keep the health-alarm slots. One `kind=` group either way, so the subject/dispatch is unchanged.
       # Each slot set is BOUND to its kind (a withdrawal body never publishes under a health subject and vice
       # versa); the kind is group 1 (health) or group 2 (withdrawal).
-      KINDS = r'(?:silent_rule_death|rule_share_cliff|trips|fleet_unknown|new_clusters|silence|\[redacted\])'
+      KINDS = r'(?:silent_rule_death|rule_share_cliff|trips|fleet_unknown|new_clusters|silence|lifecycle_failure|lifecycle_backlog|lifecycle_stale|\[redacted\])'
       RULE = r'(?:[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*){1,4}|\[redacted\])'
       MESSAGE = re.compile(
           r'(?:kind=(' + KINDS + r')\n'

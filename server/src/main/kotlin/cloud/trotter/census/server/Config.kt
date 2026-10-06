@@ -21,8 +21,11 @@ data class Config(
     val imageDigest: String? = null,
     val operatorTotpSecret: String? = null,
     val alarmSpoolDir: String? = null,
+    val minimumFilterRev: Int = 1,
+    val notificationsEnabled: Boolean = false,
 ) {
     init {
+        require(minimumFilterRev > 0) { "Invalid variable: CENSUS_MIN_FILTER_REV" }
         require(operatorTotpSecret == null || cloud.trotter.census.server.ops.Totp.validSecret(operatorTotpSecret)) {
             "Invalid variable: OPERATOR_TOTP_SECRET"
         }
@@ -55,7 +58,18 @@ data class Config(
                 "Invalid variable: OPERATOR_TOKEN_SHA256"
             }
 
+            val minimumFilterRev = env["CENSUS_MIN_FILTER_REV"]?.let {
+                require(it.matches(Regex("[0-9]+"))) { "Invalid variable: CENSUS_MIN_FILTER_REV" }
+                it.toIntOrNull()?.takeIf { value -> value > 0 }
+                    ?: throw IllegalArgumentException("Invalid variable: CENSUS_MIN_FILTER_REV")
+            } ?: 1
+            val notificationsEnabled = when (env["CENSUS_NOTIFICATIONS_ENABLED"]) {
+                null, "false" -> false
+                "true" -> true
+                else -> throw IllegalArgumentException("Invalid variable: CENSUS_NOTIFICATIONS_ENABLED")
+            }
             return Config(
+                minimumFilterRev = minimumFilterRev, notificationsEnabled = notificationsEnabled,
                 databaseUrl = databaseUrl,
                 databaseUser = databaseUser,
                 databasePassword = databasePassword,

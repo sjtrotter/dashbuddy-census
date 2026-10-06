@@ -71,6 +71,7 @@ object DashboardHtml {
         ledger: JsonObject,
         vocabularyCount: Long,
         vocabularyRows: List<OpsVocabularyDisplay> = emptyList(),
+        lifecycle: cloud.trotter.census.server.jobs.LifecycleView? = null,
     ): String = opsPage(headerContent = {
         h1 { +"Census operator" }
         panel("identity", "Reporting context", hiddenHeading = true) { metadata(serverVersion, k, today) }
@@ -93,6 +94,14 @@ object DashboardHtml {
                 }
             }
             p("muted") { +"Snapshot at page load. All dates UTC." }
+        }
+        if (lifecycle != null) panel("lifecycle", "Lifecycle") {
+            p { +"Notifications: ${if (lifecycle.notificationsEnabled) "enabled" else "disabled"}; configured floor: ${lifecycle.configuredFloor}; effective floor: ${lifecycle.effectiveFloor}." }
+            p { +"Last successful pass age: ${lifecycle.lastSuccessAgeSeconds?.toString() ?: "unavailable"} seconds. Eligible queue: ${lifecycle.eligibleQueueCount}. Old-revision rejections: ${lifecycle.filterRevTooOld}." }
+            for ((name, result) in lifecycle.sweeps) p {
+                +"$name: deleted ${result.deleted}, rewritten ${result.rewritten}, batches ${result.batches}, capped ${result.capped}, failed ${result.failed}, overdue ${result.remainingDue?.toString() ?: "unknown"}."
+            }
+            a(href = "/ops/lifecycle") { +"Lifecycle JSON" }
         }
         alarmSection(alarms)
         healthSection(health, today)

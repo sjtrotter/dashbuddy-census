@@ -148,7 +148,7 @@ internal fun isOpsHtmlPath(path: String): Boolean {
 /** Unknown first segments are also suppressed: an arbitrary path segment can itself be a credential. */
 internal fun opsLogPath(path: String): String {
     val segment = path.removePrefix("/ops").trimStart('/').substringBefore('/')
-    return if (segment in setOf("clusters", "installs", "health", "alarms", "ledger", "vocabulary", "login", "logout")) "/ops/$segment" else "/ops"
+    return if (segment in setOf("clusters", "installs", "health", "alarms", "ledger", "vocabulary", "lifecycle", "login", "logout")) "/ops/$segment" else "/ops"
 }
 
 /** Application scope includes routing failures; CallLogging excludes these to produce exactly one INFO line. */

@@ -77,7 +77,7 @@ fun renderAlarm(alarm: Alarm): String {
     return "kind=$kind\nplatform=$platform\nversion=$version\ninstall_prefix=$prefix\nrule_ids=$rules"
 }
 
-private val alarmKinds = setOf("silent_rule_death", "rule_share_cliff", "trips", "fleet_unknown", "new_clusters", "silence")
+private val alarmKinds = setOf("silent_rule_death", "rule_share_cliff", "trips", "fleet_unknown", "new_clusters", "silence", "lifecycle_failure", "lifecycle_backlog", "lifecycle_stale")
 private val platformPattern = Regex("^[a-z_][a-z0-9_]{0,31}$")
 private val installPrefixPattern = Regex("^[a-fA-F0-9]{8}$")
 /** The two-line withdrawal body: `install_id_hash=<64 lower hex>\nwithdrawn_at=<ISO-8601 UTC instant>`. */

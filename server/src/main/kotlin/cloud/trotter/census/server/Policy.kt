@@ -3,11 +3,12 @@ package cloud.trotter.census.server
 import cloud.trotter.census.contract.SkeletonSchema
 import kotlinx.serialization.Serializable
 
-/** Public policy defaults; POLICY_* environment overrides are a later slice (#1157 S1). */
+/** One effective policy is constructed after durable floor replay, before HTTP starts. */
 @Serializable
 data class Policy(
     val serverVersion: String = "dev",
     val imageDigest: String? = null,
+    val minimumFilterRev: Int = 1,
     val k: Int = 10,
     val quarantineDays: Int = 7,
     val activeWindowDays: Int = 30,
@@ -24,7 +25,7 @@ data class Policy(
     val hashDomain: String = ContractCompatibility.HASH_DOMAIN,
 )
 
-/** Retention targets in days; scheduled pruning is future ingest work (#1157 S1). */
+/** Half-open UTC retention deadlines, enforced on reads and by lifecycle sweeps. */
 @Serializable
 data class Retention(
     val tokenSightingsDays: Int = 30,
@@ -35,4 +36,12 @@ data class Retention(
     val backupsDays: Int = 14,
     // Must outlive every restorable backup: backupsDays (14) + S3 noncurrent-version expiry (14) + margin.
     val withdrawalsDays: Int = 60,
+)
+
+fun Config.policy(effectiveFloor: Int = minimumFilterRev): Policy = Policy(
+    serverVersion = serverVersion, imageDigest = imageDigest,
+    minimumFilterRev = maxOf(minimumFilterRev, effectiveFloor),
+    acceptedSchemaIds = if (notificationsEnabled) listOf(
+        SkeletonSchema.SCHEMA_ID, cloud.trotter.census.contract.NotificationSkeletonSchema.SCHEMA_ID,
+    ) else listOf(SkeletonSchema.SCHEMA_ID),
 )

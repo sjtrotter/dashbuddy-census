@@ -4,6 +4,8 @@ services:
         image: ghcr.io/sjtrotter/dashbuddy-census:${CENSUS_IMAGE_TAG:-latest}
         env_file: .env
         environment:
+            CENSUS_NOTIFICATIONS_ENABLED: ${CENSUS_NOTIFICATIONS_ENABLED:-false}
+            CENSUS_MIN_FILTER_REV: ${CENSUS_MIN_FILTER_REV:-1}
             ALARM_SPOOL_DIR: /var/spool/census-alarms
             # Bounded JVM on the 2 GiB host (#1179). Bounded: heap 320, metaspace 96, direct 32 (Netty is
             # told to count against the JDK limit), code cache 48, 512 KiB stacks (Dispatchers.IO can reach

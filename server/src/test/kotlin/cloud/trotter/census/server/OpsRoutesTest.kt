@@ -89,6 +89,21 @@ class OpsRoutesTest {
     private val clock = object : Clock { override fun now(): Instant = instant }
     private val day = LocalDate.of(2026, 10, 2)
 
+    @Test fun `lifecycle route and dashboard expose aggregate status only behind authentication`() {
+        Database.connect(config()).use { db -> testApplication {
+            val report=cloud.trotter.census.server.jobs.LifecycleReport(clock)
+            report.record(mapOf("tokens" to cloud.trotter.census.server.jobs.SweepResult(deleted=3,failed=true)))
+            application { module(config().copy(operatorTotpSecret=totpSecret),db,clock,lifecycle=report) }
+            assertEquals(401,client.get("/ops/lifecycle").status.value)
+            val response=client.ops("/ops/lifecycle")
+            assertEquals(200,response.status.value)
+            val body=response.bodyAsText()
+            assertTrue(body.contains("configuredFloor")); assertTrue(body.contains("remainingDue"))
+            for (private in listOf("tokenHash","fingerprint","installId","channelId","PRIVATE_FAILURE","skeleton")) assertFalse(body.contains(private))
+            assertTrue(client.ops("/ops/").bodyAsText().contains("Lifecycle"))
+        } }
+    }
+
     @Test
     fun `notification ops filter paginate project and refuse every generation path`() {
         Database.connect(config()).use { db -> testApplication {
@@ -100,12 +115,12 @@ class OpsRoutesTest {
             InstallStore(db, clock).enrol(reporter, hashSecret(secret(93)), "1.0")
             sql { connection ->
                 connection.update("INSERT INTO clusters (fingerprint, platform, kind, first_seen_day, last_seen_day) VALUES (?, 'doordash', 'notification', ?, ?)", fp, day, day)
-                connection.update("INSERT INTO cluster_samples VALUES (?, '8.0', ?, ?::jsonb)", fp, day, notification.canonicalJson)
+                connection.update("INSERT INTO cluster_samples VALUES (?, '8.0', ?, ?::jsonb, 1, 1, DATE '2026-12-31')", fp, day, notification.canonicalJson)
                 repeat(26) { index ->
                     connection.update("INSERT INTO clusters (fingerprint, platform, kind, first_seen_day, last_seen_day) VALUES (?, 'doordash', 'notification', ?, ?)", (index + 1).toString(16).padStart(64, '0'), day, day)
                 }
                 connection.update("INSERT INTO clusters (fingerprint, platform, first_seen_day, last_seen_day) VALUES (?, 'doordash', ?, ?)", "f".repeat(64), day, day)
-                connection.update("INSERT INTO cluster_sightings (fingerprint, install_id, day, platform_app_version) SELECT fingerprint, ?::uuid, ?::date, 'unknown' FROM clusters", reporter, day)
+                connection.update("INSERT INTO cluster_sightings_v5 (fingerprint, install_id, day, platform_app_version, hash_domain, filter_rev) SELECT fingerprint, ?::uuid, ?::date, 'unknown', 1, 1 FROM clusters", reporter, day)
             }
             assertEquals(27, ops.clustersPage("doordash", null, null, 1, kind = cloud.trotter.census.contract.SkeletonKind.NOTIFICATION).total)
             assertEquals(2, ops.clustersPage("doordash", null, null, 2, kind = cloud.trotter.census.contract.SkeletonKind.NOTIFICATION).clusters.size)
@@ -160,7 +175,7 @@ class OpsRoutesTest {
 
     @BeforeEach
     fun clean() {
-        sql { it.update("TRUNCATE installs, clusters, health_fleet_daily, vocabulary CASCADE") }
+        sql { it.update("TRUNCATE installs, clusters, health_fleet_daily, vocabulary_v5 CASCADE") }
     }
 
     @Test
@@ -207,6 +222,7 @@ class OpsRoutesTest {
                 application { module(config().copy(operatorTotpSecret = totpSecret), db, clock) }
                 for ((index, id) in identities.withIndex()) {
                     installs.enrol(id, hashSecret(key), "1.0.0")
+                    sql { it.update("UPDATE installs SET enrolled_at=? WHERE install_id=?", clock.now().minusSeconds(7*86400L).atOffset(java.time.ZoneOffset.UTC), id) }
                     val items = when {
                         index < 9 -> listOf(eligible, hidden)
                         index == 9 -> listOf(eligible)
@@ -288,7 +304,7 @@ class OpsRoutesTest {
                 val tokenHash = CensusHash.of("Ready now")
                 assertError(client.mutate("/ops/vocabulary/resolve", """{"tokenHash":"$tokenHash","clearText":"Wrong text","source":"corpus","reject":false}"""), 422, "hash_mismatch")
                 assertEquals(204, client.mutate("/ops/vocabulary/resolve", """{"tokenHash":"$tokenHash","clearText":"Ready now","source":"corpus","reject":false}""").status.value)
-                sql { connection -> connection.prepareStatement("SELECT status, clear_text FROM vocabulary WHERE token_hash = ?").use { statement ->
+                sql { connection -> connection.prepareStatement("SELECT status, clear_text FROM vocabulary_v5 WHERE token_hash = ?").use { statement ->
                     statement.setString(1, tokenHash)
                     statement.executeQuery().use { result ->
                         assertTrue(result.next()); assertEquals("unblinded", result.getString("status")); assertEquals("Ready now", result.getString("clear_text"))
@@ -385,7 +401,7 @@ class OpsRoutesTest {
                 sql { connection ->
                     connection.update("INSERT INTO clusters (fingerprint, platform, first_seen_day, last_seen_day) VALUES (?, 'doordash', ?, ?)", noVersion, day, day)
                     connection.update("INSERT INTO clusters (fingerprint, platform, first_seen_day, last_seen_day, status) VALUES (?, 'uber', ?, ?, 'ignored')", uber, day, day)
-                    connection.update("INSERT INTO cluster_sightings (fingerprint, install_id, day, platform_app_version) VALUES (?, ?, ?, '1.2')", uber, first, day)
+                    connection.update("INSERT INTO cluster_sightings_v5 (fingerprint, install_id, day, platform_app_version, hash_domain, filter_rev) VALUES (?, ?, ?, '1.2', 1, 1)", uber, first, day)
                 }
                 assertTrue(ops.saveClassification(fresh.item.fingerprint, "idle"))
                 val summary = ops.clusterSummary()
@@ -985,7 +1001,7 @@ class OpsRoutesTest {
             SkeletonStore(db, clock).ingest(id, keyHash, day, listOf(sample), 0, emptyMap(), "race-skeleton", 100, BudgetPolicy())
             val raw = JsonObject(envelopeFixture() + ("fingerprint" to JsonPrimitive(fp)))
             val accepted = EnvelopeValidator.validate(raw, Policy()) as EnvelopeVerdict.Accepted
-            EnvelopeStore(db, clock).ingest(id, keyHash, day.minusDays(30), listOf(accepted), emptyMap(), "race-envelope", 100, BudgetPolicy(), 30)
+            EnvelopeStore(db, clock).ingest(id, keyHash, day.minusDays(29), listOf(accepted), emptyMap(), "race-envelope", 100, BudgetPolicy(), 30)
             val capture = requireNotNull(ops.pinnedEnvelope(fp))
             DriverManager.getConnection(postgres.jdbcUrl, postgres.username, postgres.password).use { save ->
                 save.autoCommit = false
@@ -1041,7 +1057,7 @@ class OpsRoutesTest {
                     val accepted = EnvelopeValidator.validate(raw, Policy()) as EnvelopeVerdict.Accepted
                     val envelopes = EnvelopeStore(db, clock)
                     // A expires before B; both captures belong to the same cluster but different installs.
-                    envelopes.ingest(first, keyHash, day.minusDays(30), listOf(accepted), emptyMap(), "cleanup-a-$index", 100, BudgetPolicy(), 30)
+                    envelopes.ingest(first, keyHash, day.minusDays(29), listOf(accepted), emptyMap(), "cleanup-a-$index", 100, BudgetPolicy(), 30)
                     val captureA = requireNotNull(ops.pinnedEnvelope(fp))
                     envelopes.ingest(second, keyHash, day, listOf(accepted), emptyMap(), "cleanup-b-$index", 100, BudgetPolicy(), 30)
                     val captureB = requireNotNull(ops.pinnedEnvelope(fp))

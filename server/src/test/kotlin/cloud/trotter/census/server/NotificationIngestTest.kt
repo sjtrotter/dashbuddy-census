@@ -5,6 +5,7 @@ import cloud.trotter.census.server.auth.hashSecret
 import cloud.trotter.census.server.db.*
 import cloud.trotter.census.server.ingest.*
 import io.ktor.client.statement.bodyAsText
+import io.ktor.client.request.get
 import io.ktor.http.HttpMethod
 import io.ktor.server.testing.testApplication
 import kotlinx.coroutines.*
@@ -59,7 +60,7 @@ class NotificationIngestTest {
             assertEquals(2, sql { it.select("SELECT count(*) FROM clusters") { row -> row.getInt(1) } })
             val stored = sql { it.select("SELECT skeleton::text FROM cluster_samples WHERE fingerprint = ?", notification.getValue("fingerprint").jsonPrimitive.content) { row -> row.getString(1) } }
             assertEquals(notification, Json.parseToJsonElement(requireNotNull(stored)))
-            assertEquals(1, sql { it.select("SELECT count(*) FROM token_sightings") { row -> row.getInt(1) } })
+            assertEquals(1, sql { it.select("SELECT count(*) FROM token_sightings_v5") { row -> row.getInt(1) } })
             // Rejected items never produce samples or token rows.
             val invalid = JsonObject(notification + ("channelId" to JsonPrimitive("PRIVATE TEXT")))
             assertEquals(422, client.signed(clock, id, key, HttpMethod.Post, "/v1/skeletons", batch("invalid", listOf(invalid))).status.value)
@@ -144,6 +145,31 @@ class NotificationIngestTest {
             instant = instant.plusSeconds(28 * 86400L)
             assertFalse(visible(ops.cluster(item.item.fingerprint)))
             assertNull(ops.cluster(item.item.fingerprint)?.notes)
+        }
+    }
+
+    @Test fun `configuration toggles off on off and advertised floor matches enrolment and mixed admission`() {
+        Database.connect(config()).use { db ->
+            for ((index, enabled) in listOf(false, true, false).withIndex()) testApplication {
+                val configured = config().copy(notificationsEnabled=enabled, minimumFilterRev=2)
+                application { module(configured, db, clock) }
+                val published = Json.parseToJsonElement(client.get("/v1/policy").bodyAsText()).jsonObject
+                assertEquals(2, published.getValue("minimumFilterRev").jsonPrimitive.int)
+                assertEquals(if (enabled) 2 else 1, published.getValue("acceptedSchemaIds").jsonArray.size)
+                val id = UUID.randomUUID().toString(); val key=secret(121)
+                val enrol = Json.parseToJsonElement(client.enrol(id,key).bodyAsText()).jsonObject
+                assertEquals(published, JsonObject(enrol - "installIdPrefix"))
+                val screen = JsonObject(screen() + ("filterRev" to JsonPrimitive(2)))
+                val notification = JsonObject(notificationFixture(day) + ("filterRev" to JsonPrimitive(2)))
+                val items = List(4) { screen } + notification
+                val response=client.signed(clock,id,key,HttpMethod.Post,"/v1/skeletons",batch("flag-$index",items))
+                assertEquals(200,response.status.value)
+                val ledger=InstallStore(db,clock).ledgerFor(UUID.fromString(id),day)!!
+                assertEquals(if (enabled) emptyMap<String,Int>() else mapOf("unknown_schema" to 1),ledger.rejectedByReason)
+                val old=List(4) { screen } + screen()
+                assertEquals(200,client.signed(clock,id,key,HttpMethod.Post,"/v1/skeletons",batch("floor-$index",old)).status.value)
+                assertEquals(1,InstallStore(db,clock).ledgerFor(UUID.fromString(id),day)!!.rejectedByReason["filter_rev_too_old"])
+            }
         }
     }
 

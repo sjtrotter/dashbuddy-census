@@ -20,7 +20,8 @@ for candidate in backups/census-????-??-??.sql.gz; do
     if [[ "$day" < "$cutoff" ]]; then rm -- "$candidate"; fi
 done
 printf 'Backup created: %s\n' "$dump"
-# #1192: the withdrawal journal rides beside every dump (restoring an OLDER dump needs the LATEST journal). The dump
-# already holds the tombstones as of dump time, so an export/upload failure must not cost the day's dump — it is
-# reported, not fatal.
-./export-withdrawals.sh || printf 'WARNING: withdrawal journal export failed (the dump is intact; the SNS notices remain the journal for today)\n' >&2
+# Both recovery exports happen AFTER the dump. Either failure fails the backup operation;
+# an intact dump alone is not a complete recovery set. Preserve it for diagnosis/retry.
+./export-withdrawals.sh
+./export-filter-floor.sh
+printf 'Backup recovery journals exported successfully.\n'

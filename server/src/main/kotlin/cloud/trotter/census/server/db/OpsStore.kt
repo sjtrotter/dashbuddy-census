@@ -8,6 +8,7 @@ import cloud.trotter.census.server.Database
 import cloud.trotter.census.server.Policy
 import cloud.trotter.census.server.auth.sha256Hex
 import cloud.trotter.census.server.ingest.WireGrammars
+import cloud.trotter.census.server.ingest.StoredSampleExpiry
 import cloud.trotter.census.server.ops.RenderedSkeleton
 import cloud.trotter.census.server.ops.RenderedWireframe
 import cloud.trotter.census.server.ops.SkeletonRender
@@ -76,10 +77,10 @@ data class OpsClusterSummaryRow(val platform: String, val platformAppVersion: St
 @Serializable
 data class OpsClusterPage(val platform: String, val platformAppVersion: String?, val status: String?, val total: Int, val page: Int, val pageSize: Int, val pageCount: Int, val clusters: List<OpsCluster>, val byClass: Map<String, Int> = emptyMap(), val kind: SkeletonKind? = null)
 
-/** Hash-free vocabulary display projection; no plaintext or token identifier enters HTML. */
+/** Hash-free vocabulary_v5 display projection; no plaintext or token identifier enters HTML. */
 data class OpsVocabularyDisplay(val kind: String, val distinctInstalls: Int, val firstDay: String, val lastDay: String)
 
-/** Review order: what an operator should look at first. The one owner of the status vocabulary. */
+/** Review order: what an operator should look at first. The one owner of the status vocabulary_v5. */
 val CLUSTER_STATUSES: List<String> = listOf("new", "triaged", "drafted", "resolved", "ignored")
 
 /** distinctInstalls28d × log2(1 + sightings28d) × recency (1.0 within 7 days, 0.5 within 28, else 0.1). */
@@ -172,7 +173,7 @@ class OpsStore(private val db: Database, private val clock: Clock, private val p
         """SELECT e.id, e.envelope::text AS bytes, e.received_day, left(e.install_id::text, 8) AS prefix,
             e.envelope->'metadata'->>'platformAppVersion' AS version
             FROM trusted_envelopes e JOIN installs i ON i.install_id = e.install_id
-            WHERE e.fingerprint = ? AND EXISTS (SELECT 1 FROM clusters c WHERE c.fingerprint = e.fingerprint AND c.kind = 'screen') AND i.trusted AND i.revoked_at IS NULL
+            WHERE e.fingerprint = ? AND EXISTS (SELECT 1 FROM clusters c WHERE c.fingerprint = e.fingerprint AND c.kind = 'screen') AND i.trusted AND i.revoked_at IS NULL AND e.purge_after > DATE '${clock.today()}'
             AND (?::bigint IS NULL OR e.id = ?) ORDER BY e.received_day DESC, e.id DESC LIMIT 1""" +
             if (lock) " FOR SHARE OF e" else "",
         fingerprint, envelopeId, envelopeId,
@@ -182,8 +183,12 @@ class OpsStore(private val db: Database, private val clock: Clock, private val p
     suspend fun saveClassification(fp: String, screenClass: String?, notes: String? = null): Boolean = query {
         require(screenClass == null || screenClass in RuleAuthoringVocabulary.SCREEN_CLASSES)
         require(notes == null || notes.length <= 2000)
-        update("UPDATE clusters SET screen_class = ?, notes = COALESCE(?, notes) WHERE fingerprint = ?", screenClass, notes, fp) == 1
+        update("UPDATE clusters SET screen_class = ?, notes = CASE WHEN $liveSample THEN COALESCE(?, notes) ELSE notes END WHERE fingerprint = ?",
+            screenClass, notes, fp) == 1
     }
+
+    /** Notes describe a stored sample: a write lands only while the cluster holds one (the sweep clears them with the last). */
+    private val liveSample = "EXISTS (SELECT 1 FROM cluster_samples s WHERE s.fingerprint = clusters.fingerprint)"
 
     /** Pin metadata travels separately from selections in the stored document; never through a DTO. */
     suspend fun saveDraft(fp: String, screenClass: String, selectionsJson: JsonObject, json5: String, day: LocalDate): Boolean = query {
@@ -206,11 +211,14 @@ class OpsStore(private val db: Database, private val clock: Clock, private val p
             put("json5", json5); put("envelopeId", id); put("envelopeSha256", pinned.sha256Hex)
         }
         update("""UPDATE clusters SET screen_class = ?, draft = ?::jsonb, draft_day = ?, status = 'drafted',
-            notes = COALESCE(?, notes) WHERE fingerprint = ? AND kind = 'screen'""", screenClass, draft.toString(), day, notes, fp) == 1
+            notes = CASE WHEN $liveSample THEN COALESCE(?, notes) ELSE notes END WHERE fingerprint = ? AND kind = 'screen'""",
+            screenClass, draft.toString(), day, notes, fp) == 1
     }
 
     suspend fun draftJson5(fp: String): String? = query {
-        select("SELECT draft->>'json5' FROM clusters WHERE fingerprint = ? AND kind = 'screen'", fp) { it.getString(1) }
+        select("""SELECT c.draft->>'json5' FROM clusters c WHERE c.fingerprint = ? AND c.kind = 'screen'
+            AND EXISTS (SELECT 1 FROM trusted_envelopes e WHERE e.id::text=c.draft->>'envelopeId'
+            AND e.purge_after > DATE '${clock.today()}')""", fp) { it.getString(1) }
     }
 
     suspend fun cluster(fingerprint: String, withWireframe: Boolean = false): OpsCluster? = query {
@@ -219,7 +227,7 @@ class OpsStore(private val db: Database, private val clock: Clock, private val p
         val wireframe = if (withWireframe && row.kind == SkeletonKind.SCREEN) select(
             """SELECT e.envelope, e.received_day, left(e.install_id::text, 8) AS prefix
                 FROM trusted_envelopes e JOIN installs i ON i.install_id = e.install_id
-                WHERE e.fingerprint = ? AND EXISTS (SELECT 1 FROM clusters c WHERE c.fingerprint = e.fingerprint AND c.kind = 'screen') AND i.trusted AND i.revoked_at IS NULL
+                WHERE e.fingerprint = ? AND EXISTS (SELECT 1 FROM clusters c WHERE c.fingerprint = e.fingerprint AND c.kind = 'screen') AND i.trusted AND i.revoked_at IS NULL AND e.purge_after > DATE '${clock.today()}'
                 ORDER BY e.received_day DESC, e.id DESC LIMIT 1""",
             fingerprint,
         ) { WireframeRender.render(it.getString("envelope"), it.getString("received_day"), it.getString("prefix")) } else null
@@ -228,13 +236,17 @@ class OpsStore(private val db: Database, private val clock: Clock, private val p
 
     private fun Connection.clusterRows(today: LocalDate, status: String? = null, fingerprint: String? = null): List<OpsCluster> =
         select(
-            """SELECT c.fingerprint, c.platform, c.kind, c.status, c.first_seen_day, c.last_seen_day, c.resolved_rule_id, c.notes,
-                c.screen_class, c.draft IS NOT NULL AS has_draft, c.draft_day, count(DISTINCT s.install_id) FILTER (WHERE NOT i.trusted AND s.day >= ? AND s.day <= ?) AS installs,
-                COALESCE(bool_or(i.trusted), false) AS trusted,
+            """SELECT c.fingerprint, c.platform, c.kind, c.status, c.first_seen_day, c.last_seen_day, c.resolved_rule_id,
+                CASE WHEN EXISTS (SELECT 1 FROM cluster_samples cs WHERE cs.fingerprint=c.fingerprint
+                    AND cs.purge_after > DATE '$today') AND NOT EXISTS (SELECT 1 FROM cluster_samples expired
+                    WHERE expired.fingerprint=c.fingerprint AND (expired.purge_after IS NULL OR expired.purge_after <= DATE '$today')) THEN c.notes ELSE NULL END AS notes,
+                c.screen_class, c.draft IS NOT NULL AND EXISTS (SELECT 1 FROM trusted_envelopes e
+                    WHERE e.id::text=c.draft->>'envelopeId' AND e.purge_after > DATE '$today') AS has_draft, c.draft_day, count(DISTINCT s.install_id) FILTER (WHERE NOT i.trusted AND s.day >= ? AND s.day <= ?) AS installs,
+                COALESCE(bool_or(i.trusted AND s.day + 30 > DATE '$today'), false) AS trusted,
                 COALESCE(sum(s.count) FILTER (WHERE s.day >= ? AND s.day <= ?), 0) AS sightings,
                 COALESCE(jsonb_agg(DISTINCT s.platform_app_version) FILTER (WHERE s.platform_app_version IS NOT NULL), '[]'::jsonb) AS versions
-                FROM clusters c LEFT JOIN cluster_sightings s ON s.fingerprint = c.fingerprint
-                LEFT JOIN installs i ON i.install_id = s.install_id
+                FROM clusters c LEFT JOIN cluster_sightings_v5 s ON s.fingerprint = c.fingerprint AND s.day + 90 > DATE '$today' AND s.hash_domain IN (${policy.acceptedHashDomains.joinToString(",")}) AND s.filter_rev >= ${policy.minimumFilterRev}
+                LEFT JOIN installs i ON i.install_id = s.install_id AND i.revoked_at IS NULL
                 WHERE (?::text IS NULL OR c.status = ?) AND (?::text IS NULL OR c.fingerprint = ?)
                 GROUP BY c.fingerprint""",
             today.minusDays(27), today, today.minusDays(27), today, status, status, fingerprint, fingerprint,
@@ -258,8 +270,10 @@ class OpsStore(private val db: Database, private val clock: Clock, private val p
         } } ?: emptyList()
 
     private fun Connection.versionFirstDays(): Map<Pair<String, String>, LocalDate> = select(
-        """SELECT c.platform, s.platform_app_version, min(s.day) AS day FROM cluster_sightings s
-            JOIN clusters c ON c.fingerprint = s.fingerprint GROUP BY c.platform, s.platform_app_version""",
+        """SELECT c.platform, s.platform_app_version, min(s.day) AS day FROM cluster_sightings_v5 s
+            JOIN clusters c ON c.fingerprint = s.fingerprint WHERE s.day + 90 > DATE '${clock.today()}'
+            AND s.hash_domain IN (${policy.acceptedHashDomains.joinToString(",")}) AND s.filter_rev >= ${policy.minimumFilterRev}
+            GROUP BY c.platform, s.platform_app_version""",
     ) { rows -> buildMap {
         do { put(rows.getString("platform") to rows.getString("platform_app_version"), rows.getObject("day", LocalDate::class.java)) } while (rows.next())
     } } ?: emptyMap()
@@ -272,11 +286,11 @@ class OpsStore(private val db: Database, private val clock: Clock, private val p
     private fun score(row: OpsCluster, today: LocalDate): Double = reviewScore(row, today)
 
     private fun Connection.samples(row: OpsCluster): List<OpsSample> = select(
-        "SELECT platform_app_version, received_day, skeleton FROM cluster_samples WHERE fingerprint = ? ORDER BY received_day DESC, platform_app_version",
+        "SELECT platform_app_version, received_day, skeleton, hash_domain, filter_rev FROM cluster_samples WHERE fingerprint = ? AND purge_after > DATE '${clock.today()}' AND hash_domain IN (${policy.acceptedHashDomains.joinToString(",")}) AND filter_rev >= ${policy.minimumFilterRev} ORDER BY received_day DESC, platform_app_version",
         row.fingerprint,
     ) { rows -> buildList {
         do {
-            val sample = rows.getString("skeleton")
+            val sample = StoredSampleExpiry.rewrite(rows.getString("skeleton"), liveHashes(rows.getInt("hash_domain"), rows.getInt("filter_rev"), clock.today(), rows.getString("skeleton")))
             add(OpsSample(rows.getString("platform_app_version"), rows.getString("received_day"),
                 skeleton = if (row.kind == SkeletonKind.SCREEN) SkeletonRender.render(sample, row.unblinded) else null,
                 notification = if (row.kind == SkeletonKind.NOTIFICATION) SkeletonRender.renderNotification(sample, row.unblinded) else null))
@@ -284,7 +298,13 @@ class OpsStore(private val db: Database, private val clock: Clock, private val p
     } } ?: emptyList()
 
     suspend fun status(fingerprint: String, status: String, resolvedRuleId: String?, notes: String?): Boolean = query {
-        update("UPDATE clusters SET status = ?, resolved_rule_id = ?, notes = ? WHERE fingerprint = ?", status, resolvedRuleId, notes, fingerprint) == 1
+        val changed = update("""UPDATE clusters SET status = ?, resolved_rule_id = ?, notes = CASE WHEN EXISTS(SELECT 1 FROM cluster_samples
+                WHERE fingerprint=clusters.fingerprint AND purge_after > DATE '${clock.today()}') THEN ? ELSE NULL END,
+            resolved_day = CASE WHEN ? = 'resolved' THEN COALESCE(resolved_day, ?) ELSE resolved_day END
+            WHERE fingerprint = ?""", status, resolvedRuleId, notes, status, clock.today(), fingerprint) == 1
+        if (changed) update("""UPDATE cluster_samples s SET purge_after=LEAST(s.purge_after,c.resolved_day+30)
+            FROM clusters c WHERE c.fingerprint=s.fingerprint AND c.fingerprint=? AND c.resolved_day IS NOT NULL""", fingerprint)
+        changed
     }
 
     suspend fun installs(limit: Int = 50): JsonArray = query {
@@ -332,7 +352,7 @@ class OpsStore(private val db: Database, private val clock: Clock, private val p
         var batches = 0L
         val rejected = sortedMapOf<String, Long>()
         val installs = array("""SELECT left(install_id::text, 8) AS prefix, bytes, accepted, duplicate, rejected, cardinality(batch_ids) AS batches
-            FROM ingest_ledger WHERE day = ? ORDER BY install_id""", day) { row ->
+            FROM ingest_ledger WHERE day = ? AND day + 7 > ? ORDER BY install_id""", day, clock.today()) { row ->
             val reasons = Json.decodeFromString<Map<String, Long>>(row.getString("rejected"))
             bytes += row.getLong("bytes"); accepted += row.getLong("accepted"); duplicate += row.getLong("duplicate"); batches += row.getLong("batches")
             reasons.forEach { (reason, count) -> rejected[reason] = rejected.getOrDefault(reason, 0) + count }
@@ -351,45 +371,56 @@ class OpsStore(private val db: Database, private val clock: Clock, private val p
         }
     }
 
+    private val queueSql: String get() = VocabularyEligibility.queue(policy)
+    private fun queueArgs(): Array<Any> = VocabularyEligibility.args(clock.now(), clock.today())
+
     suspend fun vocabularyQueue(limit: Int = 50): JsonArray = query { queue(limit) }
 
     suspend fun vocabularyQueueDisplay(limit: Int = 50): List<OpsVocabularyDisplay> = query {
-        select("SELECT kind, installs, first_day, last_day FROM ($QUEUE_SQL) queue ORDER BY first_day, token_hash LIMIT ?", policy.k, limit) { rows -> buildList {
+        select("SELECT kind, installs, first_day, last_day FROM ($queueSql) queue ORDER BY first_day, token_hash LIMIT ?", *queueArgs(), limit) { rows -> buildList {
             do { add(OpsVocabularyDisplay(rows.getString("kind"), rows.getInt("installs"), rows.getString("first_day"), rows.getString("last_day"))) } while (rows.next())
         } } ?: emptyList()
     }
 
     suspend fun vocabularyQueueCount(): Long = query {
-        select("SELECT count(*) FROM ($QUEUE_SQL) queue", policy.k) { it.getLong(1) } ?: 0L
+        select("SELECT count(*) FROM ($queueSql) queue", *queueArgs()) { it.getLong(1) } ?: 0L
     }
 
-    private fun Connection.queue(limit: Int): JsonArray = array("$QUEUE_SQL ORDER BY first_day, token_hash LIMIT ?", policy.k, limit) { row -> buildJsonObject {
-        put("tokenHash", row.getString("token_hash")); put("kind", row.getString("kind")); put("distinctInstalls", row.getInt("installs"))
+    suspend fun lifecycleOverdue(): Map<String,Long> = LifecycleStore(db,clock,policy).remainingDue()
+
+    suspend fun filterRevisionRejections(): Long = query {
+        select("SELECT COALESCE(sum((rejected->>'filter_rev_too_old')::bigint),0) FROM ingest_ledger WHERE day > ?", clock.today().minusDays(7)) { it.getLong(1) } ?: 0L
+    }
+
+    private fun Connection.queue(limit: Int): JsonArray = array("$queueSql ORDER BY first_day, token_hash LIMIT ?", *queueArgs(), limit) { row -> buildJsonObject {
+        put("tokenHash", row.getString("token_hash")); put("hashDomain", row.getInt("hash_domain")); put("filterRev", row.getInt("filter_rev"))
+        put("kind", row.getString("kind")); put("distinctInstalls", row.getInt("installs"))
         put("firstDay", row.getString("first_day")); put("lastDay", row.getString("last_day"))
     } }
 
-    /** Only a currently eligible hash may be resolved. Concurrent resolutions never overwrite each other. */
-    suspend fun resolve(tokenHash: String, clearText: String?, source: String, reject: Boolean): Boolean = query {
+    /** Parent locks serialize against trust/revocation/withdrawal; the insertion uses a fresh snapshot. */
+    suspend fun resolve(tokenHash: String, clearText: String?, source: String, reject: Boolean,
+        hashDomain: Int = 1, filterRev: Int = policy.minimumFilterRev): Boolean = query {
+        val locked = select("""SELECT i.install_id FROM installs i WHERE EXISTS (SELECT 1 FROM token_sightings_v5 t
+            WHERE t.install_id=i.install_id AND t.token_hash=? AND t.hash_domain=? AND t.filter_rev=?)
+            ORDER BY i.install_id FOR SHARE OF i""", tokenHash, hashDomain, filterRev) { rows -> buildList { do { add(rows.getObject(1, UUID::class.java)) } while (rows.next()) } } ?: emptyList()
+        if (locked.size < policy.k) return@query false
+        val lockedIds = locked.joinToString(",") { "'$it'::uuid" }
+        val resolutionQueue = queueSql.replace("WHERE NOT i.trusted", "WHERE i.install_id IN ($lockedIds) AND NOT i.trusted")
         val today = clock.today()
         update(
-            """INSERT INTO vocabulary (token_hash, kind, distinct_installs_at_promotion, promoted_day, clear_text, unblinded_day, source, status)
-                SELECT token_hash, kind, installs, ?, ?, ?, ?, ? FROM ($QUEUE_SQL) queue WHERE token_hash = ?
-                ON CONFLICT (token_hash) DO NOTHING""",
+            """INSERT INTO vocabulary_v5 (token_hash, kind, distinct_installs_at_promotion, promoted_day, clear_text, unblinded_day, source, status, hash_domain, filter_rev)
+                SELECT token_hash, kind, installs, ?, ?, ?, ?, ?, hash_domain, filter_rev FROM ($resolutionQueue) queue
+                WHERE token_hash = ? AND hash_domain=? AND filter_rev=?
+                ON CONFLICT (hash_domain, token_hash, filter_rev) DO NOTHING""",
             today, if (reject) null else clearText, if (reject) null else today, source,
-            if (reject) "rejected" else "unblinded", policy.k, tokenHash,
+            if (reject) "rejected" else "unblinded", *queueArgs(), tokenHash, hashDomain, filterRev,
         ) == 1
     }
 
     private fun Connection.array(sql: String, vararg args: Any?, read: (ResultSet) -> JsonObject): JsonArray =
         JsonArray(select(sql, *args) { rows -> buildList { do { add(read(rows)) } while (rows.next()) } } ?: emptyList())
 
-    companion object {
-        private const val QUEUE_SQL = """SELECT t.token_hash, min(t.kind) AS kind, count(DISTINCT t.install_id) AS installs,
-            min(t.first_day) AS first_day, max(t.last_day) AS last_day FROM token_sightings t
-            JOIN installs i ON i.install_id = t.install_id WHERE NOT i.trusted
-            AND NOT EXISTS (SELECT 1 FROM vocabulary v WHERE v.token_hash = t.token_hash)
-            GROUP BY t.token_hash HAVING count(DISTINCT t.install_id) >= ?"""
-    }
 }
 
 /** Private capture provenance, deliberately not serializable. */

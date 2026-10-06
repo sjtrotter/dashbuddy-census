@@ -210,7 +210,7 @@ class InstallStore(private val db: Database, private val clock: Clock) {
 
     suspend fun purgeWithdrawals(olderThan: Instant): Int = purge("withdrawals") {
         update(
-            "DELETE FROM withdrawals WHERE ctid IN (SELECT ctid FROM withdrawals WHERE withdrawn_at < ? LIMIT 1000)",
+            "DELETE FROM withdrawals WHERE ctid IN (SELECT ctid FROM withdrawals WHERE withdrawn_at <= ? LIMIT 1000)",
             olderThan.atOffset(ZoneOffset.UTC),
         )
     }
@@ -239,20 +239,38 @@ class InstallStore(private val db: Database, private val clock: Clock) {
         ) == 1
     }
 
+    suspend fun remainingDue(today: LocalDate, now: Instant): Map<String, Long> = query {
+        mapOf(
+            "nonces" to (select("SELECT count(*) FROM nonces WHERE issued_at < ?", now.minusSeconds(3600).atOffset(ZoneOffset.UTC)) { it.getLong(1) } ?: 0L),
+            "ledger" to (select("SELECT count(*) FROM ingest_ledger WHERE day + 7 <= ?", today) { it.getLong(1) } ?: 0L),
+            "envelopes" to (select("SELECT count(*) FROM trusted_envelopes WHERE purge_after <= ?", today) { it.getLong(1) } ?: 0L),
+            "health" to (select("SELECT count(*) FROM health_daily WHERE day + 180 <= ?", today) { it.getLong(1) } ?: 0L),
+            "withdrawals" to (select("SELECT count(*) FROM withdrawals WHERE withdrawn_at <= ?", now.minusSeconds(60*86400L).atOffset(ZoneOffset.UTC)) { it.getLong(1) } ?: 0L),
+        )
+    }
+
+    suspend fun purgeInactive(today: LocalDate): Int = query {
+        val ids = select("SELECT install_id FROM installs WHERE last_seen_day + 365 <= ? ORDER BY install_id LIMIT 1000 FOR UPDATE", today) { rows ->
+            buildList { do { add(rows.getObject(1, UUID::class.java)) } while (rows.next()) }
+        } ?: emptyList()
+        for (id in ids) deleteInstallRows(id)
+        ids.size
+    }
+
     suspend fun purgeNonces(olderThan: Instant): Int = purge("nonces") {
         update("DELETE FROM nonces WHERE ctid IN (SELECT ctid FROM nonces WHERE issued_at < ? LIMIT 1000)", olderThan.atOffset(ZoneOffset.UTC))
     }
 
     suspend fun purgeLedger(olderThan: LocalDate): Int = purge("ledger") {
-        update("DELETE FROM ingest_ledger WHERE ctid IN (SELECT ctid FROM ingest_ledger WHERE day < ? LIMIT 1000)", olderThan)
+        update("DELETE FROM ingest_ledger WHERE ctid IN (SELECT ctid FROM ingest_ledger WHERE day <= ? LIMIT 1000)", olderThan)
     }
 
     suspend fun purgeTrustedEnvelopes(today: LocalDate): Int = purge("envelopes") {
         deleteEnvelopesAndClearDrafts("""DELETE FROM trusted_envelopes WHERE ctid IN
-            (SELECT ctid FROM trusted_envelopes WHERE purge_after < ? LIMIT 1000) RETURNING id""", today)
+            (SELECT ctid FROM trusted_envelopes WHERE purge_after <= ? LIMIT 1000) RETURNING id""", today)
     }
 
-    private fun Connection.deleteEnvelopesAndClearDrafts(sql: String, argument: Any): Int {
+    internal fun Connection.deleteEnvelopesAndClearDrafts(sql: String, argument: Any): Int {
         val ids = prepareStatement(sql).use { statement ->
             statement.setObject(1, argument)
             statement.executeQuery().use { rows ->
@@ -271,7 +289,7 @@ class InstallStore(private val db: Database, private val clock: Clock) {
     }
 
     suspend fun purgeHealthDaily(olderThan: LocalDate): Int = purge("health") {
-        update("DELETE FROM health_daily WHERE ctid IN (SELECT ctid FROM health_daily WHERE day < ? LIMIT 1000)", olderThan)
+        update("DELETE FROM health_daily WHERE ctid IN (SELECT ctid FROM health_daily WHERE day <= ? LIMIT 1000)", olderThan)
     }
 
     private suspend fun purge(name: String, batch: Connection.() -> Int): Int {
@@ -280,7 +298,10 @@ class InstallStore(private val db: Database, private val clock: Clock) {
         var count: Int
         do {
             currentCoroutineContext().ensureActive()
-            count = query(batch)
+            count = try { query(batch) } catch (failure: Exception) {
+                if (failure is kotlinx.coroutines.CancellationException) throw failure
+                throw SweepFailure(deleted.toLong(), batches, failure)
+            }
             deleted += count
             batches++
         } while (count == 1000 && batches < 50)
@@ -379,7 +400,7 @@ class InstallStore(private val db: Database, private val clock: Clock) {
             MessageDigest.getInstance("SHA-256").digest(installId.toString().toByteArray(Charsets.UTF_8)).toLowerHex()
 
         val WITHDRAWAL_TABLES: List<String> = listOf(
-            "trusted_envelopes", "health_daily", "token_sightings", "cluster_sightings", "ingest_ledger", "nonces", "installs",
+            "trusted_envelopes", "health_daily", "token_sightings_v5", "cluster_sightings_v5", "ingest_ledger", "nonces", "installs",
         )
     }
 }
@@ -463,3 +484,6 @@ internal fun <T> Connection.select(sql: String, vararg args: Any?, read: (Result
         args.forEachIndexed { index, value -> statement.setObject(index + 1, value) }
         statement.executeQuery().use { rows -> if (rows.next()) read(rows) else null }
     }
+
+/** Internal progress carrier; never rendered into an ops response or logged as exception text. */
+internal class SweepFailure(val deleted: Long, val batches: Int, cause: Exception) : RuntimeException(null, cause)

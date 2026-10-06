@@ -1,6 +1,6 @@
 # Self-hosting
 
-S1 serves only `/healthz`, `/readyz`, and `/v1/policy`. It does not accept app data.
+The server supports signed ingestion and authenticated operator review. Notifications default off (`CENSUS_NOTIFICATIONS_ENABLED=false`); the positive minimum filter revision defaults to 1 (`CENSUS_MIN_FILTER_REV`). Lifecycle replay and catch-up must complete before HTTP starts. Follow [activation and recovery](OPERATOR.md#notification-activation-and-rollback).
 
 ## Public deployment
 

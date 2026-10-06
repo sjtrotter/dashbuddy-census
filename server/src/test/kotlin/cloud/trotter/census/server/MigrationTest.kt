@@ -19,6 +19,29 @@ import java.sql.DriverManager
 @Testcontainers
 @EnabledIf(value = "dockerAvailable", disabledReason = "Docker unavailable: PostgreSQL migration test skipped")
 class MigrationTest {
+    @Test fun `populated V4 upgrades additively to V5 and validates repeated DDL`() {
+        fun migration(target: String) = Flyway.configure().dataSource(postgres.jdbcUrl,postgres.username,postgres.password)
+            .schemas("lifecycle_upgrade").defaultSchema("lifecycle_upgrade").locations("classpath:db/migration").target(target).load()
+        migration("4").migrate()
+        DriverManager.getConnection(postgres.jdbcUrl,postgres.username,postgres.password).use { connection ->
+            connection.createStatement().use { statement ->
+                statement.execute("SET search_path TO lifecycle_upgrade")
+                statement.execute("INSERT INTO installs(install_id,key_hash,created_day,last_seen_day) VALUES('00000000-0000-4000-8000-000000000001',repeat('a',64),'2026-10-01','2026-10-01')")
+                statement.execute("INSERT INTO token_sightings VALUES('0123456789abcdef','00000000-0000-4000-8000-000000000001','2026-10-01','2026-10-01','words:1')")
+                assertEquals(1,migration("5").migrate().migrationsExecuted)
+                assertEquals(0,migration("5").migrate().migrationsExecuted)
+                val ddl=javaClass.getResourceAsStream("/db/migration/V5__skeleton_lifecycle.sql")!!.bufferedReader().use { it.readText() }
+                statement.execute(ddl)
+                statement.executeQuery("SELECT count(*) FROM token_sightings").use { it.next(); assertEquals(1,it.getInt(1)) }
+                statement.executeQuery("SELECT count(*) FROM token_sightings_v5").use { it.next(); assertEquals(0,it.getInt(1)) }
+                assertTrue(runCatching { statement.execute("INSERT INTO filter_floor VALUES(false,1,'2026-10-01')") }.isFailure)
+                assertTrue(runCatching { statement.execute("INSERT INTO filter_floor VALUES(true,0,'2026-10-01')") }.isFailure)
+                statement.execute("ALTER TABLE token_sightings_v5 DROP CONSTRAINT token_sightings_v5_filter_rev_check")
+                assertTrue(runCatching { statement.execute(ddl) }.isFailure)
+            }
+        }
+    }
+
     @Test
     fun `V3 to V4 backfills screen and preserves sample relationship`() {
         fun migration(target: String) = Flyway.configure()
@@ -66,16 +89,16 @@ class MigrationTest {
     }
 
     @Test
-    fun `empty database applies every migration and contains exactly twelve application tables`() {
+    fun `empty database applies every migration and contains exactly sixteen application tables`() {
         val flyway = Flyway.configure()
             .dataSource(postgres.jdbcUrl, postgres.username, postgres.password)
             .locations("classpath:db/migration")
             .load()
         // V1 schema, V2 cluster classification, V3 withdrawal tombstones and enrolment instants.
-        assertEquals(4, flyway.migrate().migrationsExecuted)
+        assertEquals(5, flyway.migrate().migrationsExecuted)
         val expected = setOf(
             "installs", "clusters", "cluster_samples", "cluster_sightings", "token_sightings",
-            "vocabulary", "trusted_envelopes", "health_daily", "health_fleet_daily", "ingest_ledger", "nonces", "withdrawals",
+            "vocabulary", "trusted_envelopes", "health_daily", "health_fleet_daily", "ingest_ledger", "nonces", "withdrawals", "token_sightings_v5", "cluster_sightings_v5", "vocabulary_v5", "filter_floor",
         )
         DriverManager.getConnection(postgres.jdbcUrl, postgres.username, postgres.password).use { connection ->
             connection.createStatement().use { statement ->

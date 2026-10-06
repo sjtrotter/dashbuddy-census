@@ -48,7 +48,8 @@ import kotlin.time.Duration.Companion.minutes
 /** Wires public and identity endpoints, with a clock seam for UTC decisions. */
 fun Application.module(
     config: Config, db: Database?, clock: Clock = SystemClock, alarmEvaluator: HealthAlarms? = null,
-    policy: Policy = Policy(serverVersion = config.serverVersion, imageDigest = config.imageDigest),
+    policy: Policy = config.policy(),
+    lifecycle: cloud.trotter.census.server.jobs.LifecycleReport? = null,
 ) {
     install(ContentNegotiation) {
         json(
@@ -147,7 +148,7 @@ fun Application.module(
         val envelopes = db?.let { EnvelopeStore(it, clock) }
         val health = db?.let { HealthStore(it, clock) }
         val alarms = alarmEvaluator ?: health?.let { HealthAlarms(it, clock) }
-        opsRoutes(config, db?.let { OpsStore(it, clock, policy) }, alarms, clock, policy)
+        opsRoutes(config, db?.let { OpsStore(it, clock, policy) }, alarms, clock, policy, lifecycle = lifecycle)
         identityRoutes(store, clock, policy, alarms) {
             if (store != null && skeletons != null) skeletonRoutes(store, skeletons, clock, policy)
             if (envelopes != null) envelopeRoutes(envelopes, clock, policy)
