@@ -454,7 +454,15 @@ write_files:
                               continue
                           heapq.heappush(pending, (int(match[1]), int(match[2]), name, message, kind))
                           if len(pending) > 256:
-                              remove(spool, heapq.heappop(pending)[2], deadline)
+                              # #1192: the pending cap evicts the oldest HEALTH alarm only — a withdrawal notice is
+                              # the journal row for a data-subject deletion and stays queued on disk until it
+                              # publishes (the scan cap bounds the backlog; nothing is lost to a burst).
+                              evictable = [entry for entry in pending if entry[4] != 'withdrawal']
+                              if evictable:
+                                  victim = min(evictable)
+                                  pending.remove(victim)
+                                  heapq.heapify(pending)
+                                  remove(spool, victim[2], deadline)
                   counts['deferred'] = len(pending)
                   with opened('alarm-publish-state.json', os.O_RDWR | os.O_NOFOLLOW
                               | os.O_NONBLOCK | os.O_CLOEXEC, parent) as (state_fd, info):
