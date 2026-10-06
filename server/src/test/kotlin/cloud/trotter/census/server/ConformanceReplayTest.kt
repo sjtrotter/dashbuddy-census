@@ -90,9 +90,11 @@ class ConformanceReplayTest {
                     }
                 }
             }
-            val screens = GZIPInputStream(Files.newInputStream(Path.of(System.getProperty("census.contractDir"), "conformance", "skeletons.jsonl.gz")))
-                .bufferedReader().useLines { lines -> lines.map { Json.parseToJsonElement(it).jsonObject.getValue("skeleton").jsonObject }
-                    .filter { it["kind"] != JsonPrimitive("notification") }.take(150).toList() }
+            val directory = Path.of(System.getProperty("census.contractDir"), "conformance")
+            val bytes = GZIPInputStream(Files.newInputStream(directory.resolve("skeletons.jsonl.gz"))).use { it.readBytes() }
+            val manifest = Json.parseToJsonElement(Files.readString(directory.resolve("manifest.json"))).jsonObject
+            val screens = readConformanceCorpus(bytes, manifest).builtRecords.map { it.getValue("skeleton").jsonObject }
+                .filter { it["kind"] != JsonPrimitive("notification") }.take(150)
             val notifications = vectors.map { it.getValue("skeleton").jsonObject }
                 .filter { SkeletonValidator.validate(it, notificationPolicy, day) is ItemVerdict.Accepted }
             val mixed = screens.flatMapIndexed { index, screen -> listOf(screen, notifications[index % notifications.size]) }
@@ -124,11 +126,7 @@ class ConformanceReplayTest {
         val directory = Path.of(System.getProperty("census.contractDir"), "conformance")
         val bytes = GZIPInputStream(Files.newInputStream(directory.resolve("skeletons.jsonl.gz"))).use { it.readBytes() }
         val manifest = Json.parseToJsonElement(Files.readString(directory.resolve("manifest.json"))).jsonObject
-        val records = bytes.toString(Charsets.UTF_8).lineSequence().filter { it.isNotBlank() }.map { Json.parseToJsonElement(it).jsonObject }.toList()
-        assertEquals(manifest.getValue("totalRecords").jsonPrimitive.int, records.size)
-        assertEquals(manifest.getValue("sha256").jsonPrimitive.content, cloud.trotter.census.server.auth.sha256Hex(bytes))
-        assertEquals(manifest.getValue("builtBySchema").jsonObject.mapValues { it.value.jsonPrimitive.int },
-            records.groupingBy { it.getValue("skeleton").jsonObject.getValue("schemaId").jsonPrimitive.content }.eachCount())
+        val records = readConformanceCorpus(bytes, manifest).builtRecords
         val vectors = Files.readAllLines(directory.resolve("notification-vectors.jsonl")).filter { it.isNotBlank() }
             .map { Json.parseToJsonElement(it).jsonObject }
         assertEquals(vectors, records.filter { it.getValue("skeleton").jsonObject["kind"] == JsonPrimitive("notification") })
