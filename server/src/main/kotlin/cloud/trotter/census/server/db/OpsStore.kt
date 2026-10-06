@@ -183,8 +183,12 @@ class OpsStore(private val db: Database, private val clock: Clock, private val p
     suspend fun saveClassification(fp: String, screenClass: String?, notes: String? = null): Boolean = query {
         require(screenClass == null || screenClass in RuleAuthoringVocabulary.SCREEN_CLASSES)
         require(notes == null || notes.length <= 2000)
-        update("UPDATE clusters SET screen_class = ?, notes = COALESCE(?, notes) WHERE fingerprint = ?", screenClass, notes, fp) == 1
+        update("UPDATE clusters SET screen_class = ?, notes = CASE WHEN $liveSample THEN COALESCE(?, notes) ELSE notes END WHERE fingerprint = ?",
+            screenClass, notes, fp) == 1
     }
+
+    /** Notes describe a stored sample: a write lands only while the cluster holds one (the sweep clears them with the last). */
+    private val liveSample = "EXISTS (SELECT 1 FROM cluster_samples s WHERE s.fingerprint = clusters.fingerprint)"
 
     /** Pin metadata travels separately from selections in the stored document; never through a DTO. */
     suspend fun saveDraft(fp: String, screenClass: String, selectionsJson: JsonObject, json5: String, day: LocalDate): Boolean = query {
@@ -207,7 +211,8 @@ class OpsStore(private val db: Database, private val clock: Clock, private val p
             put("json5", json5); put("envelopeId", id); put("envelopeSha256", pinned.sha256Hex)
         }
         update("""UPDATE clusters SET screen_class = ?, draft = ?::jsonb, draft_day = ?, status = 'drafted',
-            notes = COALESCE(?, notes) WHERE fingerprint = ? AND kind = 'screen'""", screenClass, draft.toString(), day, notes, fp) == 1
+            notes = CASE WHEN $liveSample THEN COALESCE(?, notes) ELSE notes END WHERE fingerprint = ? AND kind = 'screen'""",
+            screenClass, draft.toString(), day, notes, fp) == 1
     }
 
     suspend fun draftJson5(fp: String): String? = query {
@@ -347,7 +352,7 @@ class OpsStore(private val db: Database, private val clock: Clock, private val p
         var batches = 0L
         val rejected = sortedMapOf<String, Long>()
         val installs = array("""SELECT left(install_id::text, 8) AS prefix, bytes, accepted, duplicate, rejected, cardinality(batch_ids) AS batches
-            FROM ingest_ledger WHERE day = ? ORDER BY install_id""", day) { row ->
+            FROM ingest_ledger WHERE day = ? AND day + 7 > ? ORDER BY install_id""", day, clock.today()) { row ->
             val reasons = Json.decodeFromString<Map<String, Long>>(row.getString("rejected"))
             bytes += row.getLong("bytes"); accepted += row.getLong("accepted"); duplicate += row.getLong("duplicate"); batches += row.getLong("batches")
             reasons.forEach { (reason, count) -> rejected[reason] = rejected.getOrDefault(reason, 0) + count }

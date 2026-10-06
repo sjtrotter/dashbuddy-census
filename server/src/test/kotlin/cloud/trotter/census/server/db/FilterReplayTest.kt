@@ -77,6 +77,25 @@ class FilterReplayTest : LifecycleTestDatabase() {
         }
     }
 
+    @Test fun `raised floor removes a capture whose provenance expired or was never paired`() = runBlocking {
+        Database.connect(config()).use { db ->
+            val id=install(trusted=true); val screen=screenItem(); observe(db,id,listOf(screen))
+            val fp=screen.item.fingerprint
+            val store=FilterPolicyStore(db,clock)
+            store.bootstrap(1) // the first bootstrap discards every legacy capture; these arrive after it
+            sql {
+                it.update("INSERT INTO trusted_envelopes (install_id, fingerprint, envelope, received_day, purge_after) VALUES (?, ?, '{}', ?, ?)", id, fp, day, day.plusDays(30))
+                it.update("INSERT INTO trusted_envelopes (install_id, envelope, received_day, purge_after) VALUES (?, '{}', ?, ?)", id, day, day.plusDays(30))
+                it.update("DELETE FROM cluster_sightings_v5 WHERE fingerprint=?", fp) // provenance aged out before the floor moved
+                it.update("DELETE FROM cluster_samples WHERE fingerprint=?", fp)
+            }
+            store.bootstrap(1)
+            assertEquals(2,count("trusted_envelopes")) // the first revision is still the floor: nothing is unprovable
+            store.bootstrap(2)
+            assertEquals(0,count("trusted_envelopes"))
+        }
+    }
+
     @Test fun `monotonic floor removes exact mixed revisions and never rolls down`() = runBlocking {
         Database.connect(config()).use { db ->
             val id=install(); observe(db,id,listOf(item(1),item(2)))

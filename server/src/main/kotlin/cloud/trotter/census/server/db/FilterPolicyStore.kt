@@ -171,6 +171,18 @@ class FilterPolicyStore(private val db: Database, private val clock: Clock) {
             } }
             revisionCaptures+=n
         } while(n==1000)
+        // A capture carries no filter revision of its own; its provenance is the cluster's sightings/samples.
+        // Once the floor is above the first revision, a capture whose cluster shows NO evidence at or above the
+        // floor (expired provenance, or never paired) cannot be proven safe and is removed conservatively.
+        if (floor > 1) do {
+            currentCoroutineContext().ensureActive()
+            val n=query { with(InstallStore(db,clock)) {
+                deleteEnvelopesAndClearDrafts("""DELETE FROM trusted_envelopes WHERE id IN (SELECT e.id FROM trusted_envelopes e
+                    WHERE e.fingerprint IS NULL OR NOT EXISTS (SELECT 1 FROM cluster_sightings_v5 s WHERE s.fingerprint=e.fingerprint AND s.filter_rev >= ?)
+                    AND NOT EXISTS (SELECT 1 FROM cluster_samples s WHERE s.fingerprint=e.fingerprint AND s.filter_rev >= $floor) LIMIT 1000) RETURNING id""",floor)
+            } }
+            revisionCaptures+=n
+        } while(n==1000)
         counts["revision_captures"]=SweepResult(deleted=revisionCaptures,remainingDue=0)
         // Clear cluster-derived material BEFORE deleting the evidence that identifies affected clusters.
         var affected = 0L

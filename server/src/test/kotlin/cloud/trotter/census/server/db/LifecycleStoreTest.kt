@@ -3,6 +3,7 @@ package cloud.trotter.census.server.db
 import cloud.trotter.census.server.*
 import cloud.trotter.census.server.ingest.*
 import kotlinx.coroutines.*
+import kotlinx.serialization.json.jsonArray
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
 import java.time.ZoneOffset
@@ -23,6 +24,28 @@ class LifecycleStoreTest : LifecycleTestDatabase() {
             observe(db, second, listOf(item(channel = "ORPHAN_CHANNEL")))
             InstallStore(db, clock).withdraw(second, key)
             assertEquals(1, LifecycleStore(db, clock, policy).runOnce().getValue("samples_notification").rewritten)
+        }
+    }
+
+    @Test fun `notes cannot be written once the last sample is gone`() = runBlocking {
+        Database.connect(config()).use { db ->
+            val id = install(); val accepted = item(); observe(db, id, listOf(accepted))
+            val fp = accepted.item.fingerprint
+            val ops = OpsStore(db, clock, policy)
+            assertTrue(ops.saveClassification(fp, "idle", "while a sample lives"))
+            sql { it.update("DELETE FROM cluster_samples WHERE fingerprint=?", fp); it.update("UPDATE clusters SET notes=NULL WHERE fingerprint=?", fp) }
+            assertTrue(ops.saveClassification(fp, "idle", "copied from an expired sample"))
+            assertEquals(null, sql { it.select("SELECT notes FROM clusters WHERE fingerprint=?", fp) { r -> r.getString(1) } })
+        }
+    }
+
+    @Test fun `ledger read excludes an expired day even while its deletion is delayed`() = runBlocking {
+        Database.connect(config()).use { db ->
+            val id = install()
+            sql { it.update("INSERT INTO ingest_ledger(install_id, day, bytes, accepted, duplicate, rejected, batch_ids) VALUES (?, ?, 1, 1, 0, '{}', ARRAY['b'])", id, day.minusDays(7)) }
+            assertEquals(0, OpsStore(db, clock, policy).ledger(day.minusDays(7))["installs"]!!.jsonArray.size)
+            sql { it.update("UPDATE ingest_ledger SET day=?", day.minusDays(6)) }
+            assertEquals(1, OpsStore(db, clock, policy).ledger(day.minusDays(6))["installs"]!!.jsonArray.size)
         }
     }
 

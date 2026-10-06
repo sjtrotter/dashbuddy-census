@@ -247,7 +247,7 @@ curl --fail-with-body "$CENSUS_URL/ops/vocabulary/resolve" \
   -d "{\"tokenHash\":\"$TOKEN_HASH\",\"clearText\":null,\"source\":\"corpus\",\"reject\":true}"
 ```
 
-Status accepts `new`, `triaged`, `drafted`, `resolved`, or `ignored`; notes are at most 2,000
+Status accepts `new`, `triaged`, `drafted`, `resolved`, or `ignored`; notes describe a stored sample, so a notes write lands only while the cluster holds one (the sweep clears notes with the last sample); notes are at most 2,000
 characters and the optional resolved rule must match the wire rule-ID grammar. Set `trusted`
 to false to remove trust. Successful mutations return 204; missing target rows return 404.
 Revocation is idempotent and immediately blocks the install's signed requests.
@@ -339,4 +339,4 @@ Notification review offers **Classification** and notes using the existing scree
 4. Set `CENSUS_NOTIFICATIONS_ENABLED=true`, restart, and verify policy plus authenticated mixed-kind ingestion before activating the app publisher. Both current app builders claim filter revision 1. A floor increase rejects old positive revisions with `filter_rev_too_old`; this is a claimed-revision gate, not filter attestation.
 5. To disable notifications, set the flag false and restart the SAME lifecycle-capable image. Admission changes immediately; cached policy may persist for its existing 300 seconds. Continue sweeps and preserve the monotonic floor. Never revert to pre-V5 code or restore an old database to disable notifications: obsolete code loses lifecycle enforcement and writes legacy tables.
 
-Raising a floor: stop census, set the current deployment minimum, run `--merge-filter-floor` with the latest off-host journal, export/upload the resulting floor, then restart. Imported/configured lower revisions cannot lower the database floor. Floor journals contain only a revision and day, and must remain durable for every older restorable backup. Removing server vocabulary cannot retract a previously published bundle.
+Raising a floor: stop census, set the current deployment minimum, run `--merge-filter-floor` with the latest off-host journal, export/upload the resulting floor, then restart. Imported/configured lower revisions cannot lower the database floor. A trusted capture carries no revision of its own: once the floor is above 1, a capture whose cluster shows no sighting or sample at or above the floor (expired provenance, or never paired) is removed as unprovable. Floor journals contain only a revision and day, and must remain durable for every older restorable backup. Removing server vocabulary cannot retract a previously published bundle.
