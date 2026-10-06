@@ -2,6 +2,7 @@
 set -euo pipefail
 umask 077
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
+./export-withdrawals.sh
 mkdir -p backups
 dump="backups/census-$(date -u +%F).sql.gz"
 temporary="$(mktemp "${dump}.XXXXXX")"

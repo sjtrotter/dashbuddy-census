@@ -7,7 +7,7 @@ import kotlinx.coroutines.CancellationException
 import org.slf4j.LoggerFactory
 import java.time.ZoneOffset
 
-data class PurgeReport(val nonces: Int, val ledgerRows: Int, val trustedEnvelopes: Int, val healthRows: Int)
+data class PurgeReport(val nonces: Int, val ledgerRows: Int, val trustedEnvelopes: Int, val healthRows: Int, val withdrawals: Int)
 
 class PurgeJob(
     private val store: InstallStore,
@@ -28,6 +28,7 @@ class PurgeJob(
             sweep("ledger") { store.purgeLedger(today.minusDays(policy.retention.ingestLedgerDays.toLong())) },
             sweep("envelopes") { store.purgeTrustedEnvelopes(today) },
             sweep("health") { store.purgeHealthDaily(today.minusDays(policy.retention.healthDailyDays.toLong())) },
+            sweep("withdrawals") { store.purgeWithdrawals(now.minusSeconds(policy.retention.withdrawalsDays * 86_400L)) },
         )
     }
 

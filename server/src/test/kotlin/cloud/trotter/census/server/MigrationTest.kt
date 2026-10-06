@@ -39,19 +39,25 @@ class MigrationTest {
     }
 
     @Test
-    fun `empty database applies every migration and contains exactly eleven application tables`() {
+    fun `empty database applies every migration and contains exactly twelve application tables`() {
         val flyway = Flyway.configure()
             .dataSource(postgres.jdbcUrl, postgres.username, postgres.password)
             .locations("classpath:db/migration")
             .load()
-        // V1 (schema) + V2 (cluster classification: screen_class, draft, draft_day — DashBuddy #1188).
-        assertEquals(2, flyway.migrate().migrationsExecuted)
+        // V1 schema, V2 cluster classification, V3 withdrawal tombstones and enrolment instants.
+        assertEquals(3, flyway.migrate().migrationsExecuted)
         val expected = setOf(
             "installs", "clusters", "cluster_samples", "cluster_sightings", "token_sightings",
-            "vocabulary", "trusted_envelopes", "health_daily", "health_fleet_daily", "ingest_ledger", "nonces",
+            "vocabulary", "trusted_envelopes", "health_daily", "health_fleet_daily", "ingest_ledger", "nonces", "withdrawals",
         )
         DriverManager.getConnection(postgres.jdbcUrl, postgres.username, postgres.password).use { connection ->
             connection.createStatement().use { statement ->
+                statement.executeQuery(
+                    "SELECT indexname FROM pg_indexes WHERE schemaname = 'public' AND tablename = 'withdrawals'",
+                ).use { rows ->
+                    val indexes = buildSet { while (rows.next()) add(rows.getString(1)) }
+                    assertEquals(setOf("withdrawals_pkey", "withdrawals_withdrawn_at_idx"), indexes)
+                }
                 statement.executeQuery(
                     "SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename <> 'flyway_schema_history'",
                 ).use { rows ->
@@ -88,6 +94,9 @@ class MigrationTest {
                     assertEquals(listOf("character", "16", "NO", null), columns["token_sightings.token_hash"])
                     assertEquals(listOf("integer", null, "NO", "1"), columns["cluster_sightings.count"])
                     assertEquals(listOf("timestamp with time zone", null, "NO", null), columns["nonces.issued_at"])
+                    assertEquals(listOf("text", null, "NO", null), columns["withdrawals.install_id_hash"])
+                    assertEquals(listOf("timestamp with time zone", null, "NO", null), columns["withdrawals.withdrawn_at"])
+                    assertEquals(listOf("timestamp with time zone", null, "NO", "CURRENT_TIMESTAMP"), columns["installs.enrolled_at"])
                 }
                 statement.executeQuery(
                     """

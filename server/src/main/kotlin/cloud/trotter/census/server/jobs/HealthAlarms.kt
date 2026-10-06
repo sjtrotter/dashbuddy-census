@@ -1,6 +1,7 @@
 package cloud.trotter.census.server.jobs
 
 import cloud.trotter.census.server.Clock
+import cloud.trotter.census.server.db.InstallStore
 import cloud.trotter.census.server.db.HealthStore
 import cloud.trotter.census.server.ingest.HealthReport
 import cloud.trotter.census.server.ingest.WireGrammars
@@ -43,6 +44,7 @@ data class Alarm(
     val version: String,
     val installPrefix: String? = null,
     val ruleIds: List<String> = emptyList(),
+    val message: String? = null,
 )
 
 fun interface AlarmSink {
@@ -51,6 +53,8 @@ fun interface AlarmSink {
 
 class LoggingAlarmSink : AlarmSink {
     override fun raise(alarm: Alarm) {
+        // The withdrawal journal belongs in the spool/SNS, never in application logs.
+        if (alarm.kind == "withdrawal") return
         log.warn("alarm {}", renderAlarm(alarm).replace('\n', ' '))
     }
 
@@ -59,6 +63,12 @@ class LoggingAlarmSink : AlarmSink {
 
 /** The single rendering owner for logs and spool files: validated tokens only, one field per line. */
 fun renderAlarm(alarm: Alarm): String {
+    if (alarm.kind == "withdrawal") {
+        // #1192: the withdrawal journal record — `kind=` first like every spool file (the host publisher's
+        // grammar dispatches on it), then exactly two slots the host accepts (or [redacted], fail-closed).
+        val body = alarm.message?.takeIf { withdrawalBodyPattern.matches(it) } ?: "install_id_hash=[redacted]\nwithdrawn_at=[redacted]"
+        return "kind=withdrawal\n$body"
+    }
     val kind = alarm.kind.takeIf { it in alarmKinds } ?: "[redacted]"
     val platform = alarm.platform.takeIf { platformPattern.matches(it) } ?: "[redacted]"
     val version = alarm.version.takeIf { WireGrammars.platformAppVersion.matches(it) } ?: "[redacted]"
@@ -70,6 +80,8 @@ fun renderAlarm(alarm: Alarm): String {
 private val alarmKinds = setOf("silent_rule_death", "rule_share_cliff", "trips", "fleet_unknown", "new_clusters", "silence")
 private val platformPattern = Regex("^[a-z_][a-z0-9_]{0,31}$")
 private val installPrefixPattern = Regex("^[a-fA-F0-9]{8}$")
+/** The two-line withdrawal body: `install_id_hash=<64 lower hex>\nwithdrawn_at=<ISO-8601 UTC instant>`. */
+internal val withdrawalBodyPattern = Regex("^install_id_hash=[0-9a-f]{64}\\nwithdrawn_at=\\d{4}-\\d{2}-\\d{2}T[0-9:.]+Z$")
 
 /** Process-local counters, like PipelineStats: no identities or report contents are retained. */
 class AlarmStats {
@@ -141,6 +153,15 @@ class HealthAlarms(
     /** Process start for the silence clock; null = read the clock at the FIRST silence evaluation (see [startedAt]). */
     startedAt: Instant? = null,
 ) {
+    fun recordWithdrawal(installIdHash: String, withdrawnAt: Instant) {
+        require(InstallStore.TOMBSTONE_HASH.matches(installIdHash))
+        sink.raise(Alarm(
+            kind = "withdrawal", platform = "", version = "",
+            message = "install_id_hash=$installIdHash\nwithdrawn_at=$withdrawnAt",
+        ))
+        stats.record("withdrawal")
+    }
+
     private data class AlarmKey(val kind: String, val install: UUID?, val platform: String, val version: String, val rule: String?)
     private val lastReportAt = ConcurrentHashMap<UUID, Instant>()
     // Read lazily (at the first silence evaluation, not at construction): the process clock is deliberately not touched

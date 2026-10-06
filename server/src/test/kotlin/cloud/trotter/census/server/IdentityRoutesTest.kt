@@ -11,11 +11,18 @@ import cloud.trotter.census.server.auth.RequestSigner
 import cloud.trotter.census.server.auth.hashSecret
 import cloud.trotter.census.server.db.EnrolOutcome
 import cloud.trotter.census.server.db.InstallStore
+import cloud.trotter.census.server.db.HealthStore
 import cloud.trotter.census.server.db.LedgerRow
 import cloud.trotter.census.server.db.MutationOutcome
 import cloud.trotter.census.server.ingest.BudgetPolicy
 import cloud.trotter.census.server.ingest.ConsumeOutcome
 import cloud.trotter.census.server.jobs.PurgeJob
+import cloud.trotter.census.server.jobs.Alarm
+import cloud.trotter.census.server.jobs.AlarmSink
+import cloud.trotter.census.server.jobs.HealthAlarms
+import cloud.trotter.census.server.jobs.LoggingAlarmSink
+import cloud.trotter.census.server.jobs.FileSpoolAlarmSink
+import cloud.trotter.census.server.jobs.renderAlarm
 import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.post
@@ -51,14 +58,65 @@ import org.testcontainers.containers.PostgreSQLContainer
 import org.testcontainers.junit.jupiter.Container
 import org.testcontainers.junit.jupiter.Testcontainers
 import java.sql.DriverManager
+import java.nio.file.Files
+import java.nio.file.Path
 import java.time.Instant
 import java.util.UUID
+import org.junit.jupiter.api.io.TempDir
 
 @Testcontainers
 @EnabledIf(value = "dockerAvailable", disabledReason = "Docker unavailable: identity tests skipped")
 class IdentityRoutesTest {
+    @TempDir
+    lateinit var spoolDir: Path
+
     private class FixedClock(var instant: Instant = Instant.parse("2026-10-02T12:00:00Z")) : Clock {
         override fun now(): Instant = instant
+    }
+
+    @Test
+    fun `withdrawal raises exactly one private journal notice through the shared alarm spool`() {
+        val clock = FixedClock()
+        val id = UUID.randomUUID().toString()
+        val key = secret(98)
+        val delivered = mutableListOf<Alarm>()
+        val logger = LoggerFactory.getLogger(Logger.ROOT_LOGGER_NAME) as Logger
+        val logs = ListAppender<ILoggingEvent>().apply { start() }
+        logger.addAppender(logs)
+        try {
+            Database.connect(config()).use { db ->
+                val spool = FileSpoolAlarmSink(spoolDir, clock = clock)
+                val alarms = HealthAlarms(HealthStore(db, clock), clock, sink = AlarmSink {
+                    delivered += it
+                    spool.raise(it)
+                })
+                testApplication {
+                    application { module(config(), db, clock, alarms) }
+                    assertEquals(HttpStatusCode.OK, client.enrol(id, key).status)
+                    clock.instant = clock.instant.plusSeconds(1)
+                    assertEquals(HttpStatusCode.Accepted, client.signed(clock, id, key, HttpMethod.Delete, "/v1/installs/me").status)
+                    assertError(client.signed(clock, id, key, HttpMethod.Delete, "/v1/installs/me"), 401, "unauthorized")
+                }
+                val alarm = delivered.single()
+                assertEquals("withdrawal", alarm.kind)
+                val body = "install_id_hash=${InstallStore.installIdHash(UUID.fromString(id))}\nwithdrawn_at=${clock.instant}"
+                val expected = "kind=withdrawal\n$body"
+                assertEquals(body, alarm.message)
+                assertTrue(requireNotNull(alarm.message).matches(Regex("^install_id_hash=[0-9a-f]{64}\\nwithdrawn_at=\\d{4}-\\d{2}-\\d{2}T[0-9:.]+Z$")))
+                assertEquals(expected, renderAlarm(alarm))
+                val files = Files.list(spoolDir).use { it.toList() }
+                assertEquals(1, files.size)
+                assertEquals(expected, Files.readString(files.single()))
+                assertFalse(expected.contains(id))
+                assertNull(alarm.installPrefix)
+                assertTrue(alarm.ruleIds.isEmpty())
+                LoggingAlarmSink().raise(alarm)
+                assertPrivateLogs(logs.list, listOf(id, key, InstallStore.installIdHash(UUID.fromString(id))))
+            }
+        } finally {
+            logger.detachAppender(logs)
+            logs.stop()
+        }
     }
 
     @Test

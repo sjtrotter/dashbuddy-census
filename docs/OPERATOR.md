@@ -14,15 +14,42 @@ Operator authentication uses the operator token directly as a bearer or with TOT
 
 ## Backup and restore
 
-Run `./backup.sh` from `deploy/compose` using a daily scheduler. It writes a restricted-permission compressed `pg_dump` and prunes local dumps to 14 UTC dates. Export `BACKUP_BUCKET` to enable `aws s3 cp`; configure bucket encryption, restricted access, and a 14-day lifecycle including noncurrent object versions. Local files and S3 copies both contain sensitive pseudonymous data.
+Run `./backup.sh` from `deploy/compose` using a daily scheduler. Before `pg_dump`, it runs `./export-withdrawals.sh`: an atomic, restricted-permission CSV export to `backups/withdrawals/withdrawals-<UTC timestamp>.csv`. An export or upload failure aborts the backup. Export `BACKUP_BUCKET` to upload journals under `withdrawals/` and dumps at the bucket root. Both retain 14 local UTC dates; configure bucket encryption, restricted access, and the 14-day lifecycle including noncurrent versions. Local files and S3 copies contain sensitive pseudonymous data. The exporter can also run separately between backups.
 
-For recovery, use a fresh PostgreSQL volume/database, start only `postgres`, and run `./restore.sh /absolute/path/to/backup.sql.gz`. Type `RESTORE` at the prompt. The script stops census, refuses a database with user relations, and restores in one transaction with SQL errors fatal. It never drops an existing database. Review the restored data and **reapply withdrawals while census is still stopped** — a resurrected credential becomes usable the moment the service starts, and the live `withdraw()` locks the install row first, so a manual delete racing live inserts can fail on foreign keys. Only then start census and check readiness. The first drill ran 2026-10-03 (record in [the AWS runbook](../deploy/aws/README.md#drill-log)): 20 s from stop to a backup of the recovered database. **Reapplying withdrawals is manual and has no record to work from** (DashBuddy #1192): a withdrawal deletes rows and leaves no trace, so an install that withdrew after the dump was taken comes back with the restore. If you know the id, delete it again in one transaction over the same tables the withdrawal uses (`InstallStore.WITHDRAWAL_TABLES` is the owner of this list; keep the snippet in sync):
+Each live withdrawal writes a `withdrawals` tombstone in the same transaction as erasure: only the lowercase SHA-256 of the canonical install UUID and `withdrawn_at`, never the UUID or credential. Tombstones last 60 days, exceeding the restorable dump/version horizon. Every startup migrates and **automatically replays tombstones before opening the HTTP listener**; replay failure aborts startup. Live withdrawal and replay share the same deletion implementation, including clearing drafts derived from erased envelopes. Replay only deletes generations whose `enrolled_at <= withdrawn_at`; a later re-enrolment, including one on the same day, survives. V3 backfills legacy enrolments from `created_day` at UTC midnight because V1 retained no precise enrolment instant.
+
+A withdrawal also queues an alarm-spool notice for the host's `census-alarm-publish` SNS publisher. Its message is three lines — `kind=withdrawal`, `install_id_hash=<64 lower hex>`, `withdrawn_at=<ISO-8601 UTC instant>` — and the email subject is `census alarm: withdrawal`; the last two lines ARE a journal CSV row. **Host prerequisite:** the host's `census-alarm-publish` script (written by cloud-init) must carry the `withdrawal` grammar from this version — on a host provisioned before it, update `/usr/local/sbin/census-alarm-publish` from the current `deploy/aws/cloud-init.yaml.tftpl` (or rebuild the instance) or the notice is counted `rejected` and the CSV export is the only off-host journal. Those two values are a replay journal row; copy them as `<64hex>,<ISO-8601 UTC>` into a CSV (optional header `install_id_hash,withdrawn_at`). The hash stays out of application logs. The container cannot use the instance role (IMDS hop limit 1); the host handles SNS and S3 delivery. Deploy the updated host publisher grammar as well as the server and backup scripts.
+
+For recovery, use the operator's SSO identity to download the **latest** journal from the bucket's `withdrawals/` prefix, even when restoring an older dump. Add any newer SNS notice rows. Start only `postgres` with a fresh volume/database, then run:
+
+```sh
+./restore.sh /absolute/path/to/census-YYYY-MM-DD.sql.gz /absolute/path/to/withdrawals-latest.csv
+```
+
+Type `RESTORE` at the prompt. The script stops census, refuses a database with user relations, and restores in one transaction with SQL errors fatal. With census still stopped, it runs `--reapply-withdrawals /journal.csv` to migrate, merge the journal (keeping the latest instant per hash), and replay. A failure leaves census stopped. The one-shot container uses the caller's UID/GID to read the mode-0600 journal mount. Review the replay counts and restored data, then start census and check readiness; startup replays again, idempotently. To merge another journal into an already restored database while census is stopped:
+
+```sh
+docker compose run --rm --no-deps --user "$(id -u):$(id -g)" \
+    -v /absolute/path/to/withdrawals-latest.csv:/journal.csv:ro census --reapply-withdrawals /journal.csv
+```
+
+`restore.sh` refuses a missing second argument. Use `--no-journal` **only when no journal exists**: it warns loudly and replays only tombstones inside the dump, which cannot cover later withdrawals.
+
+**Residual:** a withdrawal after the latest journal export needs its SNS email to survive total host loss; paste the notice's hash and instant into the CSV. If host loss occurs before SNS publication as well, neither off-host channel has that withdrawal and it cannot be recovered automatically. The existing spool is bounded/best-effort and SNS publishing is rate-limited, so confirm receipt and retain the emails; exporting more often narrows the gap.
+
+**Last resort when no journal exists:** if you still know the withdrawn UUID, keep census stopped and erase it in one transaction. `InstallStore.WITHDRAWAL_TABLES` owns this list. Preserve a hashed tombstone for subsequent restores:
 
 ```sql
 BEGIN;
-UPDATE clusters SET screen_class = NULL, draft = NULL, draft_day = NULL
-WHERE fingerprint IN (SELECT fingerprint FROM trusted_envelopes WHERE install_id = '<uuid>');
-DELETE FROM trusted_envelopes WHERE install_id = '<uuid>';
+SELECT 1 FROM installs WHERE install_id = '<uuid>' FOR UPDATE;
+INSERT INTO withdrawals (install_id_hash, withdrawn_at)
+VALUES (encode(sha256('<uuid>'::uuid::text::bytea), 'hex'), CURRENT_TIMESTAMP)
+ON CONFLICT (install_id_hash) DO UPDATE SET withdrawn_at = GREATEST(withdrawals.withdrawn_at, EXCLUDED.withdrawn_at);
+WITH erased AS (
+    DELETE FROM trusted_envelopes WHERE install_id = '<uuid>' RETURNING id
+)
+UPDATE clusters SET draft = NULL, draft_day = NULL
+WHERE draft->>'envelopeId' IN (SELECT id::text FROM erased);
 DELETE FROM health_daily      WHERE install_id = '<uuid>';
 DELETE FROM token_sightings   WHERE install_id = '<uuid>';
 DELETE FROM cluster_sightings WHERE install_id = '<uuid>';
@@ -32,11 +59,13 @@ DELETE FROM installs          WHERE install_id = '<uuid>';
 COMMIT;
 ```
 
+Run `./export-withdrawals.sh` after this manual fallback. The first restore drill (2026-10-03) demonstrated why the durable journal is necessary; see the [AWS drill log](../deploy/aws/README.md#drill-log).
+
 Schedule a restore drill; copying a dump alone does not prove recovery.
 
 ## Revoke or withdraw an install
 
-`DELETE /v1/installs/me` lets an authenticated install withdraw. The operator can revoke credentials using the endpoint below. Revocation retains stored observations; withdrawal deletes install-keyed rows in one transaction. Reapply subsequent withdrawals after restoring an older backup. Foreign keys currently do not cascade. Do not pretend a manual `DELETE FROM installs` is a complete withdrawal procedure.
+`DELETE /v1/installs/me` lets an authenticated install withdraw. The operator can revoke credentials using the endpoint below. Revocation retains stored observations; withdrawal deletes install-keyed rows in one transaction. See [Backup and restore](#backup-and-restore) for mandatory tombstone replay and journal recovery. Foreign keys currently do not cascade. Do not pretend a manual `DELETE FROM installs` is a complete withdrawal procedure.
 
 ## Edge rate limiting (#1178)
 

@@ -411,6 +411,10 @@ Run a drill on a new isolated recovery box provisioned with this cloud-init, or 
 ```sh
 aws s3 ls s3://<backup-bucket>/
 aws s3 presign s3://<backup-bucket>/census-YYYY-MM-DD.sql.gz --expires-in 600
+aws s3 ls s3://<backup-bucket>/withdrawals/
+# Select the latest journal, even for an older dump; use this SSO identity, not the host role.
+aws s3 cp s3://<backup-bucket>/withdrawals/<latest-journal>.csv ./withdrawals-latest.csv
+aws s3 presign s3://<backup-bucket>/withdrawals/<latest-journal>.csv --expires-in 600
 ```
 
 Treat the short-lived URL as a credential. In an SSM session on the **recovery box**, become root with `sudo -i`. Stop the app and choose a fresh volume even if first boot already ran migrations; `restore.sh` correctly refuses initialized databases. The commands below preserve the existing volume and do not use `down -v`:
@@ -450,15 +454,20 @@ read -r -s -p 'Short-lived backup URL: ' BACKUP_URL
 printf '\n'
 curl --fail --silent --show-error "$BACKUP_URL" -o /opt/census/restore.sql.gz
 unset BACKUP_URL
-./restore.sh /opt/census/restore.sql.gz
+read -r -s -p 'Short-lived latest withdrawal journal URL: ' JOURNAL_URL
+printf '\n'
+curl --fail --silent --show-error "$JOURNAL_URL" -o /opt/census/withdrawals-latest.csv
+unset JOURNAL_URL
+# Add any newer SNS withdrawal notice rows before restoring (see OPERATOR.md).
+./restore.sh /opt/census/restore.sql.gz /opt/census/withdrawals-latest.csv
 # Type RESTORE at the prompt. Review restored data and any pending migrations.
 systemctl start census.service
 systemctl start census-backup.timer
 docker compose ps
-rm /opt/census/restore.sql.gz
+rm /opt/census/restore.sql.gz /opt/census/withdrawals-latest.csv
 ```
 
-Check readiness, policy, relevant row counts, and backup upload from the recovered database. Reapply known withdrawals before starting census, as described in [OPERATOR.md](../../docs/OPERATOR.md#backup-and-restore); there is no record to replay them from yet (DashBuddy #1192). Record the backup timestamp, recovered coverage, and elapsed recovery time. Only then move DNS/EIP for real recovery; for a drill, leave production DNS unchanged. Preserve the bind-directory and volume-name override for subsequent deployments on the recovered host; before another instance rebuild, promote the recovered directory to `/var/lib/census-data/pgdata` with the stack stopped and the prior directory retained. Refresh GitHub's instance variable after replacement. Retire recovery resources and retained volumes deliberately after verification.
+Check readiness, policy, relevant row counts, and backup upload from the recovered database. Download the latest `withdrawals/` CSV using the operator's SSO identity and pass it to `restore.sh`, as above and in [OPERATOR.md](../../docs/OPERATOR.md#backup-and-restore). Restore merges and replays it while census remains stopped; every server startup also replays before serving, preserving later re-enrolments. Use `--no-journal` only when none exists: it covers tombstones inside the dump only. Newer SNS withdrawal notices supply hash/timestamp rows to append to the journal; loss before either off-host channel delivers remains a recovery gap. Record the backup timestamp, recovered coverage, and elapsed recovery time. Only then move DNS/EIP for real recovery; for a drill, leave production DNS unchanged. Preserve the bind-directory and volume-name override for subsequent deployments on the recovered host; before another instance rebuild, promote the recovered directory to `/var/lib/census-data/pgdata` with the stack stopped and the prior directory retained. Refresh GitHub's instance variable after replacement. Retire recovery resources and retained volumes deliberately after verification.
 
 ### Recovery box by hand, and running the drill over SSM
 
@@ -475,7 +484,7 @@ docker compose config --format json | python3 -c 'import json,sys; v=json.load(s
 mv docker-compose.override.yml.new docker-compose.override.yml
 ```
 
-Reapply known withdrawals before starting census ([OPERATOR.md](../../docs/OPERATOR.md#backup-and-restore)). When the record below is written, terminate the box and delete the scratch volume: the scratch compute and data volume are removed; nothing in Terraform, IAM or DNS was touched.
+Pass the latest withdrawal CSV to `restore.sh` and review its replay counts before starting census ([OPERATOR.md](../../docs/OPERATOR.md#backup-and-restore)); `--no-journal` is only for recovery without any journal. When the record below is written, terminate the box and delete the scratch volume: the scratch compute and data volume are removed; nothing in Terraform, IAM or DNS was touched.
 
 ### Drill log
 

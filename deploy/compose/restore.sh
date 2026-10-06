@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
-if [[ $# -ne 1 || ! -f "$1" ]]; then
-    printf 'Usage: %s /path/to/census-YYYY-MM-DD.sql.gz\n' "$0" >&2
+if [[ $# -ne 2 || ! -f "$1" || ( "$2" != --no-journal && ( ! -f "$2" || ! -r "$2" ) ) ]]; then
+    printf 'Usage: %s /path/to/census-YYYY-MM-DD.sql.gz (/path/to/withdrawals-*.csv | --no-journal)\n' "$0" >&2
     exit 1
 fi
 dump="$(cd -- "$(dirname -- "$1")" && pwd)/$(basename -- "$1")"
+journal="$2"
+if [[ "$journal" != --no-journal ]]; then
+    journal="$(cd -- "$(dirname -- "$journal")" && pwd)/$(basename -- "$journal")"
+fi
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
 gzip -t -- "$dump"
 printf 'Restore %s into a FRESH census database? Type RESTORE: ' "$dump"
@@ -20,4 +24,11 @@ if [[ "$objects" != 0 ]]; then
 fi
 gzip -dc -- "$dump" | docker compose exec -T postgres psql -X -U census -d census \
     --single-transaction -v ON_ERROR_STOP=1
-printf 'Restore complete. Review the data, then run docker compose up -d census.\n'
+if [[ "$journal" == --no-journal ]]; then
+    printf 'WARNING: replay uses tombstones INSIDE the dump only. Withdrawals after the dump are NOT covered.\n' >&2
+    docker compose run --rm --no-deps census --reapply-withdrawals /dev/null
+else
+    # Journals are mode 0600; use the caller's identity to read the bind mount without making it public.
+    docker compose run --rm --no-deps --user "$(id -u):$(id -g)" -v "$journal":/journal.csv:ro census --reapply-withdrawals /journal.csv
+fi
+printf 'Restore complete. Withdrawals replayed. Review the data, then run docker compose up -d census.\n'

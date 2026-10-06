@@ -10,6 +10,14 @@ import java.nio.file.Path
 /** Source guards for disposable processes, explicit clocks, and the app's #909 regex rule (#1157 S1). */
 class TwelveFactorGuardTest {
     @Test
+    fun `only the main CLI may print usage and one-shot results`() {
+        for (source in listOf("println(\"result\")", "System.err.println(\"usage\")")) {
+            assertTrue(violations("Main.kt", source).isEmpty())
+            assertFalse(violations("OtherMain.kt", source).isEmpty())
+        }
+    }
+
+    @Test
     fun `production sources obey deployment rules`() {
         val root = Path.of(requireNotNull(System.getProperty("census.mainSource")))
         assertTrue(Files.isDirectory(root), "Missing server/src/main source root")
@@ -67,8 +75,11 @@ class TwelveFactorGuardTest {
     }
 
     private fun violations(name: String, source: String): List<String> = buildList {
-        if (Regex("\\bprintln\\s*\\(").containsMatchIn(source)) add("Use SLF4J, not println")
-        if (Regex("\\bSystem\\s*\\.\\s*(err|out)\\b").containsMatchIn(source)) add("Use SLF4J, not standard streams")
+        // #1192: Main's one-shot CLI prints a machine-readable result/usage; server paths still use SLF4J.
+        if (name != "Main.kt") {
+            if (Regex("\\bprintln\\s*\\(").containsMatchIn(source)) add("Use SLF4J, not println")
+            if (Regex("\\bSystem\\s*\\.\\s*(err|out)\\b").containsMatchIn(source)) add("Use SLF4J, not standard streams")
+        }
         val wallClock = Regex("\\b(System\\s*\\.\\s*currentTimeMillis|(?:Instant|LocalDate|LocalDateTime)\\s*\\.\\s*now)\\s*\\(")
         if (!name.contains("Clock") && wallClock.containsMatchIn(source)) {
             add("Wall-clock reads belong in a Clock-named file")

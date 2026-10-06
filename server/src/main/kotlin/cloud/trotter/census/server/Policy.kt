@@ -31,4 +31,6 @@ data class Retention(
     val healthDailyDays: Int = 180,
     val ingestLedgerDays: Int = 7,
     val backupsDays: Int = 14,
+    // Must outlive every restorable backup: backupsDays (14) + S3 noncurrent-version expiry (14) + margin.
+    val withdrawalsDays: Int = 60,
 )

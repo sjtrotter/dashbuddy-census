@@ -18,6 +18,7 @@ import cloud.trotter.census.server.db.MutationOutcome
 import cloud.trotter.census.server.ingest.Budget
 import cloud.trotter.census.server.ingest.BudgetPolicy
 import cloud.trotter.census.server.ingest.parseBounded
+import cloud.trotter.census.server.jobs.HealthAlarms
 import cloud.trotter.census.server.secondsToUtcMidnight
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpMethod
@@ -44,7 +45,7 @@ import java.time.ZoneOffset
 private val identityJson = Json { encodeDefaults = true; explicitNulls = false }
 private val appVersionPattern = Regex("[A-Za-z0-9+._-]{1,64}")
 
-fun Route.identityRoutes(store: InstallStore?, clock: Clock, policy: Policy, authenticated: Route.() -> Unit = {}) {
+fun Route.identityRoutes(store: InstallStore?, clock: Clock, policy: Policy, alarms: HealthAlarms? = null, authenticated: Route.() -> Unit = {}) {
     if (store == null) {
         listOf(
             HttpMethod.Post to "/v1/enroll", HttpMethod.Post to "/v1/rotate", HttpMethod.Post to "/v1/nonce",
@@ -106,6 +107,9 @@ fun Route.identityRoutes(store: InstallStore?, clock: Clock, policy: Policy, aut
                 when (val result = store.withdraw(call.attributes[InstallRowKey].id, call.attributes[AuthenticatedInstallKey].secretHash)) {
                     is MutationOutcome.Applied -> {
                         call.application.environment.log.info("withdraw rows={}", result.deletedRows.values.sum())
+                        alarms?.recordWithdrawal(
+                            InstallStore.installIdHash(call.attributes[InstallRowKey].id), requireNotNull(result.withdrawnAt),
+                        )
                         val now = call.attributes.getOrNull(RequestInstantKey) ?: clock.now()
                         val deadline = now.atOffset(ZoneOffset.UTC).toLocalDate().plusDays(1)
                         call.respond(HttpStatusCode.Accepted, WithdrawalResponse(completionDeadline = deadline.toString()))

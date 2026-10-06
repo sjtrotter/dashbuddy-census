@@ -6,7 +6,6 @@ import cloud.trotter.census.server.auth.toLowerHex
 import cloud.trotter.census.server.ingest.BudgetPolicy
 import cloud.trotter.census.server.ingest.ConsumeOutcome
 import cloud.trotter.census.server.secondsToUtcMidnight
-import cloud.trotter.census.server.today
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -21,14 +20,17 @@ import java.sql.ResultSet
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneOffset
+import java.time.temporal.ChronoUnit
 import java.util.UUID
 
 enum class EnrolOutcome { Created, SameKey, KeyMismatch, Revoked }
 
 sealed interface MutationOutcome {
-    data class Applied(val deletedRows: Map<String, Int> = emptyMap()) : MutationOutcome
+    data class Applied(val deletedRows: Map<String, Int> = emptyMap(), val withdrawnAt: Instant? = null) : MutationOutcome
     data object StaleCredential : MutationOutcome
 }
+
+data class WithdrawalReplayReport(val matched: Int, val deletedRows: Map<String, Int>, val keptReenrolled: Int)
 
 data class Install(
     val id: UUID,
@@ -67,11 +69,12 @@ class InstallStore(private val db: Database, private val clock: Clock) {
     }
 
     suspend fun enrol(installId: UUID, keyHash: String, appVersion: String): EnrolOutcome = query {
-        val day = clock.today()
+        val now = clock.now().truncatedTo(ChronoUnit.MICROS)
+        val day = now.atOffset(ZoneOffset.UTC).toLocalDate()
         val inserted = update(
-            """INSERT INTO installs (install_id, key_hash, created_day, last_seen_day, last_app_version)
-                VALUES (?, ?, ?, ?, ?) ON CONFLICT (install_id) DO NOTHING""",
-            installId, keyHash, day, day, appVersion,
+            """INSERT INTO installs (install_id, key_hash, created_day, last_seen_day, last_app_version, enrolled_at)
+                VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (install_id) DO NOTHING""",
+            installId, keyHash, day, day, appVersion, now.atOffset(ZoneOffset.UTC),
         )
         if (inserted == 1) return@query EnrolOutcome.Created
         select("SELECT key_hash, revoked_at FROM installs WHERE install_id = ? FOR UPDATE", installId) { row ->
@@ -135,12 +138,66 @@ class InstallStore(private val db: Database, private val clock: Clock) {
             active && sameHash(row.getString("key_hash"), expectedCurrentKeyHash)
         } ?: false
         if (!current) return@query MutationOutcome.StaleCredential
-        MutationOutcome.Applied(WITHDRAWAL_TABLES.associateWith { table ->
+        val withdrawnAt = clock.now().truncatedTo(ChronoUnit.MICROS)
+        update(
+            """INSERT INTO withdrawals (install_id_hash, withdrawn_at) VALUES (?, ?)
+                ON CONFLICT (install_id_hash) DO UPDATE SET withdrawn_at = EXCLUDED.withdrawn_at""",
+            installIdHash(installId), withdrawnAt.atOffset(ZoneOffset.UTC),
+        )
+        MutationOutcome.Applied(deleteInstallRows(installId), withdrawnAt)
+    }
+
+    private fun Connection.deleteInstallRows(installId: UUID): Map<String, Int> =
+        WITHDRAWAL_TABLES.associateWith { table ->
             if (table == "trusted_envelopes") {
                 // Delete/lock envelopes before clusters, the same lock order as retention and draft saves.
                 deleteEnvelopesAndClearDrafts("DELETE FROM trusted_envelopes WHERE install_id = ? RETURNING id", installId)
             } else update("DELETE FROM $table WHERE install_id = ?", installId)
-        })
+        }
+
+    /** One transaction, parent locks first, with the exact live-withdrawal deletion and lock order. */
+    suspend fun reapplyWithdrawals(): WithdrawalReplayReport = query {
+        val candidates = prepareStatement(
+            """SELECT i.install_id, i.enrolled_at <= w.withdrawn_at AS erase
+                FROM installs i JOIN withdrawals w
+                    ON w.install_id_hash = encode(sha256(i.install_id::text::bytea), 'hex')
+                ORDER BY i.install_id FOR UPDATE OF i""",
+        ).use { statement ->
+            statement.executeQuery().use { rows ->
+                buildList {
+                    while (rows.next()) add(rows.getObject("install_id", UUID::class.java) to rows.getBoolean("erase"))
+                }
+            }
+        }
+        val deleted = WITHDRAWAL_TABLES.associateWith { 0 }.toMutableMap()
+        for ((id, erase) in candidates) if (erase) {
+            for ((table, count) in deleteInstallRows(id)) deleted[table] = deleted.getValue(table) + count
+        }
+        WithdrawalReplayReport(candidates.count { it.second }, deleted, candidates.count { !it.second })
+    }
+
+    suspend fun mergeWithdrawalJournal(rows: List<Pair<String, Instant>>): Int {
+        // Validate the entire batch before entering the transaction or writing anything.
+        require(rows.all { (tombstone, _) -> TOMBSTONE_HASH.matches(tombstone) }) {
+            "Invalid withdrawal journal hash"
+        }
+        return query {
+            rows.sumOf { (hash, at) ->
+                update(
+                    """INSERT INTO withdrawals (install_id_hash, withdrawn_at) VALUES (?, ?)
+                        ON CONFLICT (install_id_hash) DO UPDATE SET
+                            withdrawn_at = GREATEST(withdrawals.withdrawn_at, EXCLUDED.withdrawn_at)""",
+                    hash, at.atOffset(ZoneOffset.UTC),
+                )
+            }
+        }
+    }
+
+    suspend fun purgeWithdrawals(olderThan: Instant): Int = purge("withdrawals") {
+        update(
+            "DELETE FROM withdrawals WHERE ctid IN (SELECT ctid FROM withdrawals WHERE withdrawn_at < ? LIMIT 1000)",
+            olderThan.atOffset(ZoneOffset.UTC),
+        )
     }
 
     suspend fun issueNonce(installId: UUID?): String = query {
@@ -297,6 +354,12 @@ class InstallStore(private val db: Database, private val clock: Clock) {
     }
 
     companion object {
+        /** A tombstone key: exactly 64 lower-hex characters (the ConstantTimeGuard scans this file — a tombstone is not a credential, but the shape check is a pattern, not a comparison). */
+        val TOMBSTONE_HASH: Regex = Regex("^[0-9a-f]{64}$")
+
+        fun installIdHash(installId: UUID): String =
+            MessageDigest.getInstance("SHA-256").digest(installId.toString().toByteArray(Charsets.UTF_8)).toLowerHex()
+
         val WITHDRAWAL_TABLES: List<String> = listOf(
             "trusted_envelopes", "health_daily", "token_sightings", "cluster_sightings", "ingest_ledger", "nonces", "installs",
         )
