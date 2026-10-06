@@ -36,7 +36,7 @@ GitHub Actions assumes a ref-restricted OIDC role to deploy through SSM. Account
 
 ## Notification storage and operator boundary — #1189 slice 2
 
-Both workflows pin the included DashBuddy contract to reviewed commit `b0fd522a354ca0d6d38d74324cdea0f227859648`. The server uses its DTOs, dispatcher, fingerprint and rejection vocabulary directly. Conformance reads the pinned JSONL corpus, notification vectors and manifest (counts and SHA-256), rather than fixed row counts. The synthetic metadata identity vector remains valid at the contract layer but is rejected by the unchanged server release-tag policy as `bad_version`.
+Both workflows pin the included DashBuddy contract to reviewed commit `3943c39d44a80eaecd93b8caa36147c6056ee168`. The server uses its DTOs, dispatcher, fingerprint and rejection vocabulary directly. Conformance reads the pinned JSONL corpus, notification vectors and manifest (counts and SHA-256), rather than fixed row counts. The synthetic metadata identity vector remains valid at the contract layer but is rejected by the unchanged server release-tag policy as `bad_version`.
 
 V4 adds checked, non-null `clusters.kind`, backfilling existing rows to `screen`; V1–V3 are unchanged. Ingest persists the submitted contract kind without updating an existing cluster's kind and refuses conflicting kinds transactionally. Canonical samples, cluster sightings, token sightings and shared quota accounting commit in one transaction. Samples are capped at five per `(fingerprint, platform_app_version)`, with at most one per receipt day. Tokens retain their existing cross-surface hash domain and `(token_hash, install_id)` key: equal chrome tokens count an install once across screen and notification surfaces.
 

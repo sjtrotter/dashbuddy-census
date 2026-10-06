@@ -5,6 +5,7 @@ import ch.qos.logback.classic.Logger
 import ch.qos.logback.classic.spi.ILoggingEvent
 import ch.qos.logback.core.read.ListAppender
 import cloud.trotter.census.contract.CensusFingerprint
+import cloud.trotter.census.contract.CensusSkeletonSchema
 import cloud.trotter.census.contract.SkeletonSchema
 import cloud.trotter.census.server.auth.RequestSigner
 import cloud.trotter.census.server.auth.hashSecret
@@ -129,10 +130,12 @@ class ConformanceReplayTest {
         val records = readConformanceCorpus(bytes, manifest).builtRecords
         val vectors = Files.readAllLines(directory.resolve("notification-vectors.jsonl")).filter { it.isNotBlank() }
             .map { Json.parseToJsonElement(it).jsonObject }
-        assertEquals(vectors, records.filter { it.getValue("skeleton").jsonObject["kind"] == JsonPrimitive("notification") })
+        val recordsByFile = records.associateBy { it.getValue("file").jsonPrimitive.content }
         for (vector in vectors) {
+            val file = vector.getValue("file").jsonPrimitive.content
+            assertEquals(vector, recordsByFile[file], "wire vector must be present in the golden: $file")
             val raw = vector.getValue("skeleton").jsonObject
-            val item = cloud.trotter.census.contract.CensusSkeletonSchema.deserialize(raw.toString())
+            val item = CensusSkeletonSchema.deserialize(raw.toString())
             assertEquals(vector.getValue("fingerprint").jsonPrimitive.content, CensusFingerprint.of(item))
             val verdict = SkeletonValidator.validate(raw, notificationPolicy, LocalDate.parse(item.day))
             // This contract identity vector uses synthetic metadata outside the retained server allowlist.
@@ -143,7 +146,9 @@ class ConformanceReplayTest {
                     (verdict as ItemVerdict.Accepted).tokens.map { it.hash }.toSet())
             }
         }
-        val golden = records.filter { it.getValue("skeleton").jsonObject["kind"] != JsonPrimitive("notification") }
+        // Wire vectors are checked separately; authored builder notifications replay with the screens.
+        val vectorFiles = vectors.map { it.getValue("file").jsonPrimitive.content }.toSet()
+        val golden = records.filter { it.getValue("file").jsonPrimitive.content !in vectorFiles }
         val items = golden.map { it.getValue("skeleton").jsonObject }
         val day = LocalDate.parse(items.first().getValue("day").jsonPrimitive.content)
         val clock = object : Clock {
@@ -159,7 +164,7 @@ class ConformanceReplayTest {
                 val store = InstallStore(db, clock)
                 testApplication {
                     environment { log = LoggerFactory.getLogger("io.ktor.server.Application") }
-                    application { module(config(), db, clock) }
+                    application { module(config(), db, clock, policy = notificationPolicy) }
                     assertEquals(HttpStatusCode.OK, client.enrol(id, key).status)
                     val chunks = items.chunked(100)
                     var duplicates = 0
@@ -193,7 +198,7 @@ class ConformanceReplayTest {
                     val counts = tableCounts()
                     assertEquals(fingerprints.size, counts.getValue("clusters"))
                     // F6(a), as jsonb normalizes spacing/key order: the stored sample is the item's canonical content
-                    // (parsed-equal to SkeletonSchema.measure(...).json), never the client bytes and never a placeholder.
+                    // (parsed-equal to CensusSkeletonSchema.measure(...).json), never the client bytes and never a placeholder.
                     for ((fingerprint, group) in fingerprints.entries.take(5)) {
                         val stored = sql { connection ->
                             connection.prepareStatement("SELECT skeleton::text FROM cluster_samples WHERE fingerprint = ?").use { statement ->
@@ -203,7 +208,7 @@ class ConformanceReplayTest {
                         }
                         assertTrue(stored.isNotEmpty(), "a sample must exist for $fingerprint")
                         val expected = group.groupBy { it.getValue("skeleton").jsonObject["platformAppVersion"] }.values.map {
-                            Json.parseToJsonElement(SkeletonSchema.measure(SkeletonSchema.deserialize(it.first().getValue("skeleton").jsonObject.toString())).json)
+                            Json.parseToJsonElement(CensusSkeletonSchema.measure(CensusSkeletonSchema.deserialize(it.first().getValue("skeleton").jsonObject.toString())).json)
                         }.toSet()
                         assertEquals(expected, stored.map { Json.parseToJsonElement(it) }.toSet())
                     }
