@@ -39,9 +39,11 @@ elif any('SELECT count(*) FROM pg_class' in arg for arg in args):
 elif '--single-transaction' in args:
     sys.stdin.read()
 elif 'run' in args:
-    sys.exit(int(os.environ.get('REPLAY_STATUS', '0')))
+    # The restore pre-check (`--entrypoint /bin/sh … test -r`) always passes in the stub; REPLAY_STATUS drives the replay.
+    sys.exit(0 if '--entrypoint' in args else int(os.environ.get('REPLAY_STATUS', '0')))
 elif Path(sys.argv[0]).name == 'aws':
-    sys.exit(int(os.environ.get('UPLOAD_STATUS', '0')))
+    # UPLOAD_STATUS fails the JOURNAL upload only — the dump's own upload stays the pre-existing fatal path.
+    sys.exit(int(os.environ.get('UPLOAD_STATUS', '0')) if any('withdrawals/' in arg for arg in args) else 0)
 '''
         for name in ("docker", "aws"):
             script = self.bin / name
@@ -68,28 +70,32 @@ elif Path(sys.argv[0]).name == 'aws':
         journal.chmod(0o600)
         return dump, journal
 
-    def test_backup_exports_and_uploads_journal_before_dump(self):
+    def test_backup_dumps_first_then_exports_and_uploads_the_journal(self):
+        # #1192 (fable review F3): the dump already holds the tombstones as of dump time; the journal export
+        # runs AFTER it so an export/upload failure can never cost the day's dump.
         result = self.run_script("backup.sh", BACKUP_BUCKET="s3://example")
         self.assertEqual(0, result.returncode, result.stderr)
         commands = self.commands()
-        self.assertIn("COPY (SELECT install_id_hash", commands[0][-1])
-        self.assertEqual("aws", commands[1][0])
-        self.assertTrue(commands[1][-1].startswith("s3://example/withdrawals/"))
-        self.assertIn("pg_dump", commands[2])
+        self.assertIn("pg_dump", commands[0])
+        copy = next(command for command in commands if "COPY (SELECT install_id_hash" in command[-1])
+        upload = next(command for command in commands if command[0] == "aws" and command[-1].startswith("s3://example/withdrawals/"))
+        self.assertLess(commands.index(copy), commands.index(upload))
         journal = next((self.root / "backups/withdrawals").glob("*.csv"))
         self.assertEqual(0o600, journal.stat().st_mode & 0o777)
         self.assertIn("(1 rows)", result.stdout)
 
-    def test_export_failure_aborts_backup_without_publishing_partial_file(self):
+    def test_export_failure_keeps_the_dump_and_warns(self):
         result = self.run_script("backup.sh", FAIL_EXPORT="1")
-        self.assertNotEqual(0, result.returncode)
-        self.assertEqual(1, len(self.commands()))
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("WARNING: withdrawal journal export failed", result.stderr)
+        self.assertTrue(any("pg_dump" in command for command in self.commands()))
         self.assertEqual([], list((self.root / "backups/withdrawals").iterdir()))
 
-    def test_journal_upload_failure_aborts_before_dump(self):
+    def test_journal_upload_failure_keeps_the_dump_and_warns(self):
         result = self.run_script("backup.sh", BACKUP_BUCKET="example", UPLOAD_STATUS="1")
-        self.assertNotEqual(0, result.returncode)
-        self.assertFalse(any("pg_dump" in command for command in self.commands()))
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("WARNING: withdrawal journal export failed", result.stderr)
+        self.assertTrue(any("pg_dump" in command for command in self.commands()))
 
     def test_export_retains_fourteen_utc_dates(self):
         directory = self.root / "backups/withdrawals"
@@ -112,8 +118,15 @@ elif Path(sys.argv[0]).name == 'aws':
         result = self.run_script("restore.sh", dump, journal)
         self.assertEqual(0, result.returncode, result.stderr)
         commands = self.commands()
+        # Astra review: readability is PROVEN before any SQL — the pre-check precedes the restore transaction,
+        # and the mount is a private STAGED copy (0600, owned by the invoker), never the operator's own file.
+        precheck = next(i for i, command in enumerate(commands) if "--entrypoint" in command)
+        restore = next(i for i, command in enumerate(commands) if "--single-transaction" in command)
+        self.assertLess(precheck, restore)
         self.assertIn("--single-transaction", commands[-2])
-        self.assertIn(f"{journal}:/journal.csv:ro", commands[-1])
+        mount = commands[-1][commands[-1].index("-v") + 1]
+        self.assertTrue(mount.endswith(":/journal.csv:ro") and "census-withdrawals." in mount, mount)
+        self.assertNotIn(f"{journal}:/journal.csv:ro", commands[-1])
         self.assertEqual(["census", "--reapply-withdrawals", "/journal.csv"], commands[-1][-3:])
         self.assertIn("Withdrawals replayed", result.stdout)
         self.assertFalse(any("up" in command for command in commands))

@@ -72,11 +72,22 @@ class InstallStore(private val db: Database, private val clock: Clock) {
         val now = clock.now().truncatedTo(ChronoUnit.MICROS)
         val day = now.atOffset(ZoneOffset.UTC).toLocalDate()
         val inserted = update(
-            """INSERT INTO installs (install_id, key_hash, created_day, last_seen_day, last_app_version, enrolled_at)
-                VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (install_id) DO NOTHING""",
-            installId, keyHash, day, day, appVersion, now.atOffset(ZoneOffset.UTC),
+            """INSERT INTO installs (install_id, key_hash, created_day, last_seen_day, last_app_version)
+                VALUES (?, ?, ?, ?, ?) ON CONFLICT (install_id) DO NOTHING""",
+            installId, keyHash, day, day, appVersion,
         )
-        if (inserted == 1) return@query EnrolOutcome.Created
+        if (inserted == 1) {
+            // #1192 (Astra review): the enrolment instant is read AFTER the insert succeeded, while this
+            // transaction owns the new row — an insert that raced a withdrawal of the previous generation can
+            // only land after that withdrawal committed, so its instant is strictly later than the tombstone.
+            // A pre-insert reading could be EARLIER than a withdrawal that committed in between, and the
+            // startup replay would then erase the new generation.
+            update(
+                "UPDATE installs SET enrolled_at = ? WHERE install_id = ?",
+                clock.now().truncatedTo(ChronoUnit.MICROS).atOffset(ZoneOffset.UTC), installId,
+            )
+            return@query EnrolOutcome.Created
+        }
         select("SELECT key_hash, revoked_at FROM installs WHERE install_id = ? FOR UPDATE", installId) { row ->
             when {
                 row.getObject("revoked_at") != null -> EnrolOutcome.Revoked
@@ -181,6 +192,10 @@ class InstallStore(private val db: Database, private val clock: Clock) {
         require(rows.all { (tombstone, _) -> TOMBSTONE_HASH.matches(tombstone) }) {
             "Invalid withdrawal journal hash"
         }
+        // Fable review F1: a future instant (a typo'd year, a skewed host) would be sticky under GREATEST, never
+        // purged, and would erase every later re-enrolment of that id at each boot — reject the batch.
+        val horizon = clock.now().plusSeconds(JOURNAL_FUTURE_SKEW_SECONDS)
+        require(rows.all { (_, at) -> !at.isAfter(horizon) }) { "Invalid withdrawal journal instant (in the future)" }
         return query {
             rows.sumOf { (hash, at) ->
                 update(
@@ -356,6 +371,9 @@ class InstallStore(private val db: Database, private val clock: Clock) {
     companion object {
         /** A tombstone key: exactly 64 lower-hex characters (the ConstantTimeGuard scans this file — a tombstone is not a credential, but the shape check is a pattern, not a comparison). */
         val TOMBSTONE_HASH: Regex = Regex("^[0-9a-f]{64}$")
+
+        /** How far ahead of this server's clock a journal instant may sit (host clock skew), #1192. */
+        const val JOURNAL_FUTURE_SKEW_SECONDS: Long = 300
 
         fun installIdHash(installId: UUID): String =
             MessageDigest.getInstance("SHA-256").digest(installId.toString().toByteArray(Charsets.UTF_8)).toLowerHex()

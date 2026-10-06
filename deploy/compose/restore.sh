@@ -11,6 +11,19 @@ if [[ "$journal" != --no-journal ]]; then
 fi
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
 gzip -t -- "$dump"
+if [[ "$journal" != --no-journal ]]; then
+    # The replay container runs as the invoking identity with every capability dropped: it cannot read another
+    # uid's 0600 file even as root. Stage a private copy owned by the invoker and PROVE the container can read
+    # it before any SQL is restored — a failure after the restore would leave a populated database that
+    # refuses a second run.
+    staged="$(mktemp -t census-withdrawals.XXXXXX.csv)"
+    trap 'rm -f -- "$staged"' EXIT
+    cat -- "$journal" > "$staged"
+    chmod 0600 -- "$staged"
+    docker compose run --rm --no-deps --user "$(id -u):$(id -g)" -v "$staged":/journal.csv:ro --entrypoint /bin/sh census -c 'test -r /journal.csv' \
+        || { printf 'Refusing restore: the replay container cannot read the staged journal.\n' >&2; exit 1; }
+    journal="$staged"
+fi
 printf 'Restore %s into a FRESH census database? Type RESTORE: ' "$dump"
 read -r confirmation
 [[ "$confirmation" == RESTORE ]] || { printf 'Cancelled.\n'; exit 1; }

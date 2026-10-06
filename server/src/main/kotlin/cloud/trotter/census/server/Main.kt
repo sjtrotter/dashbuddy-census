@@ -42,18 +42,14 @@ fun main(args: Array<String>) {
     val config = try {
         Config.fromEnv()
     } catch (failure: IllegalArgumentException) {
-        if (journal != null) System.err.println("withdrawal replay failed (${failure.javaClass.simpleName})")
-        else log.error(failure.message)
-        exitProcess(1)
+        // Config messages name the missing VARIABLE, never a value — safe on both paths.
+        fail(journal, log, "configuration", failure, detail = failure.message)
     }
     val database = try {
         Database.migrate(config)
         Database.connect(config)
     } catch (t: Throwable) {
-        if (journal != null) {
-            System.err.println("withdrawal replay failed (${t.javaClass.simpleName})")
-            exitProcess(1)
-        }
+        if (journal != null) fail(journal, log, "database", t)
         // The throwable is attached on purpose: SafeThrowableConverter renders ONLY the exception class chain
         // and the top frames (never a message), so the full diagnostic lineage survives without the JDBC URL.
         log.error("database startup failed ({}); check DATABASE_URL/DATABASE_USER/DATABASE_PASSWORD", t.javaClass.simpleName, t)
@@ -74,9 +70,7 @@ fun main(args: Array<String>) {
             }
             if (replay.matched > 0) log.warn("withdrawal replay deleted {} resurrected install(s) — a restore reintroduced withdrawn data", replay.matched)
         } catch (t: Throwable) {
-            if (journal != null) System.err.println("withdrawal replay failed (${t.javaClass.simpleName})")
-            else log.error("withdrawal replay failed ({})", t.javaClass.simpleName, t)
-            exitProcess(1)
+            fail(journal, log, "withdrawal replay", t)
         }
         if (journal != null) return@use
         embeddedServer(Netty, host = "0.0.0.0", port = config.port) {
@@ -124,3 +118,19 @@ internal fun readWithdrawalJournal(reader: Reader): List<Pair<String, Instant>> 
     }.toList()
 
 private val journalHourOffset = Regex("([+-]\\d{2})$")
+
+/**
+ * #1192: the ONE failure reporter for both modes. The one-shot CLI prints to stderr for the operator (class name,
+ * plus a [detail] that is known to be value-free — a Config message names the variable, never its value); the
+ * server mode logs through SLF4J (the throwable is attached only there — SafeThrowableConverter renders the class
+ * chain, never a message).
+ */
+private fun fail(journal: String?, log: org.slf4j.Logger, stage: String, failure: Throwable, detail: String? = null): Nothing {
+    if (journal != null) {
+        val where = if (stage == "withdrawal replay") "" else " at $stage"
+        System.err.println("withdrawal replay failed$where (${failure.javaClass.simpleName})" + (detail?.let { ": $it" } ?: ""))
+    } else {
+        log.error("$stage failed ({})" + (detail?.let { ": $it" } ?: ""), failure.javaClass.simpleName, failure)
+    }
+    exitProcess(1)
+}

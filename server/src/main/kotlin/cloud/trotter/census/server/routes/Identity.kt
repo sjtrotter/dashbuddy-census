@@ -107,9 +107,13 @@ fun Route.identityRoutes(store: InstallStore?, clock: Clock, policy: Policy, ala
                 when (val result = store.withdraw(call.attributes[InstallRowKey].id, call.attributes[AuthenticatedInstallKey].secretHash)) {
                     is MutationOutcome.Applied -> {
                         call.application.environment.log.info("withdraw rows={}", result.deletedRows.values.sum())
-                        alarms?.recordWithdrawal(
-                            InstallStore.installIdHash(call.attributes[InstallRowKey].id), requireNotNull(result.withdrawnAt),
-                        )
+                        // #1192: the notice is best-effort — the rows and the tombstone are already committed, so a
+                        // sink failure must not turn a successful withdrawal into a 500 (fable review F4).
+                        runCatching {
+                            alarms?.recordWithdrawal(
+                                InstallStore.installIdHash(call.attributes[InstallRowKey].id), requireNotNull(result.withdrawnAt),
+                            )
+                        }.onFailure { call.application.environment.log.warn("withdrawal notice failed class={}", it.javaClass.simpleName) }
                         val now = call.attributes.getOrNull(RequestInstantKey) ?: clock.now()
                         val deadline = now.atOffset(ZoneOffset.UTC).toLocalDate().plusDays(1)
                         call.respond(HttpStatusCode.Accepted, WithdrawalResponse(completionDeadline = deadline.toString()))

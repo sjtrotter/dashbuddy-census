@@ -23,6 +23,7 @@ import cloud.trotter.census.server.jobs.HealthAlarms
 import cloud.trotter.census.server.jobs.LoggingAlarmSink
 import cloud.trotter.census.server.jobs.FileSpoolAlarmSink
 import cloud.trotter.census.server.jobs.renderAlarm
+import cloud.trotter.census.server.jobs.withdrawalBodyPattern
 import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.post
@@ -102,7 +103,7 @@ class IdentityRoutesTest {
                 val body = "install_id_hash=${InstallStore.installIdHash(UUID.fromString(id))}\nwithdrawn_at=${clock.instant}"
                 val expected = "kind=withdrawal\n$body"
                 assertEquals(body, alarm.message)
-                assertTrue(requireNotNull(alarm.message).matches(Regex("^install_id_hash=[0-9a-f]{64}\\nwithdrawn_at=\\d{4}-\\d{2}-\\d{2}T[0-9:.]+Z$")))
+                assertTrue(withdrawalBodyPattern.matches(requireNotNull(alarm.message)))
                 assertEquals(expected, renderAlarm(alarm))
                 val files = Files.list(spoolDir).use { it.toList() }
                 assertEquals(1, files.size)

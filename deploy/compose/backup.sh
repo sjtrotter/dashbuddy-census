@@ -2,7 +2,6 @@
 set -euo pipefail
 umask 077
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
-./export-withdrawals.sh
 mkdir -p backups
 dump="backups/census-$(date -u +%F).sql.gz"
 temporary="$(mktemp "${dump}.XXXXXX")"
@@ -21,3 +20,7 @@ for candidate in backups/census-????-??-??.sql.gz; do
     if [[ "$day" < "$cutoff" ]]; then rm -- "$candidate"; fi
 done
 printf 'Backup created: %s\n' "$dump"
+# #1192: the withdrawal journal rides beside every dump (restoring an OLDER dump needs the LATEST journal). The dump
+# already holds the tombstones as of dump time, so an export/upload failure must not cost the day's dump — it is
+# reported, not fatal.
+./export-withdrawals.sh || printf 'WARNING: withdrawal journal export failed (the dump is intact; the SNS notices remain the journal for today)\n' >&2

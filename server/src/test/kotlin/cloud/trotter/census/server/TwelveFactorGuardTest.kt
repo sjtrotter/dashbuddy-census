@@ -9,12 +9,15 @@ import java.nio.file.Path
 
 /** Source guards for disposable processes, explicit clocks, and the app's #909 regex rule (#1157 S1). */
 class TwelveFactorGuardTest {
+    /** #1192: the one-shot CLI's stdout/stderr sites in Main.kt — usage, the result line, the failure line (frozen). */
+    private val MAIN_STREAM_SITES = 3
+
     @Test
-    fun `only the main CLI may print usage and one-shot results`() {
-        for (source in listOf("println(\"result\")", "System.err.println(\"usage\")")) {
-            assertTrue(violations("Main.kt", source).isEmpty())
-            assertFalse(violations("OtherMain.kt", source).isEmpty())
-        }
+    fun `only the main CLI may print usage and one-shot results - a frozen count`() {
+        val mainSites = (1..MAIN_STREAM_SITES).joinToString("\n") { "System.err.println(\"line $it\")" }
+        assertTrue(violations("Main.kt", mainSites).isEmpty())
+        assertFalse(violations("Main.kt", "$mainSites\nprintln(\"extra\")").isEmpty(), "one more print in Main fails the ratchet")
+        assertFalse(violations("OtherMain.kt", "println(\"result\")").isEmpty())
     }
 
     @Test
@@ -75,8 +78,14 @@ class TwelveFactorGuardTest {
     }
 
     private fun violations(name: String, source: String): List<String> = buildList {
-        // #1192: Main's one-shot CLI prints a machine-readable result/usage; server paths still use SLF4J.
-        if (name != "Main.kt") {
+        // #1192: Main's one-shot CLI prints usage, one result line and one failure line — a FROZEN count of
+        // stream sites (the DashBuddy TimberTagGuard ratchet shape); any other file: none. A new print in Main's
+        // server path moves the count and fails here.
+        // A "site" is a LINE that prints (`System.err.println(…)` is one site, not two matches).
+        val streamSites = source.lines().count { Regex("\\bprintln\\s*\\(|\\bSystem\\s*\\.\\s*(?:err|out)\\b").containsMatchIn(it) }
+        if (name == "Main.kt") {
+            if (streamSites != MAIN_STREAM_SITES) add("Main.kt stream sites: expected $MAIN_STREAM_SITES, found $streamSites (SLF4J for the server path)")
+        } else {
             if (Regex("\\bprintln\\s*\\(").containsMatchIn(source)) add("Use SLF4J, not println")
             if (Regex("\\bSystem\\s*\\.\\s*(err|out)\\b").containsMatchIn(source)) add("Use SLF4J, not standard streams")
         }
