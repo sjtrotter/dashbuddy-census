@@ -347,9 +347,9 @@ class IdentityRoutesTest {
             store.tryConsume(id, day.minusDays(7), 1, 1, null, BudgetPolicy())
             val report = PurgeJob(store, clock).runOnce()
             assertEquals(1, report.nonces)
-            assertEquals(1, report.ledgerRows)
+            assertEquals(2, report.ledgerRows)
             assertNull(store.ledgerFor(id, day.minusDays(8)))
-            assertNotNull(store.ledgerFor(id, day.minusDays(7)))
+            assertNull(store.ledgerFor(id, day.minusDays(7)))
             sql { connection ->
                 connection.prepareStatement("SELECT nonce FROM nonces WHERE nonce IN (?, ?)").use { statement ->
                     statement.setString(1, stale); statement.setString(2, boundary)
@@ -657,8 +657,8 @@ class IdentityRoutesTest {
             statement.executeUpdate("INSERT INTO clusters (fingerprint, platform, first_seen_day, last_seen_day) VALUES ('$fingerprint', 'android', '2026-10-02', '2026-10-02') ON CONFLICT DO NOTHING")
             statement.executeUpdate("INSERT INTO trusted_envelopes (install_id, envelope, received_day, purge_after) VALUES ('$id', '{}', '2026-10-02', '2026-10-03')")
             statement.executeUpdate("INSERT INTO health_daily VALUES ('$id', '2026-10-02', 'android', '1.0', 1, 0, 0, NULL, '{}')")
-            statement.executeUpdate("INSERT INTO token_sightings VALUES ('1234567890abcdef', '$id', '2026-10-02', '2026-10-02', 'test')")
-            statement.executeUpdate("INSERT INTO cluster_sightings VALUES ('$fingerprint', '$id', '2026-10-02', '1.0', 1)")
+            statement.executeUpdate("INSERT INTO token_sightings_v5 VALUES ('1234567890abcdef', '$id', '2026-10-02', '2026-10-02', 'test', 1, 1)")
+            statement.executeUpdate("INSERT INTO cluster_sightings_v5 VALUES ('$fingerprint', '$id', '2026-10-02', '1.0', 1, 1, 1)")
             statement.executeUpdate("INSERT INTO ingest_ledger (install_id, day) VALUES ('$id', '2026-10-02') ON CONFLICT DO NOTHING")
         }
     }

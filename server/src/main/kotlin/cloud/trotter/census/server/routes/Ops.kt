@@ -60,6 +60,7 @@ fun Route.opsRoutes(
     // Created once at module's route installation; shared by the auth plugin and login handlers.
     sessions: OpsSessions = OpsSessions(),
     replay: TotpReplay = TotpReplay(),
+    lifecycle: cloud.trotter.census.server.jobs.LifecycleReport? = null,
 ) {
     route("/ops") {
         install(OpsAuth) {
@@ -108,7 +109,8 @@ fun Route.opsRoutes(
                 route("/{rest...}") { handle { call.respond(HttpStatusCode.ServiceUnavailable, ErrorResponse("db_unavailable")) } }
                 return@run
             }
-            dashboardRoute(store, alarms, clock, policy)
+            dashboardRoute(store, alarms, clock, policy, config, lifecycle)
+            get("/lifecycle") { call.respond(lifecycleView(config, policy, store, lifecycle)) }
             get("/clusters") {
                 val kind = call.request.queryParameters["kind"]?.let {
                     cloud.trotter.census.contract.SkeletonKind.fromWire(it) ?: badRequest()
@@ -156,14 +158,14 @@ fun Route.opsRoutes(
             get("/vocabulary/queue") { call.respond(store.vocabularyQueue(call.bound("limit", 50, 200))) }
             post("/vocabulary/resolve") {
                 val request = call.opsBody<ResolveRequest>() ?: return@post
-                if (!CensusHash.isWellFormed(request.tokenHash) || request.clearText != null && request.clearText.length > 128 ||
+                if (request.hashDomain !in policy.acceptedHashDomains || request.filterRev < policy.minimumFilterRev || !CensusHash.isWellFormed(request.tokenHash) || request.clearText != null && request.clearText.length > 128 ||
                     !Regex("trusted:[0-9a-f]{8}|corpus|rule_anchor").matches(request.source) || !request.reject && request.clearText == null
                 ) badRequest()
                 if (request.clearText != null && CensusHash.of(request.clearText) != request.tokenHash) {
                     call.respond(HttpStatusCode.UnprocessableEntity, ErrorResponse("hash_mismatch"))
                     return@post
                 }
-                call.mutation(store.resolve(request.tokenHash, request.clearText, request.source, request.reject))
+                call.mutation(store.resolve(request.tokenHash, request.clearText, request.source, request.reject, request.hashDomain, request.filterRev))
             }
             // Keep unknown paths behind the same authentication and TOTP gates.
             route("/{rest...}") { handle { call.respond(HttpStatusCode.NotFound, ErrorResponse("not_found")) } }
@@ -221,4 +223,22 @@ private data class StatusRequest(val status: String, val resolvedRuleId: String?
 @Serializable
 private data class TrustRequest(val trusted: Boolean)
 @Serializable
-private data class ResolveRequest(val tokenHash: String, val clearText: String? = null, val source: String, val reject: Boolean)
+private data class ResolveRequest(val tokenHash: String, val clearText: String? = null, val source: String, val reject: Boolean, val hashDomain: Int = 1, val filterRev: Int = 1)
+
+internal suspend fun lifecycleView(
+    config: Config, policy: Policy, store: OpsStore, report: cloud.trotter.census.server.jobs.LifecycleReport?,
+): cloud.trotter.census.server.jobs.LifecycleView {
+    val sweeps=(report?.sweeps ?: emptyMap()).toMutableMap()
+    try {
+        for ((name,due) in store.lifecycleOverdue()) sweeps[name]=(sweeps[name] ?: cloud.trotter.census.server.jobs.SweepResult()).copy(remainingDue=due)
+    } catch (failure: Exception) {
+        if (failure is kotlinx.coroutines.CancellationException) throw failure
+        for ((name,result) in sweeps.toMap()) sweeps[name]=result.copy(remainingDue=null)
+        sweeps["lifecycle_counts"]=cloud.trotter.census.server.jobs.SweepResult(failed=true)
+    }
+    return cloud.trotter.census.server.jobs.LifecycleView(
+        cloud.trotter.census.contract.NotificationSkeletonSchema.SCHEMA_ID in policy.acceptedSchemaIds,
+        config.minimumFilterRev, policy.minimumFilterRev, sweeps,
+        report?.lastSuccessAgeSeconds(), store.vocabularyQueueCount(), store.filterRevisionRejections(),
+    )
+}

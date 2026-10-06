@@ -28,18 +28,22 @@ resource "aws_s3_bucket_public_access_block" "backup" {
 
 resource "aws_s3_bucket_lifecycle_configuration" "backup" {
   bucket = aws_s3_bucket.backup.id
-  rule {
-    id     = "expire-after-14-days"
-    status = "Enabled"
-    filter {}
-    expiration {
-      days = 14
-    }
-    noncurrent_version_expiration {
-      noncurrent_days = 14
-    }
-    abort_incomplete_multipart_upload {
-      days_after_initiation = 1
+  # Policy-only filter-floor/ journals are durable; never expire them with observations.
+  dynamic "rule" {
+    for_each = toset(["census-", "withdrawals/"])
+    content {
+      id     = "expire-${replace(rule.value, "/", "")}-after-14-days"
+      status = "Enabled"
+      filter { prefix = rule.value }
+      expiration {
+        days = 14
+      }
+      noncurrent_version_expiration {
+        noncurrent_days = 14
+      }
+      abort_incomplete_multipart_upload {
+        days_after_initiation = 1
+      }
     }
   }
   depends_on = [aws_s3_bucket_versioning.backup]

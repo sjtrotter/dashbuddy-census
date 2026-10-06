@@ -213,7 +213,7 @@ class ConformanceReplayTest {
                         assertEquals(expected, stored.map { Json.parseToJsonElement(it) }.toSet())
                     }
                     val sightings = sql { connection ->
-                        connection.prepareStatement("SELECT fingerprint, sum(count) FROM cluster_sightings WHERE install_id = ?::uuid GROUP BY fingerprint").use { statement ->
+                        connection.prepareStatement("SELECT fingerprint, sum(count) FROM cluster_sightings_v5 WHERE install_id = ?::uuid GROUP BY fingerprint").use { statement ->
                             statement.setString(1, id)
                             statement.executeQuery().use { rows -> buildMap { while (rows.next()) put(rows.getString(1), rows.getInt(2)) } }
                         }
@@ -238,7 +238,7 @@ class ConformanceReplayTest {
                         }
                     })
                     val hashes = sql { connection ->
-                        connection.prepareStatement("SELECT DISTINCT token_hash FROM token_sightings WHERE install_id = ?::uuid").use { statement ->
+                        connection.prepareStatement("SELECT DISTINCT token_hash FROM token_sightings_v5 WHERE install_id = ?::uuid").use { statement ->
                             statement.setString(1, id)
                             statement.executeQuery().use { rows -> buildSet { while (rows.next()) add(rows.getString(1)) } }
                         }
@@ -269,8 +269,8 @@ class ConformanceReplayTest {
 
                     assertEquals(HttpStatusCode.Accepted, client.signed(clock, id, key, HttpMethod.Delete, "/v1/installs/me").status)
                     val afterWithdrawal = tableCounts()
-                    assertEquals(0, afterWithdrawal.getValue("cluster_sightings"))
-                    assertEquals(0, afterWithdrawal.getValue("token_sightings"))
+                    assertEquals(0, afterWithdrawal.getValue("cluster_sightings_v5"))
+                    assertEquals(0, afterWithdrawal.getValue("token_sightings_v5"))
                     assertEquals(counts.getValue("clusters"), afterWithdrawal.getValue("clusters"))
                     assertEquals(counts.getValue("cluster_samples"), afterWithdrawal.getValue("cluster_samples"))
 
@@ -319,7 +319,7 @@ class ConformanceReplayTest {
                     assertEquals(listOf("accepted", "duplicate"), statuses.sorted())
                     val raceFingerprint = items.first().getValue("fingerprint").jsonPrimitive.content
                     assertEquals(1, sql { connection ->
-                        connection.prepareStatement("SELECT sum(count) FROM cluster_sightings WHERE fingerprint = ? AND install_id = ?::uuid").use { statement ->
+                        connection.prepareStatement("SELECT sum(count) FROM cluster_sightings_v5 WHERE fingerprint = ? AND install_id = ?::uuid").use { statement ->
                             statement.setString(1, raceFingerprint)
                             statement.setString(2, raceId)
                             statement.executeQuery().use { rows -> rows.next(); rows.getInt(1) }
@@ -347,7 +347,7 @@ class ConformanceReplayTest {
                     assertEquals(1, versionsBody.getValue("accepted").jsonPrimitive.int)
                     assertEquals(1, versionsBody.getValue("duplicate").jsonPrimitive.int)
                     assertEquals(mapOf("1.0.0" to 1, "2.0.0" to 1), sql { connection ->
-                        connection.prepareStatement("SELECT platform_app_version, count FROM cluster_sightings WHERE fingerprint = ? AND install_id = ?::uuid").use { statement ->
+                        connection.prepareStatement("SELECT platform_app_version, count FROM cluster_sightings_v5 WHERE fingerprint = ? AND install_id = ?::uuid").use { statement ->
                             statement.setString(1, versionFingerprint)
                             statement.setString(2, raceId)
                             statement.executeQuery().use { rows -> buildMap { while (rows.next()) put(rows.getString(1), rows.getInt(2)) } }
@@ -407,7 +407,7 @@ class ConformanceReplayTest {
     ))))
 
     private fun tableCounts(): Map<String, Int> = sql { connection ->
-        listOf("clusters", "cluster_samples", "cluster_sightings", "token_sightings").associateWith { table ->
+        listOf("clusters", "cluster_samples", "cluster_sightings_v5", "token_sightings_v5").associateWith { table ->
             connection.createStatement().use { statement ->
                 statement.executeQuery("SELECT count(*) FROM $table").use { rows -> rows.next(); rows.getInt(1) }
             }

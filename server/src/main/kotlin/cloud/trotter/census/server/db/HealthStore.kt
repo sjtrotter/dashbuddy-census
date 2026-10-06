@@ -147,7 +147,7 @@ class HealthStore(private val db: Database, private val clock: Clock) {
         }
         val newClusters = select(
             """SELECT c.platform, s.platform_app_version, count(DISTINCT c.fingerprint) AS count
-                FROM clusters c JOIN cluster_sightings s ON s.fingerprint = c.fingerprint
+                FROM clusters c JOIN cluster_sightings_v5 s ON s.fingerprint = c.fingerprint
                 WHERE c.first_seen_day = ? AND s.day = ? GROUP BY c.platform, s.platform_app_version""", today, today,
         ) { rows -> buildList {
             do { add(NewClusterCount(rows.getString("platform"), rows.getString("platform_app_version"), rows.getInt("count"))) } while (rows.next())

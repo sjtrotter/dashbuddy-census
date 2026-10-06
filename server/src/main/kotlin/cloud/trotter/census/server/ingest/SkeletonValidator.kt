@@ -30,7 +30,11 @@ sealed interface ItemVerdict {
     data class Rejected(val reason: String) : ItemVerdict
 }
 
-data class Token(val hash: String, val kind: String)
+data class TokenKey(val hashDomain: Int, val filterRev: Int, val hash: String)
+data class Token(val key: TokenKey, val kind: String) { val hash: String get() = key.hash }
+
+/** Server admission extends the pinned wire contract without weakening its reason guard. */
+enum class AdmissionReason(val wire: String) { FILTER_REV_TOO_OLD("filter_rev_too_old") }
 
 /**
  * Pure admission checks. Structural inspection never recurses, even through incorrectly typed values.
@@ -56,6 +60,10 @@ object SkeletonValidator {
         if (notification && !Regex(NotificationSkeletonDto.CHANNEL_ID_PATTERN).matches(element.string("channelId") ?: "")) {
             return reject("bad_channel")
         }
+        val revision = (element["filterRev"] as? JsonPrimitive)?.intOrNull
+            ?.takeIf { it > 0 } ?: return reject("bad_item")
+        if (revision < policy.minimumFilterRev) return reject(AdmissionReason.FILTER_REV_TOO_OLD.wire)
+        val domain = (element["hashDomain"] as JsonPrimitive).intOrNull!!
         val tokens = mutableListOf<Token>()
         for (slot in structure.slots) {
             val kind = requireNotNull(slot.string("kind"))
@@ -64,7 +72,7 @@ object SkeletonValidator {
             if (hash != null && !CensusHash.isWellFormed(hash)) return reject("bad_hash")
             if (hash != null && !KindClassifier.isHashableKind(kind)) return reject("hash_on_withheld_kind")
             if (hash == null && KindClassifier.isHashableKind(kind)) return reject("missing_hash")
-            if (hash != null) tokens += Token(hash, kind)
+            if (hash != null) tokens += Token(TokenKey(domain, revision, hash), kind)
         }
         for (node in structure.nodes) {
             val id = node.string("id")
@@ -112,7 +120,8 @@ object SkeletonValidator {
     }
 
     private fun reject(reason: String): ItemVerdict.Rejected =
-        ItemVerdict.Rejected(requireNotNull(SkeletonRejectionReason.fromWire(reason)).wire)
+        ItemVerdict.Rejected(AdmissionReason.entries.firstOrNull { it.wire == reason }?.wire
+            ?: requireNotNull(SkeletonRejectionReason.fromWire(reason)).wire)
 
     private fun JsonObject.string(key: String): String? =
         (this[key] as? JsonPrimitive)?.takeIf { it.isString }?.content

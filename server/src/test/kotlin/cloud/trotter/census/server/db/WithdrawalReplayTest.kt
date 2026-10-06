@@ -218,7 +218,7 @@ class WithdrawalReplayTest {
     }
 
     @Test
-    fun `purgeWithdrawals is bounded and only removes tombstones older than the horizon`() = runBlocking {
+    fun `purgeWithdrawals is bounded and removes tombstones at the half open horizon`() = runBlocking {
         sql { connection ->
             connection.update(
                 """INSERT INTO withdrawals SELECT lpad(to_hex(n), 64, '0'), ?::timestamptz
@@ -236,8 +236,8 @@ class WithdrawalReplayTest {
                 store.mergeWithdrawalJournal(listOf("a".repeat(64) to t0, "b".repeat(64) to t0.plusSeconds(1)))
                 assertEquals(50000, store.purgeWithdrawals(t0))
                 assertEquals(3, journal().size)
-                assertEquals(1, store.purgeWithdrawals(t0))
-                assertEquals(mapOf("a".repeat(64) to t0, "b".repeat(64) to t0.plusSeconds(1)), journal())
+                assertEquals(2, store.purgeWithdrawals(t0))
+                assertEquals(mapOf("b".repeat(64) to t0.plusSeconds(1)), journal())
             }
         } finally {
             sql { connection ->
@@ -256,8 +256,8 @@ class WithdrawalReplayTest {
         ) { it.getLong(1) }!!
         connection.update("UPDATE clusters SET draft = jsonb_build_object('envelopeId', ?::text), draft_day = ?, screen_class = 'offer' WHERE fingerprint = ?", envelope.toString(), day, fingerprint)
         connection.update("INSERT INTO health_daily (install_id, day, platform, platform_app_version, admitted, unknown, trips, rule_counts) VALUES (?, ?, 'android', '1.0', 1, 0, 0, '{}')", id, day)
-        connection.update("INSERT INTO token_sightings VALUES ('1234567890abcdef', ?, ?, ?, 'test')", id, day, day)
-        connection.update("INSERT INTO cluster_sightings VALUES (?, ?, ?, '1.0', 1)", fingerprint, id, day)
+        connection.update("INSERT INTO token_sightings_v5 VALUES ('1234567890abcdef', ?, ?, ?, 'test', 1, 1)", id, day, day)
+        connection.update("INSERT INTO cluster_sightings_v5 VALUES (?, ?, ?, '1.0', 1, 1, 1)", fingerprint, id, day)
         connection.update("INSERT INTO ingest_ledger (install_id, day) VALUES (?, ?)", id, day)
         connection.update("INSERT INTO nonces (nonce, install_id, issued_at) VALUES (?, ?, ?)", UUID.randomUUID().toString().replace("-", ""), id, t0.atOffset(ZoneOffset.UTC))
     }

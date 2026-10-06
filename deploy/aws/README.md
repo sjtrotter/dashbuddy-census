@@ -458,8 +458,9 @@ read -r -s -p 'Short-lived latest withdrawal journal URL: ' JOURNAL_URL
 printf '\n'
 curl --fail --silent --show-error "$JOURNAL_URL" -o /opt/census/withdrawals-latest.csv
 unset JOURNAL_URL
+# Download the latest policy-only filter-floor/ CSV to /opt/census/filter-floor-latest.csv as well.
 # Add any newer SNS withdrawal notice rows before restoring (see OPERATOR.md).
-./restore.sh /opt/census/restore.sql.gz /opt/census/withdrawals-latest.csv
+./restore.sh /opt/census/restore.sql.gz /opt/census/withdrawals-latest.csv /opt/census/filter-floor-latest.csv
 # Type RESTORE at the prompt. Review restored data and any pending migrations.
 systemctl start census.service
 systemctl start census-backup.timer
@@ -467,7 +468,7 @@ docker compose ps
 rm /opt/census/restore.sql.gz /opt/census/withdrawals-latest.csv
 ```
 
-Check readiness, policy, relevant row counts, and backup upload from the recovered database. Download the latest `withdrawals/` CSV using the operator's SSO identity and pass it to `restore.sh`, as above and in [OPERATOR.md](../../docs/OPERATOR.md#backup-and-restore). Restore merges and replays it while census remains stopped; every server startup also replays before serving, preserving later re-enrolments. Use `--no-journal` only when none exists: it covers tombstones inside the dump only. Newer SNS withdrawal notices supply hash/timestamp rows to append to the journal; loss before either off-host channel delivers remains a recovery gap. Record the backup timestamp, recovered coverage, and elapsed recovery time. Only then move DNS/EIP for real recovery; for a drill, leave production DNS unchanged. Preserve the bind-directory and volume-name override for subsequent deployments on the recovered host; before another instance rebuild, promote the recovered directory to `/var/lib/census-data/pgdata` with the stack stopped and the prior directory retained. Refresh GitHub's instance variable after replacement. Retire recovery resources and retained volumes deliberately after verification.
+Check readiness, policy, relevant row counts, and backup upload from the recovered database. Download the latest `withdrawals/` CSV using the operator's SSO identity and pass it to `restore.sh`, as above and in [OPERATOR.md](../../docs/OPERATOR.md#backup-and-restore). Restore merges and replays it while census remains stopped; every server startup also replays before serving, preserving later re-enrolments. The latest filter-floor journal is also mandatory; keep the current deployment configuration and merge the maximum floor before startup catch-up. Newer SNS withdrawal notices supply hash/timestamp rows to append to the journal; loss before either off-host channel delivers remains a recovery gap. Record the backup timestamp, recovered coverage, and elapsed recovery time. Only then move DNS/EIP for real recovery; for a drill, leave production DNS unchanged. Preserve the bind-directory and volume-name override for subsequent deployments on the recovered host; before another instance rebuild, promote the recovered directory to `/var/lib/census-data/pgdata` with the stack stopped and the prior directory retained. Refresh GitHub's instance variable after replacement. Retire recovery resources and retained volumes deliberately after verification.
 
 ### Recovery box by hand, and running the drill over SSM
 
@@ -484,7 +485,7 @@ docker compose config --format json | python3 -c 'import json,sys; v=json.load(s
 mv docker-compose.override.yml.new docker-compose.override.yml
 ```
 
-Pass the latest withdrawal CSV to `restore.sh` and review its replay counts before starting census ([OPERATOR.md](../../docs/OPERATOR.md#backup-and-restore)); `--no-journal` is only for recovery without any journal. When the record below is written, terminate the box and delete the scratch volume: the scratch compute and data volume are removed; nothing in Terraform, IAM or DNS was touched.
+Pass the latest withdrawal CSV to `restore.sh` and review its replay counts before starting census ([OPERATOR.md](../../docs/OPERATOR.md#backup-and-restore)); also supply the latest filter-floor CSV and review its effective floor before starting. When the record below is written, terminate the box and delete the scratch volume: the scratch compute and data volume are removed; nothing in Terraform, IAM or DNS was touched.
 
 ### Drill log
 
@@ -535,3 +536,9 @@ Backend-free validation does not contact AWS, but initialization downloads provi
 - **Cost Anomaly Detection:** a new account already carries a default `Default-Services-Monitor`, and AWS allows exactly one SERVICE-dimension monitor per account, so the first `apply` fails on `aws_ce_anomaly_monitor.services` with "Limit exceeded on dimensional spend monitor creation". Import it instead of creating: `terraform import aws_ce_anomaly_monitor.services $(aws ce get-anomaly-monitors --query "AnomalyMonitors[?MonitorDimension=='SERVICE'].MonitorArn | [0]" --output text)` and re-apply (it is renamed in place).
 - **First boot fails until BOTH images exist:** the box runs `docker compose pull` on first start; before the first `v*` release (census) and `caddy-v*` tag (edge, #1178) the GHCR packages do not exist and the pull is `denied`. Tag both, wait for `image.yml` and `caddy-image.yml`, then `systemctl restart census.service` through SSM. The package was public on first push here (linked to the public repo); if a pull is still denied after publishing, set the package visibility to Public in GitHub → Packages.
 - Verified end to end: data volume mounted at `/var/lib/census-data`, Parameter Store values read, all three containers healthy, `/readyz` 200, `https://census.dashbuddy.trotter.cloud/v1/policy` 200 with HSTS within a minute of the DNS record (DNS-only, not proxied, in Cloudflare).
+
+### V5 lifecycle deployment
+
+Notifications remain disabled by default. SSM `census_notifications_enabled=false` and `census_min_filter_rev=1` feed the same settings as Compose. Follow [the activation/rollback runbook](../../docs/OPERATOR.md#notification-activation-and-rollback); stop pre-V5 code during cutover. Refresh both the host config renderer and `/usr/local/sbin/census-alarm-publish` from this cloud-init template on existing hosts. The publisher must accept `lifecycle_failure`, `lifecycle_backlog`, and `lifecycle_stale`; a server image update alone cannot deliver them.
+
+Backup runs dump/upload first, then strict withdrawal and floor exports; an export failure fails the operation while preserving the dump. Restore takes THREE paths (dump, latest withdrawals, latest floor) and keeps census stopped on replay/catch-up failure. Filter-floor journals are policy-only and exempt from S3/local observation expiration. Applying the adjusted S3 lifecycle requires the existing root-only retention change procedure; preserve the exemption so an old backup can never reset a removed revision.

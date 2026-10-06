@@ -1,5 +1,9 @@
 package cloud.trotter.census.server
 
+import cloud.trotter.census.server.db.FilterPolicyStore
+import cloud.trotter.census.server.db.FilterFloorJournal
+import cloud.trotter.census.server.db.LifecycleStore
+import cloud.trotter.census.server.jobs.LifecycleReport
 import cloud.trotter.census.server.db.HealthStore
 import cloud.trotter.census.server.db.InstallStore
 import cloud.trotter.census.server.jobs.AlarmSink
@@ -10,6 +14,10 @@ import cloud.trotter.census.server.jobs.LoggingAlarmSink
 import cloud.trotter.census.server.jobs.PurgeJob
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.netty.Netty
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -27,11 +35,15 @@ import kotlin.time.Duration.Companion.minutes
 
 /** Migrations and withdrawal replay must succeed before HTTP can start. */
 fun main(args: Array<String>) {
-    if (args.isNotEmpty() && (args.size != 2 || args[0] != "--reapply-withdrawals" || args[1].startsWith("--"))) {
-        System.err.println("Usage: census [--reapply-withdrawals <csv>]")
+    val valid = args.isEmpty() || args.size == 2 && args[0] in setOf("--reapply-withdrawals", "--merge-filter-floor", "--export-filter-floor") && !args[1].startsWith("--") ||
+        args.size == 4 && args[0] == "--reapply-withdrawals" && args[2] == "--filter-floor" && !args[1].startsWith("--") && !args[3].startsWith("--")
+    if (!valid) {
+        System.err.println("Usage: census [--reapply-withdrawals <csv> [--filter-floor <csv>] | --merge-filter-floor <csv> | --export-filter-floor <csv>]")
         exitProcess(2)
     }
-    val journal = args.getOrNull(1)
+    val journal = args.getOrNull(1) // Non-null marks one-shot mode for sanitized error reporting.
+    val withdrawalJournal = journal?.takeIf { args[0] == "--reapply-withdrawals" }
+    val floorJournal = if (args.getOrNull(0) == "--merge-filter-floor") journal else args.getOrNull(3)
     SLF4JBridgeHandler.removeHandlersForRootLogger()
     SLF4JBridgeHandler.install()
     val log = LoggerFactory.getLogger("census.startup")
@@ -56,10 +68,27 @@ fun main(args: Array<String>) {
         exitProcess(1)
     }
     database.use { db ->
+        val spool = config.alarmSpoolDir?.let { FileSpoolAlarmSink(Path.of(it), clock = SystemClock) }
+        val sink: AlarmSink = spool ?: LoggingAlarmSink()
+        val stats = spool?.stats ?: AlarmStats()
+        val alarms = HealthAlarms(HealthStore(db, SystemClock), SystemClock, sink, stats, startedAt = SystemClock.now())
+        val lifecycleReport = LifecycleReport(SystemClock, sink)
+        val watchdogScope=CoroutineScope(SupervisorJob()+Dispatchers.Default)
+        watchdogScope.launch { while(true) { delay(1.minutes); lifecycleReport.watchdog() } }
+        val floors = FilterPolicyStore(db, SystemClock)
+        val policy = try {
+            val imported = floorJournal?.let { Files.newBufferedReader(Path.of(it)).use(FilterFloorJournal::read) }
+            config.policy(runBlocking { floors.bootstrap(config.minimumFilterRev, imported) })
+        } catch (failure: Exception) {
+            sink.raise(cloud.trotter.census.server.jobs.Alarm("lifecycle_failure", "_unknown", "0"))
+            fail(journal, log, "filter replay", failure)
+        }
+        log.info("filter replay effective_floor={} deleted={} rewritten={}",policy.minimumFilterRev,
+            floors.results.values.sumOf { it.deleted },floors.results.values.sumOf { it.rewritten })
         try {
             val store = InstallStore(db, SystemClock)
-            val merged = if (journal == null) 0 else {
-                val rows = Files.newBufferedReader(Path.of(journal)).use(::readWithdrawalJournal)
+            val merged = if (withdrawalJournal == null) 0 else {
+                val rows = Files.newBufferedReader(Path.of(withdrawalJournal)).use(::readWithdrawalJournal)
                 runBlocking { store.mergeWithdrawalJournal(rows) }
             }
             val replay = runBlocking { store.reapplyWithdrawals() }
@@ -72,31 +101,37 @@ fun main(args: Array<String>) {
         } catch (t: Throwable) {
             fail(journal, log, "withdrawal replay", t)
         }
-        if (journal != null) return@use
+        val purge = PurgeJob(InstallStore(db, SystemClock), SystemClock, policy, alarms,
+            LifecycleStore(db, SystemClock, policy), lifecycleReport, floors.results)
+        try {
+            runBlocking {
+                // A cap schedules continuation; it never grants extra retention or opens HTTP early.
+                do {
+                    val result = purge.runOnce()
+                    check(result.sweeps.values.none { it.failed }) { "Startup lifecycle failure" }
+                } while (result.sweeps.values.any { (it.remainingDue ?: 0) > 0 })
+                if (args.getOrNull(0) == "--export-filter-floor") floors.current()!!.export(Path.of(journal!!))
+            }
+        } catch (failure: Exception) { fail(journal, log, "startup lifecycle", failure) }
+        if (journal != null) { watchdogScope.cancel(); return@use }
         embeddedServer(Netty, host = "0.0.0.0", port = config.port) {
-            val spool = config.alarmSpoolDir?.let { FileSpoolAlarmSink(Path.of(it), clock = SystemClock) }
-            val sink: AlarmSink = spool ?: LoggingAlarmSink()
-            val stats = spool?.stats ?: AlarmStats()
-            val alarms = HealthAlarms(HealthStore(db, SystemClock), SystemClock, sink, stats, startedAt = SystemClock.now())
-            module(config, db, alarmEvaluator = alarms)
+            module(config, db, alarmEvaluator = alarms, policy = policy, lifecycle = lifecycleReport)
             launch {
-                val purge = PurgeJob(InstallStore(db, SystemClock), SystemClock, alarms = alarms)
-                delay(1.minutes)
                 while (true) {
-                    try {
-                        val counts = purge.runOnce()
-                        log.info(
-                            "purge nonces={} ledger_rows={} trusted_envelopes={} health_rows={} withdrawals={}",
-                            counts.nonces, counts.ledgerRows, counts.trustedEnvelopes, counts.healthRows, counts.withdrawals,
-                        )
-                    } catch (failure: Exception) {
-                        if (failure is CancellationException) throw failure
-                        log.info("purge failures=1")
-                    }
-                    delay(6.hours)
+                    val now = SystemClock.now()
+                    val next = (now.epochSecond / 21600 + 1) * 21600 // UTC 00/06/12/18.
+                    delay((next - now.epochSecond) * 1000)
+                    do {
+                        val result = purge.runOnce()
+                        log.info("lifecycle sweeps={} failures={} overdue={}", result.sweeps.size,
+                            result.sweeps.values.count { it.failed }, result.sweeps.values.sumOf { it.remainingDue ?: 0 })
+                        val pending = result.sweeps.values.any { it.failed || (it.remainingDue ?: 0) > 0 }
+                        if (pending) delay(1000)
+                    } while (pending)
                 }
             }
         }.start(wait = true)
+        watchdogScope.cancel()
     }
     if (journal != null) exitProcess(0)
 }

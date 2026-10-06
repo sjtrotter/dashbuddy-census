@@ -333,7 +333,7 @@ class HealthStoreTest {
                     for (index in 1..5) {
                         val fingerprint = index.toString(16).padStart(64, '0')
                         connection.update("INSERT INTO clusters (fingerprint, platform, first_seen_day, last_seen_day) VALUES (?, ?, ?, ?)", fingerprint, "doordash", day, day)
-                        connection.update("INSERT INTO cluster_sightings (fingerprint, install_id, day, platform_app_version) VALUES (?, ?, ?, ?)", fingerprint, first, day, "8.0.0")
+                        connection.update("INSERT INTO cluster_sightings_v5 (fingerprint, install_id, day, platform_app_version, hash_domain, filter_rev) VALUES (?, ?, ?, ?, 1, 1)", fingerprint, first, day, "8.0.0")
                     }
                     connection.update("UPDATE installs SET trusted = true WHERE install_id = ?", first)
                 }
@@ -381,8 +381,8 @@ class HealthStoreTest {
                             VALUES (?, ?, 'doordash', 'old', 0, 0, 0, '{}'::jsonb)""", first, oldDay,
                     )
                 }
-                assertEquals(1, purge.runOnce().healthRows)
-                assertEquals(2, count("health_daily", first))
+                assertEquals(2, purge.runOnce().healthRows)
+                assertEquals(1, count("health_daily", first))
                 assertEquals(HttpStatusCode.Accepted, client.signed(clock, first.toString(), key, HttpMethod.Delete, "/v1/installs/me").status)
                 assertEquals(0, count("health_daily", first))
                 assertEquals(HttpStatusCode.OK, client.enrol(first.toString(), secret(92)).status)

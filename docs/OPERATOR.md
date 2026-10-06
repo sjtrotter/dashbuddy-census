@@ -14,7 +14,7 @@ Operator authentication uses the operator token directly as a bearer or with TOT
 
 ## Backup and restore
 
-Run `./backup.sh` from `deploy/compose` using a daily scheduler. Before `pg_dump`, it runs `./export-withdrawals.sh`: an atomic, restricted-permission CSV export to `backups/withdrawals/withdrawals-<UTC timestamp>.csv`. An export or upload failure aborts the backup. Export `BACKUP_BUCKET` to upload journals under `withdrawals/` and dumps at the bucket root. Both retain 14 local UTC dates; configure bucket encryption, restricted access, and the 14-day lifecycle including noncurrent versions. Local files and S3 copies contain sensitive pseudonymous data. The exporter can also run separately between backups.
+Run `./backup.sh` from `deploy/compose` using a daily scheduler. After `pg_dump` and dump upload, it runs `./export-withdrawals.sh` and `./export-filter-floor.sh`. Withdrawal export is an atomic, restricted-permission CSV export to `backups/withdrawals/withdrawals-<UTC timestamp>.csv`. Either export/upload failure fails the backup operation; the existing dump is preserved, but is not a complete recovery set. Earlier versions warned on withdrawal export failure; this release makes it fatal. Export `BACKUP_BUCKET` to upload journals under `withdrawals/` and dumps at the bucket root. Dumps and withdrawal journals retain 14 local UTC dates; policy-only `filter-floor/` journals are retained without age expiry. For observation backups, configure bucket encryption, restricted access, and the 14-day lifecycle including noncurrent versions. Local files and S3 copies contain sensitive pseudonymous data. The exporter can also run separately between backups.
 
 Each live withdrawal writes a `withdrawals` tombstone in the same transaction as erasure: only the lowercase SHA-256 of the canonical install UUID and `withdrawn_at`, never the UUID or credential. Tombstones last 60 days, exceeding the restorable dump/version horizon. Every startup migrates and **automatically replays tombstones before opening the HTTP listener**; replay failure aborts startup. Live withdrawal and replay share the same deletion implementation, including clearing drafts derived from erased envelopes. Replay only deletes generations whose `enrolled_at <= withdrawn_at`; a later re-enrolment, including one on the same day, survives. V3 backfills legacy enrolments from `created_day` at UTC midnight because V1 retained no precise enrolment instant.
 
@@ -23,17 +23,17 @@ A withdrawal also queues an alarm-spool notice for the host's `census-alarm-publ
 For recovery, use the operator's SSO identity to download the **latest** journal from the bucket's `withdrawals/` prefix, even when restoring an older dump. Add any newer SNS notice rows. Start only `postgres` with a fresh volume/database, then run:
 
 ```sh
-./restore.sh /absolute/path/to/census-YYYY-MM-DD.sql.gz /absolute/path/to/withdrawals-latest.csv
+./restore.sh /absolute/path/to/census-YYYY-MM-DD.sql.gz /absolute/path/to/withdrawals-latest.csv /absolute/path/to/filter-floor-latest.csv
 ```
 
-Type `RESTORE` at the prompt. The script stops census, refuses a database with user relations, and restores in one transaction with SQL errors fatal. With census still stopped, it runs `--reapply-withdrawals /journal.csv` to migrate, merge the journal (keeping the latest instant per hash), and replay. A failure leaves census stopped. The one-shot container uses the caller's UID/GID to read the mode-0600 journal mount. Review the replay counts and restored data, then start census and check readiness; startup replays again, idempotently. To merge another journal into an already restored database while census is stopped:
+Type `RESTORE` at the prompt. The script stops census, refuses a database with user relations, and restores in one transaction with SQL errors fatal. With census still stopped and CURRENT deployment `.env`, it runs `--reapply-withdrawals /recovery/withdrawals.csv --filter-floor /recovery/filter-floor.csv` to migrate, merge withdrawal instants by maximum, merge the floor by maximum, replay both removals and drain lifecycle work. Download the latest `filter-floor/` policy journal alongside the withdrawal journal, regardless of dump age. A failure leaves census stopped. The one-shot container uses the caller's UID/GID to read the mode-0600 journal mount. Review the replay counts and restored data, then start census and check readiness; startup replays again, idempotently. To merge another journal into an already restored database while census is stopped:
 
 ```sh
 docker compose run --rm --no-deps --user "$(id -u):$(id -g)" \
     -v /absolute/path/to/withdrawals-latest.csv:/journal.csv:ro census --reapply-withdrawals /journal.csv
 ```
 
-`restore.sh` refuses a missing second argument. Use `--no-journal` **only when no journal exists**: it warns loudly and replays only tombstones inside the dump, which cannot cover later withdrawals.
+`restore.sh` requires both recovery journals and refuses missing arguments. A historical dump alone is insufficient. Keep floor journals durable and choose the maximum revision across available exports. The CLI also supports strict `--merge-filter-floor <csv>` and atomic `--export-filter-floor <csv>`; run policy merge with census stopped. Before restarting after a floor increase, export/upload the new floor using `export-filter-floor.sh`.
 
 **Residual:** a withdrawal after the latest journal export needs its SNS email to survive total host loss (the notice is exempt from spool eviction but still rides the publisher's hourly token budget, so a health-alarm storm can delay it; and a `withdrawals` row older than 60 days is purged, which is longer than any restorable backup). A legacy install (enrolled before this version) carries a day-start `enrolled_at`, so the same-day re-enrolment guard is exact only for enrolments made after the upgrade; paste the notice's hash and instant into the CSV. If host loss occurs before SNS publication as well, neither off-host channel has that withdrawal and it cannot be recovered automatically. The existing spool is bounded/best-effort and SNS publishing is rate-limited, so confirm receipt and retain the emails; exporting more often narrows the gap.
 
@@ -51,8 +51,8 @@ WITH erased AS (
 UPDATE clusters SET draft = NULL, draft_day = NULL
 WHERE draft->>'envelopeId' IN (SELECT id::text FROM erased);
 DELETE FROM health_daily      WHERE install_id = '<uuid>';
-DELETE FROM token_sightings   WHERE install_id = '<uuid>';
-DELETE FROM cluster_sightings WHERE install_id = '<uuid>';
+DELETE FROM token_sightings_v5 WHERE install_id = '<uuid>';
+DELETE FROM cluster_sightings_v5 WHERE install_id = '<uuid>';
 DELETE FROM ingest_ledger     WHERE install_id = '<uuid>';
 DELETE FROM nonces            WHERE install_id = '<uuid>';
 DELETE FROM installs          WHERE install_id = '<uuid>';
@@ -91,9 +91,9 @@ enrols, which would spend the shared enrol budget.
 
 ## Incident: what we can and cannot see
 
-The future database can show pseudonymous install IDs, key hashes, token hashes, structural fingerprints, day-level counts, and reviewed vocabulary. Skeleton storage must not contain screen plaintext below the promotion gate. The S5 trusted-envelope exception is described below. No storage path may retain bearer tokens, IP addresses, or device identifiers. Nonce and revocation timestamps are explicit exceptions to date-only observations. S1 request logs have known route, method, status, elapsed duration, and an optional eight-hex-character install-ID prefix; unmatched paths are redacted.
+The database can show pseudonymous install IDs, key hashes, token hashes, structural fingerprints, day-level counts, and reviewed vocabulary. Skeleton storage must not contain screen plaintext below the promotion gate. The S5 trusted-envelope exception is described below. No storage path may retain bearer tokens, IP addresses, or device identifiers. Nonce and revocation timestamps are explicit exceptions to date-only observations. Request logs have known route, method, status, elapsed duration, and an optional eight-hex-character install-ID prefix; unmatched paths are redacted.
 
-These choices limit attribution and request reconstruction. Preserve only the minimum permitted evidence, disable affected entry points, rotate credentials where relevant, and publish the impact and recovery actions. Audit host, proxy, cloud, and log-collector settings too: their default logging could violate the intended retention promise. Ingest admission, poisoning defenses, and scheduled retention must ship before enrollment is enabled.
+These choices limit attribution and request reconstruction. Preserve only the minimum permitted evidence, disable affected entry points, rotate credentials where relevant, and publish the impact and recovery actions. Audit host, proxy, cloud, and log-collector settings too: their default logging could violate the intended retention promise. Keep lifecycle enforcement active whenever ingestion is enabled.
 
 ## S5 trust and capture handling
 
@@ -101,7 +101,7 @@ Enrollment leaves `installs.trusted` false. An operator sets that flag through t
 
 A trusted envelope contains an **already-redacted `uinode.v1` capture**, including UI chrome and its capture metadata. It is not a skeleton and may contain plaintext UI strings and the capture's timestamp. The server repeats the public contract's sensitive-marker scan, rejects hits, and removes `metadata.deviceFingerprint` and `metadata.rulesetSignature` before re-serializing and storing. This scan is a backstop, not a general redactor. An envelope is paired to a cluster only when its declared top-level `fingerprint` names an EXISTING SCREEN cluster of the SAME platform; the phone uploads skeletons first (there is no retroactive pairing), and an envelope naming no cluster or an unknown one is stored with a NULL fingerprint. The envelope's `fingerprint` is DECLARED by the phone and taken on trust because the server cannot recompute an app-side skeleton, so a trusted install can attach its capture to any same-platform screen cluster; this is acceptable while trusted means the operator's own device. Logs never contain captures, payload strings, fingerprints, hashes, bodies, or secrets. A sensitive rejection WARN contains only the public contract marker name.
 
-The six-hourly purge deletes envelopes whose `purge_after` is before the current UTC date, with a default deadline of received day plus 30 days. It also deletes install health rows older than 180 days. The strict date comparison retains a row on its deadline date. Nonce, ledger, envelope, and health purges each delete in 1,000-row `ctid` batches, with at most 50 batches per sweep per run and a coroutine cancellation check between batches. Each batch commits separately. INFO logs report `purge sweep=<name> deleted=<n> batches=<k> capped=<bool>`; a capped sweep leaves remaining eligible rows for the next run. Silence evaluation and each delete sweep have independent failure guards: one failure logs a single WARN `purge sweep=<name> failed class=<exception class simple name>` without its message, and the remaining sweeps continue. Cancellation propagates. Withdrawal synchronously deletes envelope and health rows together with the install's other keyed data. Anonymous fleet rollups remain aggregate history, and accepted health reports recompute each touched rollup from retained daily rows. Backup retention is still 14 days.
+Retention uses UTC half-open deadlines: envelopes with `purge_after <= today` and health at day+180 expire. Every relevant read excludes expired data even if physical deletion is delayed. Sweeps commit bounded batches, check cancellation, isolate failures, and continue promptly after capped runs (50 batches); overdue work never grants extra retention. Startup drains all work before listening. Runtime passes run at UTC midnight and six-hour boundaries. `/ops/lifecycle` reports deletion/rewrite counts, batches/caps/failures, overdue rows, queue count and last-success age; failure is never reported as zero work. Withdrawal synchronously erases install-keyed data and envelope-derived drafts. Fleet rollups retain anonymous aggregate history; observation backups remain 14 days.
 
 ## Health alarm catalogue
 
@@ -255,8 +255,7 @@ Revocation is idempotent and immediately blocks the install's signed requests.
 Vocabulary source is `trusted:<eight-hex-prefix>`, `corpus`, or `rule_anchor`. Clear text is at
 most 128 characters. Resolution proves `CensusHash.of(clearText) == tokenHash`; mismatch returns
 422 `hash_mismatch`. Rejection stores NULL clear text. Resolution requires current non-trusted
-k eligibility, and never overwrites an existing vocabulary row. Queue promotion/nightly work
-and `shipped` export remain M4/#641.
+k eligibility within the supplied `hashDomain` and `filterRev` (both default 1 for older callers), seven elapsed days of quarantine and unexpired per-install evidence. It never overwrites an existing row. Sweeps remove ineligible queued/unblinded entries and expired rejected entries. `shipped` export remains M4/#641.
 
 ## Classify & draft
 
@@ -324,10 +323,20 @@ including compilation and positive/negative corpus checks. The server only draft
 
 ## Notification review — #1189 slice 2
 
-Production still rejects notification schema items until the separate lifecycle prerequisite in ARCHITECTURE.md is complete. Storage and review support are present for an explicitly enabled policy; this release is not permission to activate the app publisher.
+Production defaults to rejecting notification schema items. The shared lifecycle prerequisites are implemented; activation requires the checks below before enabling any app publisher.
 
 Clusters have Screen/Notification badges. Dashboard rows and Review links separate `(platform, version, kind)`. Both HTML and JSON cluster listings accept optional `kind=screen|notification`; totals and pagination use that filter, and status/paging links preserve it. The kind selector can return to all kinds. Shared ingest totals and rejection counters include both skeleton kinds and trusted envelopes; they are not notification recognition-health statistics. `/ops/health`, fleet denominators and alarm thresholds retain their existing meaning.
 
 Notification detail shows the channel only at the live display gate (ten non-trusted installs in the current 28-day window, or the existing trusted-sighting exception); below it the channel and notes are withheld. Withdrawal or cohort decline can hide them again. All five named text fields display kind badges only, never hashes or resolved body text. A permitted clear channel on the wire is not permission to display it below the gate.
 
 Notification review offers **Classification** and notes using the existing screen triage-label vocabulary and `screen_class` storage. Notification rule drafting and trusted notification captures are deferred: no screen wireframe, envelope selection or draft download is offered. Direct shape/apply, preview and draft-save requests also fail with `unsupported_skeleton_kind`, even if a screen capture ID is supplied. Classification-only save continues to work, with the existing authentication, TOTP and gated-note behavior.
+
+## Notification activation and rollback
+
+1. Stop the old server for V5 cutover; retain a recoverable dump and latest withdrawal/floor journals. Deploy this lifecycle-capable image with `CENSUS_NOTIFICATIONS_ENABLED=false`, `CENSUS_MIN_FILTER_REV=1`. AWS uses `/census/census_notifications_enabled` and `/census/census_min_filter_rev` (substitute your name prefix). Refresh the host config renderer and **`/usr/local/sbin/census-alarm-publish` from `deploy/aws/cloud-init.yaml.tftpl`**: image deployment alone does not update the host grammar for `lifecycle_failure`, `lifecycle_backlog`, `lifecycle_stale`.
+2. Startup discards unattributable legacy sightings/vocabulary and scrubs/deletes legacy samples; this resets historical k cohorts. On today's live database (one install, two batches), it deletes that install's legacy token and cluster sightings and any legacy vocabulary, scrubs valid sample hashes, removes malformed/resolved samples, clears derived notes/drafts and inseparable captures. It preserves the install/credential and the two ledger batches until their normal TTLs. Retries of those batch IDs do not rebuild evidence; fresh observations do. Independent classification is retained while its catalogue row has references.
+3. Run server integration tests including Testcontainers, replay pinned corpus/notification vectors and manifest, perform an older-dump restore drill with newer floor/withdrawal journals, verify zero overdue rows and successful alarm delivery. `/ops/lifecycle` requires operator authentication and contains only activation/floors/counts/ages, never bodies, channels, fingerprints, hashes, full install IDs or exception text. Its seven-hour watchdog continues independently of sweep work.
+4. Set `CENSUS_NOTIFICATIONS_ENABLED=true`, restart, and verify policy plus authenticated mixed-kind ingestion before activating the app publisher. Both current app builders claim filter revision 1. A floor increase rejects old positive revisions with `filter_rev_too_old`; this is a claimed-revision gate, not filter attestation.
+5. To disable notifications, set the flag false and restart the SAME lifecycle-capable image. Admission changes immediately; cached policy may persist for its existing 300 seconds. Continue sweeps and preserve the monotonic floor. Never revert to pre-V5 code or restore an old database to disable notifications: obsolete code loses lifecycle enforcement and writes legacy tables.
+
+Raising a floor: stop census, set the current deployment minimum, run `--merge-filter-floor` with the latest off-host journal, export/upload the resulting floor, then restart. Imported/configured lower revisions cannot lower the database floor. Floor journals contain only a revision and day, and must remain durable for every older restorable backup. Removing server vocabulary cannot retract a previously published bundle.

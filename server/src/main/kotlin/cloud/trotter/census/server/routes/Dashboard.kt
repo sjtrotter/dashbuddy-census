@@ -44,11 +44,12 @@ import io.ktor.server.routing.post
 import kotlinx.serialization.json.JsonObject
 
 /** Mounted only inside the operator authentication gate; mutations also require the shared second factor. */
-fun Route.dashboardRoute(store: OpsStore, alarms: HealthAlarms, clock: Clock, policy: Policy) {
+fun Route.dashboardRoute(store: OpsStore, alarms: HealthAlarms, clock: Clock, policy: Policy, config: cloud.trotter.census.server.Config, lifecycle: cloud.trotter.census.server.jobs.LifecycleReport? = null) {
     get("/") {
         val html = DashboardHtml.render(
             policy.serverVersion, policy.k, clock.today().toString(), opsAlarms(alarms),
             store.clusterSummary(), store.health(), store.installs(), store.ledger(), store.vocabularyQueueCount(), store.vocabularyQueueDisplay(),
+            lifecycleView(config, policy, store, lifecycle),
         )
         call.response.headers.append("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'")
         call.respondText(html, ContentType.Text.Html)

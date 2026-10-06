@@ -44,3 +44,16 @@ resource "aws_ssm_parameter" "alerts_topic_arn" {
   type  = "String"
   value = aws_sns_topic.alerts.arn
 }
+
+# These values are deployment policy; a database/recovery floor can only raise the effective revision.
+resource "aws_ssm_parameter" "census_policy" {
+  for_each = { census_notifications_enabled = "false", census_min_filter_rev = "1" }
+
+  name  = "/${var.name_prefix}/${each.key}"
+  type  = "String"
+  value = each.value
+
+  lifecycle {
+    ignore_changes = [value]
+  }
+}

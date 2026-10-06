@@ -168,8 +168,8 @@ class EnvelopeRoutesTest {
                         connection.update("UPDATE trusted_envelopes SET purge_after = ? WHERE install_id = ?", day, id)
                         connection.update("UPDATE trusted_envelopes SET purge_after = ? WHERE id = (SELECT min(id) FROM trusted_envelopes WHERE install_id = ?)", day.minusDays(1), id)
                     }
-                    assertEquals(1, PurgeJob(store, clock).runOnce().trustedEnvelopes)
-                    assertEquals(5, count(id))
+                    assertEquals(6, PurgeJob(store, clock).runOnce().trustedEnvelopes)
+                    assertEquals(0, count(id))
                     assertEquals(HttpStatusCode.Accepted, client.signed(clock, id.toString(), key, HttpMethod.Delete, "/v1/installs/me").status)
                     assertEquals(0, count(id))
                     assertEquals(HttpStatusCode.OK, client.enrol(id.toString(), secret(82)).status)

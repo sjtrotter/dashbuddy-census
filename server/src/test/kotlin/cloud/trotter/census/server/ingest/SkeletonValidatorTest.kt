@@ -21,6 +21,21 @@ import java.time.LocalDate
 import java.util.zip.GZIPInputStream
 
 class SkeletonValidatorTest {
+    @Test fun `server floor extension preserves malformed revision reasons for both kinds`() {
+        val notification = cloud.trotter.census.server.notificationFixture(today)
+        val policy = cloud.trotter.census.server.notificationPolicy.copy(minimumFilterRev = 2)
+        for (raw in listOf(skeleton, notification)) {
+            assertEquals(ItemVerdict.Rejected("filter_rev_too_old"), SkeletonValidator.validate(raw, policy, today))
+            for (bad in listOf(kotlinx.serialization.json.JsonNull, JsonPrimitive(0), JsonPrimitive(-1), JsonPrimitive(1.5))) {
+                assertEquals(ItemVerdict.Rejected("bad_item"), SkeletonValidator.validate(JsonObject(raw + ("filterRev" to bad)), policy, today))
+            }
+            assertEquals(ItemVerdict.Rejected("bad_item"), SkeletonValidator.validate(JsonObject(raw - "filterRev"), policy, today))
+            val newer = JsonObject(raw + ("filterRev" to JsonPrimitive(2)))
+            val accepted = SkeletonValidator.validate(newer, policy, today) as ItemVerdict.Accepted
+            assertTrue(accepted.tokens.all { it.key.filterRev == 2 && it.key.hashDomain == 1 })
+        }
+    }
+
     @Test
     fun `notification admission is explicit bounded and uses contract reason vocabulary`() {
         val day = LocalDate.of(2026, 10, 2)
