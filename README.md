@@ -63,7 +63,7 @@ Check out the app at the agreed pinned revision as `../DashBuddy`; its `census-c
 ./gradlew :server:installDist
 ```
 
-An alternate checkout uses `-PcensusContractPath=/absolute/path/to/census-contract`. Foojay provisions JDK 21. The distribution is `server/build/install/server/`; there is no fat JAR. Migration tests require Docker in CI and visibly skip locally when it is unavailable; route and configuration tests need no database. Both CI workflows pin `DASHBUDDY_CONTRACT_SHA` to `75923ccc864c79c9b69477624bf27e2e1016696f` and use the contract checkout at that revision.
+An alternate checkout uses `-PcensusContractPath=/absolute/path/to/census-contract`. Foojay provisions JDK 21. The distribution is `server/build/install/server/`; there is no fat JAR. Migration tests require Docker in CI and visibly skip locally when it is unavailable; route and configuration tests need no database. Both CI workflows pin `DASHBUDDY_CONTRACT_SHA` to `b0fd522a354ca0d6d38d74324cdea0f227859648` and use the contract checkout at that revision.
 
 Versions were pinned offline on 2026-10-01. Gradle, Kotlin, serialization, Ktor, Exposed, and the other catalog versions need validation together on the first build. Bump exact pins if necessary; do not replace them with ranges. The absent sibling contract also means `hashDomain` uses the explicit `census.v1` TODO fallback until its API is inspected.
 

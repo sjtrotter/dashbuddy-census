@@ -12,6 +12,21 @@ import org.slf4j.LoggerFactory
 
 class LogPrivacyTest {
     @Test
+    fun `notification parse and validation failures never log submitted fields`() {
+        val logger = LoggerFactory.getLogger(Logger.ROOT_LOGGER_NAME) as Logger
+        val logs = ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>().apply { start() }
+        logger.addAppender(logs)
+        try {
+            val raw = notificationFixture().toString()
+            for (body in listOf(raw, raw.replace("CHANNEL_SENTINEL", "CHANNEL SENTINEL"), raw.replace("words:1", "PRIVATE_TEXT_SENTINEL"), raw.dropLast(10))) {
+                val element = cloud.trotter.census.server.ingest.parseBounded(body.toByteArray())
+                if (element != null) cloud.trotter.census.server.ingest.SkeletonValidator.validate(element, notificationPolicy, java.time.LocalDate.of(2026, 10, 2))
+            }
+            assertPrivateLogs(logs.list, listOf("CHANNEL_SENTINEL", "CHANNEL SENTINEL", "PRIVATE_TEXT_SENTINEL", "0123456789abcdef"))
+        } finally { logger.detachAppender(logs); logs.stop() }
+    }
+
+    @Test
     fun `nested and suppressed messages are private while class chains and outer frames remain`() {
         val secret = "PRIVATE_ASSERTION_SENTINEL"
         val logger = LoggerFactory.getLogger("census.privacy.test") as Logger

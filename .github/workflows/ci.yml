@@ -6,7 +6,7 @@ on:
 permissions:
     contents: read
 env:
-    DASHBUDDY_CONTRACT_SHA: a505a6b3c38505cfd70427baf9f676467e434490
+    DASHBUDDY_CONTRACT_SHA: b0fd522a354ca0d6d38d74324cdea0f227859648
 jobs:
     build:
         runs-on: ubuntu-latest

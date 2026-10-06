@@ -8,6 +8,26 @@ import org.junit.jupiter.api.Test
 
 class SkeletonRenderTest {
     @Test
+    fun `notification projection gates channel never emits hashes and tolerates expiry`() {
+        val raw = cloud.trotter.census.server.notificationFixture().toString()
+        for (visible in listOf(false, true)) {
+            for (sample in listOf(raw, raw.replace("words:1", "expired"))) {
+                val rendered = SkeletonRender.renderNotification(sample, visible)
+                org.junit.jupiter.api.Assertions.assertEquals(visible, rendered.channelId != null)
+                org.junit.jupiter.api.Assertions.assertEquals(!visible, rendered.channelWithheld)
+                org.junit.jupiter.api.Assertions.assertEquals(5, rendered.slots.size)
+                val output = Json.encodeToString(rendered)
+                assertFalse(output.contains("0123456789abcdef"))
+                assertFalse(output.contains("\"h\""))
+                org.junit.jupiter.api.Assertions.assertEquals(visible, output.contains("CHANNEL_SENTINEL"))
+            }
+        }
+        for (sample in listOf(raw.replace("CHANNEL_SENTINEL", "bad channel"), raw.replace("words:1", "PRIVATE_TEXT"))) {
+            org.junit.jupiter.api.Assertions.assertThrows(IllegalStateException::class.java) { SkeletonRender.renderNotification(sample, true) }
+        }
+    }
+
+    @Test
     fun `redacts every nested label and never renders text hashes`() {
         for (gate in listOf(false, true)) {
             val output = Json.encodeToString(SkeletonRender.render(sample, gate))

@@ -1,5 +1,7 @@
 package cloud.trotter.census.server.ops
 
+import cloud.trotter.census.contract.SkeletonKind
+
 import cloud.trotter.census.contract.authoring.RuleAuthoringVocabulary
 import cloud.trotter.census.server.db.CLUSTER_STATUSES
 import cloud.trotter.census.server.db.OpsCluster
@@ -25,6 +27,7 @@ internal fun FlowContent.clusterCards(clusters: List<OpsCluster>, k: Int, showGr
                 if (fingerprintPattern.matches(cluster.fingerprint)) a(href = "/ops/clusters/${cluster.fingerprint}/view", classes = "cluster-link") { +label }
                 else +label
             }
+            kindChip(cluster.kind)
             statusChip(cluster.status)
             classChip(cluster.screenClass)
         }
@@ -79,3 +82,10 @@ internal fun FlowContent.classChip(screenClass: String?) {
 internal fun classSummary(byClass: Map<String, Int>): String = byClass.entries.filter { it.value > 0 }.joinToString(" · ") {
     "${validated(it.key, RuleAuthoringVocabulary.SCREEN_CLASSES + "unclassified")}: ${number(it.value)}"
 }.ifEmpty { "None" }
+
+internal fun kindLabel(kind: SkeletonKind): String = when (kind) {
+    SkeletonKind.SCREEN -> "Screen"
+    SkeletonKind.NOTIFICATION -> "Notification"
+}
+
+internal fun FlowContent.kindChip(kind: SkeletonKind) { chip(kindLabel(kind), "neutral") }

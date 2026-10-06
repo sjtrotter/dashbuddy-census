@@ -1,6 +1,6 @@
-# API status — #1157 S3
+# API
 
-The public health/policy routes and all five identity endpoints are implemented. Ingest and operator routes remain future work.
+Public health/policy, identity, ingest and operator routes are implemented. Notification admission remains disabled by the default production policy pending the lifecycle prerequisite below.
 
 | Method | Path | Status | Purpose |
 | --- | --- | --- | --- |
@@ -12,8 +12,8 @@ The public health/policy routes and all five identity endpoints are implemented.
 | DELETE | `/v1/installs/me` | Implemented | Withdraw the install and all its keyed rows |
 | POST | `/v1/nonce` | Implemented | Issue a challenge bound to an install |
 | GET | `/v1/me` | Implemented | Day-level identity and remaining budgets |
-| POST | `/v1/ingest` | Planned, provisional path | Admit skeleton batches and health summaries |
-| GET | `/operator` | Planned, provisional path | Operator dashboard |
+| POST | `/v1/skeletons` | Implemented | Admit skeleton batches under the advertised policy |
+| GET | `/ops/` | Implemented | Authenticated operator dashboard |
 
 `/healthz` returns `200 {"status":"ok"}`. `/readyz` returns the same when its bounded database probe succeeds, otherwise `503 {"status":"db_unavailable"}`. No database error details are exposed.
 
@@ -81,4 +81,16 @@ Authentication captures one instant in `RequestInstantKey` for admission, the si
 
 Withdrawal deletes `trusted_envelopes`, `health_daily`, `token_sightings`, `cluster_sightings`, `ingest_ledger`, `nonces`, and `installs` in one transaction. Shared aggregate/catalog tables are retained. Deletion is synchronous; the deadline preserves a future asynchronous contract. Nonces are single-use with a 300-second validity window. HMAC signatures remain replayable within their timestamp window; S4 batch admission will use the ledger for replay protection.
 
-Budget helpers expose a 300 accepted-skeleton default, 10 MiB, and 40 distinct batches per UTC day, with retries at the next UTC midnight. The ledger accumulates bytes, accepted/duplicate counts and rejection counts, deduplicating stored batch IDs. `tryConsume` atomically enforces byte, accepted-item, and distinct-batch limits in one conditional PostgreSQL upsert, returning remaining allowances or seconds to UTC midnight. `recordIngest` only increments rejected/duplicate counters. The S4 ingest endpoint will call these primitives; identity routes only report budgets. The purge job starts one minute after startup and runs every six hours, deleting nonces older than one hour and ledger days strictly older than today minus seven days. Full table retention and operator revocation HTTP access arrive in S6; revocation storage is implemented now.
+Budget helpers expose a 300 accepted-skeleton default, 10 MiB, and 40 distinct batches per UTC day, with retries at the next UTC midnight. The ledger accumulates bytes, accepted/duplicate counts and rejection counts, deduplicating stored batch IDs. `tryConsume` atomically enforces byte, accepted-item, and distinct-batch limits in one conditional PostgreSQL upsert, returning remaining allowances or seconds to UTC midnight. `recordIngest` only increments rejected/duplicate counters. Ingest calls these primitives; identity routes report budgets. The purge job starts one minute after startup and runs every six hours, deleting nonces older than one hour and ledger days strictly older than today minus seven days. Operator revocation is implemented; the remaining lifecycle gaps are documented in ARCHITECTURE.md.
+
+## Notification skeletons — #1189 slice 2
+
+`POST /v1/skeletons` supports mixed screen/notification batches under an explicitly supplied policy accepting both contract schema IDs (`uinode.skeleton.v1`, `notification.skeleton.v1`). **The default production policy still advertises only screens**: notification activation requires the separate lifecycle prerequisite described in ARCHITECTURE.md. Do not enable the app notification publisher yet.
+
+Notification items use the pinned contract's `kind="notification"`, `channelId`, and exactly five `slots`: `title`, `text`, `bigText`, `tickerText`, `subText`. Each slot is a contract TextSlot (kind and, where permitted, hash), never clear text. The channel grammar is `[A-Za-z0-9_.-]{1,64}`. The server recomputes the whole-item fingerprint, whose notification identity includes platform, channel, and slot kinds/hashes. Screen text-key policy, metadata/date validation, byte limits, authentication and consent are unchanged; `expired` is invalid inbound. Added reason codes are `unknown_skeleton_kind`, `kind_schema_mismatch`, and `bad_channel`; `bad_kind` still means a TextSlot kind. Reasons are enumerated and submitted values never enter rejection messages or logs.
+
+The single `(install_id, day)` ledger allows **300 accepted items per UTC day across both kinds together**, including the existing trusted-envelope budget consumption. The batch limit remains 100 items; existing byte and batch budgets apply jointly. Accepted items consume quota before within-batch fingerprint deduplication; a known batch ID does not spend again. Rejection counters remain in batch responses and `/ops/ledger`.
+
+`GET /ops/clusters` and `GET /ops/clusters/view` accept optional `kind=screen|notification`; invalid kinds return 400. Omission includes both kinds. Cluster rows include `kind`; dashboard summaries group by platform, app version and kind. Samples contain exactly one of `skeleton` or `notification`, with the absent property omitted. Notification projections contain `channelId` only when unblinded, `channelWithheld`, and a five-field `slots` map containing kind badges only. No slot hashes or resolved notification text are returned at any gate level.
+
+Notification classification uses the existing `screenClass` API property and enumerated screen triage labels. Form POST `/ops/clusters/{fingerprint}/draft` with `mode=classify` saves classification/notes. Other notification draft-save, shape/apply and preview operations return 400 `unsupported_skeleton_kind`; draft download returns 404. Trusted `uinode.v1` envelopes pair only with screen clusters of the same platform. Notification trusted envelopes, rule generation, and recognition-health denominators are deferred.

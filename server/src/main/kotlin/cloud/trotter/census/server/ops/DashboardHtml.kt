@@ -83,7 +83,7 @@ object DashboardHtml {
                     val latest = health.rows("fleet").map { it.text("day") }.maxOrNull()
                     if (latest == null) +"No reports" else date(latest)
                 }
-                metric("ledger", "Accepted today") { +number(ledger.obj("totals").count("accepted")) }
+                metric("ledger", "Shared ingest accepted today") { +number(ledger.obj("totals").count("accepted")) }
                 metric("vocabulary", "Vocabulary queue") { +number(vocabularyCount) }
             }
             nav("section-nav") {
@@ -97,16 +97,17 @@ object DashboardHtml {
         alarmSection(alarms)
         healthSection(health, today)
         panel("clusters", "Clusters") {
-            p("muted") { +"One row per platform and app version. Review opens the clusters of that row, untriaged first." }
+            p("muted") { +"One row per platform, app version and kind. Review opens the clusters of that row, untriaged first." }
             if (clusters.isEmpty()) emptyState("No clusters to review yet. Rows appear when cluster sightings arrive.")
-            else dataTable("Clusters by platform and app version · latest version first",
-                listOf("Platform", "Version", "Clusters", "New", "Triaged", "Drafted", "Resolved", "Ignored", "Classes", "Review"), clusters.map { row ->
+            else dataTable("Clusters by platform, app version and kind · latest version first",
+                listOf("Platform", "Version", "Kind", "Clusters", "New", "Triaged", "Drafted", "Resolved", "Ignored", "Classes", "Review"), clusters.map { row ->
                     listOf(
                         cell { +platform(row.platform) },
                         cell { row.platformAppVersion?.let { code { +version(it) } } ?: run { +"Not recorded" } },
+                        cell { chip(kindLabel(row.kind), "neutral") },
                         numeric(row.total),
                     ) + CLUSTER_STATUSES.map { numeric(row.byStatus[it] ?: 0) } + cell { +classSummary(row.byClass) } + cell {
-                        val filter = ClusterFilter.parse(row.platform, row.platformAppVersion ?: "none", null, null)
+                        val filter = ClusterFilter.parse(row.platform, row.platformAppVersion ?: "none", null, null, row.kind.wire)
                         if (filter == null) +"Unavailable" else a(href = filter.href(), classes = "action") {
                             attributes["aria-label"] = "Review ${platform(row.platform)} ${row.platformAppVersion?.let { version(it) } ?: "no version"}"
                             +"Review"
@@ -306,7 +307,7 @@ private fun FlowContent.ledgerSection(ledger: JsonObject, today: String) = panel
     val totals = ledger.obj("totals")
     dl("totals") {
         fact("Bytes") { +"${number(totals.count("bytes"))} B" }
-        fact("Accepted") { +number(totals.count("accepted")) }
+        fact("Accepted · all skeletons and trusted envelopes") { +number(totals.count("accepted")) }
         fact("Duplicate") { +number(totals.count("duplicate")) }
         fact("Rejected") { rejections(totals.obj("rejected")) }
         fact("Batches") { +number(totals.count("batches")) }

@@ -110,12 +110,15 @@ fun Route.opsRoutes(
             }
             dashboardRoute(store, alarms, clock, policy)
             get("/clusters") {
+                val kind = call.request.queryParameters["kind"]?.let {
+                    cloud.trotter.census.contract.SkeletonKind.fromWire(it) ?: badRequest()
+                }
                 val platform = call.request.queryParameters["platform"]
                 if (platform != null && !WireGrammars.platform.matches(platform)) badRequest()
                 val version = call.request.queryParameters["version"]
                 val status = call.request.queryParameters["status"]
                 if (version != null && !WireGrammars.platformAppVersion.matches(version) || status != null && status !in clusterStatuses) badRequest()
-                call.respond(store.clusters(version, status, call.bound("limit", 50, 200), platform = platform))
+                call.respond(store.clusters(version, status, call.bound("limit", 50, 200), platform = platform, kind = kind))
             }
             get("/clusters/{fingerprint}") {
                 val row = store.cluster(call.fingerprint())

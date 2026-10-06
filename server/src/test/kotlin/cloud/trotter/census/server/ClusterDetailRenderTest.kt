@@ -19,6 +19,20 @@ import org.junit.jupiter.api.Test
 import java.util.Locale
 
 class ClusterDetailRenderTest {
+    @Test
+    fun `notification detail shows only gated channel and field kind summaries`() {
+        for (visible in listOf(false, true)) {
+            val notification = cloud.trotter.census.server.ops.SkeletonRender.renderNotification(notificationFixture().toString(), visible)
+            val html = render(cluster.copy(kind = cloud.trotter.census.contract.SkeletonKind.NOTIFICATION,
+                unblinded = visible, samples = listOf(OpsSample("8.0", "2026-10-02", notification = notification)), hasDraft = true))
+            assertTrue(html.contains("Notification")); assertFalse(html.contains("Screen wireframe"))
+            assertFalse(html.contains("draft.json5")); assertFalse(html.contains("0123456789abcdef"))
+            assertEquals(visible, html.contains("CHANNEL_SENTINEL"))
+            for (field in cloud.trotter.census.contract.NotifTextField.entries) assertTrue(html.contains("${field.wire}:"))
+            assertPrivate(html)
+        }
+    }
+
     private val fingerprint = "a".repeat(64)
     private val cluster = OpsCluster(
         fingerprint, "doordash", "new", "2026-10-01", "2026-10-02", 9, false, 12480,

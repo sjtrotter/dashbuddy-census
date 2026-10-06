@@ -1,5 +1,7 @@
 package cloud.trotter.census.server.db
 
+import cloud.trotter.census.contract.SkeletonKind
+import cloud.trotter.census.server.ops.RenderedNotificationSkeleton
 import cloud.trotter.census.contract.authoring.RuleAuthoringVocabulary
 import cloud.trotter.census.server.Clock
 import cloud.trotter.census.server.Database
@@ -31,7 +33,12 @@ import kotlinx.serialization.json.put
 import org.jetbrains.exposed.v1.jdbc.transactions.transaction
 
 @Serializable
-data class OpsSample(val platformAppVersion: String, val receivedDay: String, val skeleton: RenderedSkeleton)
+data class OpsSample(
+    val platformAppVersion: String, val receivedDay: String,
+    val skeleton: RenderedSkeleton? = null, val notification: RenderedNotificationSkeleton? = null,
+) {
+    init { require((skeleton == null) != (notification == null)) }
+}
 
 @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
 @Serializable
@@ -57,16 +64,17 @@ data class OpsCluster(
     val hasDraft: Boolean = false,
     @kotlinx.serialization.Transient val draftDay: String? = null,
     @kotlinx.serialization.Transient val wireframe: RenderedWireframe? = null,
+    val kind: SkeletonKind = SkeletonKind.SCREEN,
 )
 
 @Serializable
 data class OpsClusterGroup(val platformAppVersion: String, val clusters: List<OpsCluster>)
 
 @Serializable
-data class OpsClusterSummaryRow(val platform: String, val platformAppVersion: String?, val total: Int, val byStatus: Map<String, Int>, val byClass: Map<String, Int> = emptyMap())
+data class OpsClusterSummaryRow(val platform: String, val platformAppVersion: String?, val total: Int, val byStatus: Map<String, Int>, val byClass: Map<String, Int> = emptyMap(), val kind: SkeletonKind = SkeletonKind.SCREEN)
 
 @Serializable
-data class OpsClusterPage(val platform: String, val platformAppVersion: String?, val status: String?, val total: Int, val page: Int, val pageSize: Int, val pageCount: Int, val clusters: List<OpsCluster>, val byClass: Map<String, Int> = emptyMap())
+data class OpsClusterPage(val platform: String, val platformAppVersion: String?, val status: String?, val total: Int, val page: Int, val pageSize: Int, val pageCount: Int, val clusters: List<OpsCluster>, val byClass: Map<String, Int> = emptyMap(), val kind: SkeletonKind? = null)
 
 /** Hash-free vocabulary display projection; no plaintext or token identifier enters HTML. */
 data class OpsVocabularyDisplay(val kind: String, val distinctInstalls: Int, val firstDay: String, val lastDay: String)
@@ -104,9 +112,9 @@ class OpsStore(private val db: Database, private val clock: Clock, private val p
         }
     }
 
-    suspend fun clusters(version: String? = null, status: String? = null, limit: Int = 50, includeSamples: Boolean = false, platform: String? = null): List<OpsClusterGroup> = query {
+    suspend fun clusters(version: String? = null, status: String? = null, limit: Int = 50, includeSamples: Boolean = false, platform: String? = null, kind: SkeletonKind? = null): List<OpsClusterGroup> = query {
         val today = clock.today()
-        val rows = clusterRows(today, status = status).filter { platform == null || it.platform == platform }
+        val rows = clusterRows(today, status = status).filter { (platform == null || it.platform == platform) && (kind == null || it.kind == kind) }
         val firstDays = versionFirstDays()
         val groups = rows.flatMap { row -> row.versions.map { it to row } }.groupBy({ it.first }, { it.second })
         var remaining = limit
@@ -126,18 +134,18 @@ class OpsStore(private val db: Database, private val clock: Clock, private val p
 
     suspend fun clusterSummary(): List<OpsClusterSummaryRow> = query {
         clusterRows(clock.today()).flatMap { row ->
-            displayVersions(row).map { (row.platform to it) to row }
+            displayVersions(row).map { Triple(row.platform, it, row.kind) to row }
         }.groupBy({ it.first }, { it.second }).map { (key, rows) ->
-            OpsClusterSummaryRow(key.first, key.second, rows.size, CLUSTER_STATUSES.associateWith { status -> rows.count { it.status == status } }, classCounts(rows))
+            OpsClusterSummaryRow(key.first, key.second, rows.size, CLUSTER_STATUSES.associateWith { status -> rows.count { it.status == status } }, classCounts(rows), key.third)
         }.sortedWith(compareBy<OpsClusterSummaryRow> { it.platform }
-            .thenBy(nullsLast(opsVersionOrder.reversed())) { it.platformAppVersion })
+            .thenBy(nullsLast(opsVersionOrder.reversed())) { it.platformAppVersion }.thenBy { it.kind.wire })
     }
 
-    suspend fun clustersPage(platform: String, version: String?, status: String?, page: Int, pageSize: Int = 25): OpsClusterPage = query {
+    suspend fun clustersPage(platform: String, version: String?, status: String?, page: Int, pageSize: Int = 25, kind: SkeletonKind? = null): OpsClusterPage = query {
         require(pageSize > 0)
         val today = clock.today()
         val rows = clusterRows(today, status = status).filter { row ->
-            row.platform == platform && version in displayVersions(row)
+            row.platform == platform && version in displayVersions(row) && (kind == null || row.kind == kind)
         }.sortedWith(reviewOrder(today))
         val pageCount = if (rows.isEmpty()) 1 else (rows.size - 1) / pageSize + 1
         val currentPage = page.coerceIn(1, pageCount)
@@ -145,7 +153,7 @@ class OpsStore(private val db: Database, private val clock: Clock, private val p
         val clusters = rows.drop((currentPage - 1) * pageSize).take(pageSize).map { row ->
             row.copy(newWithVersion = version != null && newWithVersion(row, version, firstDays), samples = null)
         }
-        OpsClusterPage(platform, version, status, rows.size, currentPage, pageSize, pageCount, clusters, classCounts(rows))
+        OpsClusterPage(platform, version, status, rows.size, currentPage, pageSize, pageCount, clusters, classCounts(rows), kind)
     }
 
     private fun classCounts(rows: List<OpsCluster>): Map<String, Int> =
@@ -164,7 +172,7 @@ class OpsStore(private val db: Database, private val clock: Clock, private val p
         """SELECT e.id, e.envelope::text AS bytes, e.received_day, left(e.install_id::text, 8) AS prefix,
             e.envelope->'metadata'->>'platformAppVersion' AS version
             FROM trusted_envelopes e JOIN installs i ON i.install_id = e.install_id
-            WHERE e.fingerprint = ? AND i.trusted AND i.revoked_at IS NULL
+            WHERE e.fingerprint = ? AND EXISTS (SELECT 1 FROM clusters c WHERE c.fingerprint = e.fingerprint AND c.kind = 'screen') AND i.trusted AND i.revoked_at IS NULL
             AND (?::bigint IS NULL OR e.id = ?) ORDER BY e.received_day DESC, e.id DESC LIMIT 1""" +
             if (lock) " FOR SHARE OF e" else "",
         fingerprint, envelopeId, envelopeId,
@@ -179,6 +187,9 @@ class OpsStore(private val db: Database, private val clock: Clock, private val p
 
     /** Pin metadata travels separately from selections in the stored document; never through a DTO. */
     suspend fun saveDraft(fp: String, screenClass: String, selectionsJson: JsonObject, json5: String, day: LocalDate): Boolean = query {
+        check(select("SELECT kind FROM clusters WHERE fingerprint = ?", fp) { it.getString(1) } == "screen") {
+            "unsupported_skeleton_kind"
+        }
         require(screenClass in RuleAuthoringVocabulary.SCREEN_CLASSES)
         val id = (selectionsJson["envelopeId"] as? JsonPrimitive)?.content?.toLongOrNull() ?: return@query false
         // Lock the install before the envelope, matching withdrawal's parent-first lock order.
@@ -195,20 +206,20 @@ class OpsStore(private val db: Database, private val clock: Clock, private val p
             put("json5", json5); put("envelopeId", id); put("envelopeSha256", pinned.sha256Hex)
         }
         update("""UPDATE clusters SET screen_class = ?, draft = ?::jsonb, draft_day = ?, status = 'drafted',
-            notes = COALESCE(?, notes) WHERE fingerprint = ?""", screenClass, draft.toString(), day, notes, fp) == 1
+            notes = COALESCE(?, notes) WHERE fingerprint = ? AND kind = 'screen'""", screenClass, draft.toString(), day, notes, fp) == 1
     }
 
     suspend fun draftJson5(fp: String): String? = query {
-        select("SELECT draft->>'json5' FROM clusters WHERE fingerprint = ?", fp) { it.getString(1) }
+        select("SELECT draft->>'json5' FROM clusters WHERE fingerprint = ? AND kind = 'screen'", fp) { it.getString(1) }
     }
 
     suspend fun cluster(fingerprint: String, withWireframe: Boolean = false): OpsCluster? = query {
         val row = clusterRows(clock.today(), fingerprint = fingerprint).singleOrNull() ?: return@query null
         val newest = row.versions.maxWithOrNull(opsVersionOrder)
-        val wireframe = if (withWireframe) select(
+        val wireframe = if (withWireframe && row.kind == SkeletonKind.SCREEN) select(
             """SELECT e.envelope, e.received_day, left(e.install_id::text, 8) AS prefix
                 FROM trusted_envelopes e JOIN installs i ON i.install_id = e.install_id
-                WHERE e.fingerprint = ? AND i.trusted AND i.revoked_at IS NULL
+                WHERE e.fingerprint = ? AND EXISTS (SELECT 1 FROM clusters c WHERE c.fingerprint = e.fingerprint AND c.kind = 'screen') AND i.trusted AND i.revoked_at IS NULL
                 ORDER BY e.received_day DESC, e.id DESC LIMIT 1""",
             fingerprint,
         ) { WireframeRender.render(it.getString("envelope"), it.getString("received_day"), it.getString("prefix")) } else null
@@ -217,7 +228,7 @@ class OpsStore(private val db: Database, private val clock: Clock, private val p
 
     private fun Connection.clusterRows(today: LocalDate, status: String? = null, fingerprint: String? = null): List<OpsCluster> =
         select(
-            """SELECT c.fingerprint, c.platform, c.status, c.first_seen_day, c.last_seen_day, c.resolved_rule_id, c.notes,
+            """SELECT c.fingerprint, c.platform, c.kind, c.status, c.first_seen_day, c.last_seen_day, c.resolved_rule_id, c.notes,
                 c.screen_class, c.draft IS NOT NULL AS has_draft, c.draft_day, count(DISTINCT s.install_id) FILTER (WHERE NOT i.trusted AND s.day >= ? AND s.day <= ?) AS installs,
                 COALESCE(bool_or(i.trusted), false) AS trusted,
                 COALESCE(sum(s.count) FILTER (WHERE s.day >= ? AND s.day <= ?), 0) AS sightings,
@@ -238,7 +249,10 @@ class OpsStore(private val db: Database, private val clock: Clock, private val p
                     rows.getString("first_seen_day"), rows.getString("last_seen_day"), count, trusted, rows.getLong("sightings"),
                     Json.decodeFromString<List<String>>(rows.getString("versions")).sortedWith(opsVersionOrder.reversed()),
                     false, visible, rows.getString("resolved_rule_id"), notes?.takeIf { visible }, notesWithheld = notes != null && !visible,
-                    screenClass = rows.getString("screen_class"), hasDraft = rows.getBoolean("has_draft"), draftDay = rows.getString("draft_day"),
+                    screenClass = rows.getString("screen_class"),
+                    hasDraft = rows.getString("kind") == "screen" && rows.getBoolean("has_draft"),
+                    draftDay = rows.getString("draft_day").takeIf { rows.getString("kind") == "screen" },
+                    kind = requireNotNull(SkeletonKind.fromWire(rows.getString("kind"))),
                 ))
             } while (rows.next())
         } } ?: emptyList()
@@ -261,7 +275,12 @@ class OpsStore(private val db: Database, private val clock: Clock, private val p
         "SELECT platform_app_version, received_day, skeleton FROM cluster_samples WHERE fingerprint = ? ORDER BY received_day DESC, platform_app_version",
         row.fingerprint,
     ) { rows -> buildList {
-        do { add(OpsSample(rows.getString("platform_app_version"), rows.getString("received_day"), SkeletonRender.render(rows.getString("skeleton"), row.unblinded))) } while (rows.next())
+        do {
+            val sample = rows.getString("skeleton")
+            add(OpsSample(rows.getString("platform_app_version"), rows.getString("received_day"),
+                skeleton = if (row.kind == SkeletonKind.SCREEN) SkeletonRender.render(sample, row.unblinded) else null,
+                notification = if (row.kind == SkeletonKind.NOTIFICATION) SkeletonRender.renderNotification(sample, row.unblinded) else null))
+        } while (rows.next())
     } } ?: emptyList()
 
     suspend fun status(fingerprint: String, status: String, resolvedRuleId: String?, notes: String?): Boolean = query {

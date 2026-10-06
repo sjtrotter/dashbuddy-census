@@ -1,5 +1,7 @@
 package cloud.trotter.census.server.routes
 
+import cloud.trotter.census.contract.SkeletonKind
+import cloud.trotter.census.server.ErrorResponse
 import cloud.trotter.census.contract.authoring.DraftResult
 import cloud.trotter.census.contract.authoring.EnvelopeWalk
 import cloud.trotter.census.contract.authoring.RuleAuthoringVocabulary
@@ -56,12 +58,12 @@ fun Route.dashboardRoute(store: OpsStore, alarms: HealthAlarms, clock: Clock, po
         // A malformed percent-escape never reaches here: routing decodes the query first and the module's
         // bad-request handler answers the HTML shell for ops pages.
         val parameters = call.request.queryParameters
-        val filter = ClusterFilter.parse(parameters["platform"], parameters["version"], parameters["status"], parameters["page"])
+        val filter = ClusterFilter.parse(parameters["platform"], parameters["version"], parameters["status"], parameters["page"], parameters["kind"])
         val today = clock.today().toString()
         if (filter == null) {
             call.respondText(ClustersPageHtml.renderInvalid(policy.serverVersion, policy.k, today), ContentType.Text.Html, HttpStatusCode.BadRequest)
         } else {
-            val result = store.clustersPage(filter.platform, filter.version, filter.status, filter.page)
+            val result = store.clustersPage(filter.platform, filter.version, filter.status, filter.page, kind = filter.kind)
             call.respondText(ClustersPageHtml.render(policy.serverVersion, policy.k, today, result), ContentType.Text.Html)
         }
     }
@@ -94,6 +96,10 @@ fun Route.dashboardRoute(store: OpsStore, alarms: HealthAlarms, clock: Clock, po
                     call.draftPage(policy, clock, cluster, null, params, listOf("Invalid classification or notes"), status = HttpStatusCode.BadRequest)
                 } else if (store.saveClassification(fp, screenClass, notes.ifEmpty { null })) call.draftRedirect(fp)
                 else call.draftMissing(policy, clock)
+                return@post
+            }
+            if (cluster.kind == SkeletonKind.NOTIFICATION) {
+                call.respond(HttpStatusCode.BadRequest, ErrorResponse("unsupported_skeleton_kind"))
                 return@post
             }
             val id = params["envelopeId"]?.toLongOrNull()?.takeIf { it > 0 }

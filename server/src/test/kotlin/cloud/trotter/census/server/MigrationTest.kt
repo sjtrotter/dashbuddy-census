@@ -20,6 +20,33 @@ import java.sql.DriverManager
 @EnabledIf(value = "dockerAvailable", disabledReason = "Docker unavailable: PostgreSQL migration test skipped")
 class MigrationTest {
     @Test
+    fun `V3 to V4 backfills screen and preserves sample relationship`() {
+        fun migration(target: String) = Flyway.configure()
+            .dataSource(postgres.jdbcUrl, postgres.username, postgres.password)
+            .schemas("notification_upgrade").defaultSchema("notification_upgrade")
+            .locations("classpath:db/migration").target(target).load()
+        migration("3").migrate()
+        DriverManager.getConnection(postgres.jdbcUrl, postgres.username, postgres.password).use { connection ->
+            connection.createStatement().use { stmt ->
+                stmt.execute("SET search_path TO notification_upgrade")
+                stmt.execute("INSERT INTO clusters (fingerprint, platform, first_seen_day, last_seen_day) VALUES (repeat('a',64), 'uber', '2026-10-02', '2026-10-02')")
+                stmt.execute("INSERT INTO cluster_samples VALUES (repeat('a',64), '1.0', '2026-10-02', '{}'::jsonb)")
+                assertEquals(1, migration("4").migrate().migrationsExecuted)
+                stmt.executeQuery("SELECT c.kind, s.platform_app_version FROM clusters c JOIN cluster_samples s USING (fingerprint)").use { rows ->
+                    assertTrue(rows.next()); assertEquals("screen", rows.getString(1)); assertEquals("1.0", rows.getString(2))
+                    assertTrue(!rows.next())
+                }
+                org.junit.jupiter.api.Assertions.assertThrows(java.sql.SQLException::class.java) {
+                    stmt.execute("UPDATE clusters SET kind = 'invalid'")
+                }
+                org.junit.jupiter.api.Assertions.assertThrows(java.sql.SQLException::class.java) {
+                    stmt.execute("UPDATE clusters SET kind = NULL")
+                }
+            }
+        }
+    }
+
+    @Test
     fun `readiness is available with a database`() {
         val config = Config.fromEnv(
             testEnvironment() + mapOf(
@@ -45,7 +72,7 @@ class MigrationTest {
             .locations("classpath:db/migration")
             .load()
         // V1 schema, V2 cluster classification, V3 withdrawal tombstones and enrolment instants.
-        assertEquals(3, flyway.migrate().migrationsExecuted)
+        assertEquals(4, flyway.migrate().migrationsExecuted)
         val expected = setOf(
             "installs", "clusters", "cluster_samples", "cluster_sightings", "token_sightings",
             "vocabulary", "trusted_envelopes", "health_daily", "health_fleet_daily", "ingest_ledger", "nonces", "withdrawals",

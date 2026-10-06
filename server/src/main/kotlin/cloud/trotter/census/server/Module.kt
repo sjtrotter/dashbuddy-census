@@ -46,7 +46,10 @@ import kotlin.time.Duration.Companion.hours
 import kotlin.time.Duration.Companion.minutes
 
 /** Wires public and identity endpoints, with a clock seam for UTC decisions. */
-fun Application.module(config: Config, db: Database?, clock: Clock = SystemClock, alarmEvaluator: HealthAlarms? = null) {
+fun Application.module(
+    config: Config, db: Database?, clock: Clock = SystemClock, alarmEvaluator: HealthAlarms? = null,
+    policy: Policy = Policy(serverVersion = config.serverVersion, imageDigest = config.imageDigest),
+) {
     install(ContentNegotiation) {
         json(
             Json {
@@ -96,7 +99,6 @@ fun Application.module(config: Config, db: Database?, clock: Clock = SystemClock
             requestKey { call -> call.attributes.getOrNull(AuthenticatedInstallKey)?.id ?: "anonymous" }
         }
     }
-    val policy = Policy(serverVersion = config.serverVersion, imageDigest = config.imageDigest)
     install(StatusPages) {
         status(HttpStatusCode.TooManyRequests) { status ->
             // RateLimit sends an empty status; preserve explicit errors such as budget_exhausted.

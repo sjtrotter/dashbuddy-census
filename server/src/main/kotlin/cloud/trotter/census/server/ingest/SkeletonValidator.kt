@@ -5,8 +5,13 @@ import cloud.trotter.census.contract.CensusHash
 import cloud.trotter.census.contract.ClassNameGrammar
 import cloud.trotter.census.contract.KindClassifier
 import cloud.trotter.census.contract.ResourceIdGrammar
-import cloud.trotter.census.contract.SkeletonSchema
-import cloud.trotter.census.contract.UiSkeletonDto
+import cloud.trotter.census.contract.CensusSkeletonDto
+import cloud.trotter.census.contract.CensusSkeletonSchema
+import cloud.trotter.census.contract.NotificationSkeletonDto
+import cloud.trotter.census.contract.NotificationSkeletonSchema
+import cloud.trotter.census.contract.NotifTextField
+import cloud.trotter.census.contract.SkeletonKind
+import cloud.trotter.census.contract.SkeletonRejectionReason
 import cloud.trotter.census.contract.WireStrings
 import cloud.trotter.census.server.Policy
 import kotlinx.serialization.SerializationException
@@ -21,7 +26,7 @@ import java.time.LocalDate
 import java.time.format.DateTimeParseException
 
 sealed interface ItemVerdict {
-    data class Accepted(val item: UiSkeletonDto, val canonicalJson: String, val bytes: Int, val tokens: List<Token>) : ItemVerdict
+    data class Accepted(val item: CensusSkeletonDto, val canonicalJson: String, val bytes: Int, val tokens: List<Token>) : ItemVerdict
     data class Rejected(val reason: String) : ItemVerdict
 }
 
@@ -36,13 +41,21 @@ object SkeletonValidator {
         if (element !is JsonObject) return reject("bad_item")
         val schema = element.string("schemaId")
         if (schema == null || schema !in policy.acceptedSchemaIds) return reject("unknown_schema")
-        val structure = inspect(element)
+        val notification = schema == NotificationSkeletonSchema.SCHEMA_ID
+        val kind = element.string("kind")
+        if ("kind" in element && SkeletonKind.fromWire(kind ?: "") == null) return reject("unknown_skeleton_kind")
+        if ((notification && kind != SkeletonKind.NOTIFICATION.wire) ||
+            (!notification && kind != null && kind != SkeletonKind.SCREEN.wire)) return reject("kind_schema_mismatch")
+        val structure = inspect(element, notification)
         if (structure.unknownField || structure.textKeys.any { it !in policy.acceptedTextKeys }) return reject("unknown_field")
         if (structure.plaintext) return reject("plaintext_field")
         if (structure.badType) return reject("bad_item")
         if (structure.tooDeep) return reject("too_deep")
         if (structure.nodes.size > 4096) return reject("too_many_nodes")
 
+        if (notification && !Regex(NotificationSkeletonDto.CHANNEL_ID_PATTERN).matches(element.string("channelId") ?: "")) {
+            return reject("bad_channel")
+        }
         val tokens = mutableListOf<Token>()
         for (slot in structure.slots) {
             val kind = requireNotNull(slot.string("kind"))
@@ -86,25 +99,26 @@ object SkeletonValidator {
         val declared = element.string("fingerprint")
         if (declared == null || !CensusFingerprint.isWellFormed(declared)) return reject("fingerprint_mismatch")
         val item = try {
-            SkeletonSchema.json.decodeFromJsonElement(UiSkeletonDto.serializer(), element)
+            CensusSkeletonSchema.deserialize(element.toString())
         } catch (_: SerializationException) {
             return reject("bad_item")
         } catch (_: IllegalArgumentException) {
             return reject("bad_item")
         }
-        val measured = SkeletonSchema.measure(item)
+        val measured = CensusSkeletonSchema.measure(item)
         if (measured.bytes > policy.maxSkeletonBytes) return reject("too_large")
-        if (CensusFingerprint.of(item.root) != item.fingerprint) return reject("fingerprint_mismatch")
+        if (CensusFingerprint.of(item) != item.fingerprint) return reject("fingerprint_mismatch")
         return ItemVerdict.Accepted(item, measured.json, measured.bytes, tokens)
     }
 
-    private fun reject(reason: String): ItemVerdict.Rejected = ItemVerdict.Rejected(reason)
+    private fun reject(reason: String): ItemVerdict.Rejected =
+        ItemVerdict.Rejected(requireNotNull(SkeletonRejectionReason.fromWire(reason)).wire)
 
     private fun JsonObject.string(key: String): String? =
         (this[key] as? JsonPrimitive)?.takeIf { it.isString }?.content
 
     private enum class Shape {
-        ITEM, NODE, SLOT, OPTIONAL_SLOT, TEXT_MAP, CHILDREN, STRING, OPTIONAL_STRING, INTEGER, OPTIONAL_INTEGER, BOOLEAN, INVALID,
+        ITEM, NOTIFICATION, NOTIF_SLOTS, NODE, SLOT, OPTIONAL_SLOT, TEXT_MAP, CHILDREN, STRING, OPTIONAL_STRING, INTEGER, OPTIONAL_INTEGER, BOOLEAN, INVALID,
     }
 
     private data class Visit(val value: JsonElement, val shape: Shape, val depth: Int)
@@ -119,17 +133,17 @@ object SkeletonValidator {
         val textKeys = mutableListOf<String>()
     }
 
-    private fun inspect(item: JsonObject): Structure {
+    private fun inspect(item: JsonObject, notification: Boolean): Structure {
         val result = Structure()
         val pending = ArrayDeque<Visit>()
-        pending.addLast(Visit(item, Shape.ITEM, 0))
+        pending.addLast(Visit(item, if (notification) Shape.NOTIFICATION else Shape.ITEM, 0))
         while (pending.isNotEmpty()) {
             val (value, shape, depth) = pending.removeLast()
             if (value is JsonPrimitive && value.isString && shape != Shape.STRING && shape != Shape.OPTIONAL_STRING) {
                 result.plaintext = true
             }
             val validType = when (shape) {
-                Shape.ITEM, Shape.NODE, Shape.SLOT, Shape.TEXT_MAP -> value is JsonObject
+                Shape.ITEM, Shape.NOTIFICATION, Shape.NOTIF_SLOTS, Shape.NODE, Shape.SLOT, Shape.TEXT_MAP -> value is JsonObject
                 Shape.OPTIONAL_SLOT -> value is JsonObject || value == JsonNull
                 Shape.CHILDREN -> value is JsonArray
                 Shape.STRING -> value is JsonPrimitive && value.isString
@@ -144,6 +158,8 @@ object SkeletonValidator {
                 is JsonObject -> {
                     val fields = when (shape) {
                         Shape.ITEM -> itemFields
+                        Shape.NOTIFICATION -> notificationFields
+                        Shape.NOTIF_SLOTS -> NotifTextField.entries.associate { it.wire to Shape.SLOT }
                         Shape.NODE -> nodeFields
                         Shape.SLOT, Shape.OPTIONAL_SLOT -> slotFields
                         else -> null
@@ -151,6 +167,8 @@ object SkeletonValidator {
                     if (fields != null && value.keys.any { it !in fields }) result.unknownField = true
                     when (shape) {
                         Shape.ITEM -> if (requiredItemKeys.any { it !in value }) result.badType = true
+                        Shape.NOTIFICATION -> if (requiredNotificationKeys.any { it !in value }) result.badType = true
+                        Shape.NOTIF_SLOTS -> if (value.keys != NotifTextField.entries.map { it.wire }.toSet()) result.badType = true
                         Shape.NODE -> {
                             result.nodes += value
                             if (depth > 64) result.tooDeep = true
@@ -187,6 +205,10 @@ object SkeletonValidator {
         "windowTitle" to Shape.OPTIONAL_SLOT, "root" to Shape.NODE,
     )
     private val requiredItemKeys = setOf("schemaId", "hashDomain", "filterRev", "platform", "engineVersion", "day", "root")
+    private val notificationFields = (itemFields - setOf("root", "windowTitle")) + mapOf(
+        "kind" to Shape.STRING, "channelId" to Shape.STRING, "slots" to Shape.NOTIF_SLOTS,
+    )
+    private val requiredNotificationKeys = (requiredItemKeys - "root") + setOf("kind", "channelId", "slots")
     private val nodeFields = mapOf(
         "class" to Shape.OPTIONAL_STRING, "id" to Shape.OPTIONAL_STRING, "isClickable" to Shape.BOOLEAN,
         "isEnabled" to Shape.BOOLEAN, "isChecked" to Shape.INTEGER, "text" to Shape.TEXT_MAP, "children" to Shape.CHILDREN,

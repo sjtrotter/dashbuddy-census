@@ -89,6 +89,75 @@ class OpsRoutesTest {
     private val clock = object : Clock { override fun now(): Instant = instant }
     private val day = LocalDate.of(2026, 10, 2)
 
+    @Test
+    fun `notification ops filter paginate project and refuse every generation path`() {
+        Database.connect(config()).use { db -> testApplication {
+            application { module(config().copy(operatorTotpSecret = totpSecret), db, clock) }
+            val ops = OpsStore(db, clock, Policy())
+            val notification = notificationAccepted(day)
+            val fp = notification.item.fingerprint
+            val reporter = UUID.randomUUID()
+            InstallStore(db, clock).enrol(reporter, hashSecret(secret(93)), "1.0")
+            sql { connection ->
+                connection.update("INSERT INTO clusters (fingerprint, platform, kind, first_seen_day, last_seen_day) VALUES (?, 'doordash', 'notification', ?, ?)", fp, day, day)
+                connection.update("INSERT INTO cluster_samples VALUES (?, '8.0', ?, ?::jsonb)", fp, day, notification.canonicalJson)
+                repeat(26) { index ->
+                    connection.update("INSERT INTO clusters (fingerprint, platform, kind, first_seen_day, last_seen_day) VALUES (?, 'doordash', 'notification', ?, ?)", (index + 1).toString(16).padStart(64, '0'), day, day)
+                }
+                connection.update("INSERT INTO clusters (fingerprint, platform, first_seen_day, last_seen_day) VALUES (?, 'doordash', ?, ?)", "f".repeat(64), day, day)
+                connection.update("INSERT INTO cluster_sightings (fingerprint, install_id, day, platform_app_version) SELECT fingerprint, ?::uuid, ?::date, 'unknown' FROM clusters", reporter, day)
+            }
+            assertEquals(27, ops.clustersPage("doordash", null, null, 1, kind = cloud.trotter.census.contract.SkeletonKind.NOTIFICATION).total)
+            assertEquals(2, ops.clustersPage("doordash", null, null, 2, kind = cloud.trotter.census.contract.SkeletonKind.NOTIFICATION).clusters.size)
+            assertEquals(setOf(cloud.trotter.census.contract.SkeletonKind.SCREEN, cloud.trotter.census.contract.SkeletonKind.NOTIFICATION), ops.clusterSummary().map { it.kind }.toSet())
+            for (kind in listOf("screen", "notification")) {
+                val listing = client.ops("/ops/clusters?kind=$kind")
+                assertEquals(200, listing.status.value)
+                val listed = Json.parseToJsonElement(listing.bodyAsText()).jsonArray.flatMap { it.jsonObject.getValue("clusters").jsonArray }
+                assertEquals(if (kind == "screen") 1 else 27, listed.size)
+                assertTrue(listed.all { it.jsonObject.getValue("kind").jsonPrimitive.content == kind })
+                assertTrue(ops.clusters(kind = cloud.trotter.census.contract.SkeletonKind.fromWire(kind)).flatMap { it.clusters }.all { it.kind.wire == kind })
+            }
+            assertEquals(400, client.ops("/ops/clusters?kind=unknown").status.value)
+            assertEquals(400, client.ops("/ops/clusters/view?platform=doordash&version=none&kind=unknown").status.value)
+            val page = client.ops("/ops/clusters/view?platform=doordash&version=none&kind=notification").bodyAsText()
+            assertTrue(page.contains("27 clusters")); assertTrue(page.contains("kind=notification&amp;page=2"))
+            val detail = client.ops("/ops/clusters/$fp").bodyAsText()
+            val sample = Json.parseToJsonElement(detail).jsonObject.getValue("samples").jsonArray.single().jsonObject
+            assertFalse("skeleton" in sample); assertTrue("notification" in sample)
+            assertFalse(detail.contains("CHANNEL_SENTINEL")); assertFalse(detail.contains("0123456789abcdef"))
+            val html = client.ops("/ops/clusters/$fp/view").bodyAsText()
+            assertTrue(html.contains("Notification")); assertFalse(html.contains("Screen wireframe"))
+            assertFalse(html.contains("draft.json5"))
+            // Even an inconsistent, forged screen-envelope reference cannot unlock notification capture/drafting.
+            val id = UUID.randomUUID(); val key = hashSecret(secret(92))
+            InstallStore(db, clock).enrol(id, key, "1.0")
+            ops.trust(id, true)
+            sql { it.update("INSERT INTO trusted_envelopes (install_id, fingerprint, envelope, received_day, purge_after) VALUES (?, ?, '{}'::jsonb, ?, ?)", id, fp, day, day.plusDays(30)) }
+            assertNull(ops.pinnedEnvelope(fp)); assertNull(ops.cluster(fp, withWireframe = true)?.wireframe)
+            val failure = runCatching { ops.saveDraft(fp, "idle", JsonObject(mapOf("envelopeId" to JsonPrimitive(1))), "forged", day) }
+            assertEquals("unsupported_skeleton_kind", failure.exceptionOrNull()?.message)
+            val browser = createClient { followRedirects = false }
+            suspend fun submit(suffix: String, fields: Map<String, String>): HttpResponse {
+                instant = instant.plusSeconds(30)
+                return browser.post("/ops/clusters/$fp/$suffix") {
+                    header(HttpHeaders.Authorization, "Bearer $operatorToken")
+                    contentType(ContentType.Application.FormUrlEncoded)
+                    setBody((fields + ("totp" to Totp.code(totpSecret, instant.epochSecond))).toList().formUrlEncode())
+                }
+            }
+            for (operation in listOf("draft/shape", "draft/preview", "draft")) {
+                assertError(submit(operation, mapOf("envelopeId" to "1", "screenClass" to "idle")), 400, "unsupported_skeleton_kind")
+            }
+            assertEquals(303, submit("draft", mapOf("mode" to "classify", "screenClass" to "idle", "notes" to "Notes")).status.value)
+            assertEquals("idle", ops.cluster(fp)?.screenClass)
+            assertEquals(400, submit("draft", mapOf("mode" to "classify", "screenClass" to "invented")).status.value)
+            assertEquals("idle", ops.cluster(fp)?.screenClass)
+            assertEquals(404, client.ops("/ops/clusters/$fp/draft.json5").status.value)
+            assertNull(ops.draftJson5(fp))
+        } }
+    }
+
     @BeforeEach
     fun clean() {
         sql { it.update("TRUNCATE installs, clusters, health_fleet_daily, vocabulary CASCADE") }
@@ -379,7 +448,7 @@ class OpsRoutesTest {
                 assertPrivate(versionlessHtml)
                 val home = client.ops("/ops/").bodyAsText()
                 assertTrue(home.contains("Not recorded"))
-                assertTrue(home.contains("href=\"/ops/clusters/view?platform=doordash&amp;version=none\""))
+                assertTrue(home.contains("href=\"/ops/clusters/view?platform=doordash&amp;version=none&amp;kind=screen\""))
                 assertFalse(home.contains("Unavailable"))
                 assertFalse(home.contains("version=unknown"))
                 assertPrivate(home)

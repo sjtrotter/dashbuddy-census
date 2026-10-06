@@ -13,6 +13,18 @@ import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
 class ClustersPageRenderTest {
+    @Test
+    fun `notification kind survives status and pagination links`() {
+        val kind = cloud.trotter.census.contract.SkeletonKind.NOTIFICATION
+        val html = render(page.copy(kind = kind, clusters = clusters.map { it.copy(kind = kind) }))
+        assertTrue(html.contains(">Notification</span>"))
+        assertTrue(html.contains("kind=notification&amp;status=triaged"))
+        assertTrue(html.contains("kind=notification&amp;status=new&amp;page=2"))
+        val filter = requireNotNull(cloud.trotter.census.server.ops.ClusterFilter.parse("doordash", "8.10", "new", "1", "notification"))
+        assertEquals(kind, filter.kind)
+        assertEquals(null, cloud.trotter.census.server.ops.ClusterFilter.parse("doordash", "8.10", null, null, "bogus"))
+    }
+
     private val clusters = listOf("ignored", "new", "triaged", "new").mapIndexed { index, status ->
         OpsCluster(
             ('a' + index).toString().repeat(64), "doordash", status, "2026-10-01", "2026-10-02", 9, false, 12480,

@@ -14,6 +14,15 @@ import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
 class DashboardRenderTest {
+    @Test
+    fun `mixed cluster summaries have separate kind rows and shared ingest labels`() {
+        val screen = summaries.first()
+        val html = render(listOf(screen, screen.copy(kind = cloud.trotter.census.contract.SkeletonKind.NOTIFICATION)))
+        assertTrue(html.contains(">Screen</span>")); assertTrue(html.contains(">Notification</span>"))
+        assertTrue(html.contains("kind=screen")); assertTrue(html.contains("kind=notification"))
+        assertTrue(html.contains("Shared ingest accepted today"))
+    }
+
     private val empty = JsonObject(emptyMap())
     private val summaries = listOf(
         OpsClusterSummaryRow("doordash", "8.10", 3, mapOf("new" to 2, "triaged" to 1), mapOf("idle" to 2, "unclassified" to 1)),
@@ -159,7 +168,7 @@ class DashboardRenderTest {
     fun `summary table keeps platform version order counts and validated review destinations`() {
         val page = render(summaries)
         val section = page.substringAfter("id=\"clusters\"").substringBefore("</section>")
-        assertTrue(section.contains("Clusters by platform and app version · latest version first"))
+        assertTrue(section.contains("Clusters by platform, app version and kind · latest version first"))
         val rows = Regex("<tr\\b.*?</tr>", RegexOption.DOT_MATCHES_ALL)
             .findAll(section.substringAfter("<tbody")).map { it.value }.toList()
         assertEquals(4, rows.size)
@@ -169,9 +178,9 @@ class DashboardRenderTest {
             val values = Regex("<span class=\"cell-value\">(.*?)</span>").findAll(row).map { it.groupValues[1] }.toList()
             assertEquals(expected.platform, values.first())
             assertEquals(expected.platformAppVersion?.let { "<code>$it</code>" } ?: "Not recorded", values[1])
-            assertEquals(expectedCounts[index].map { it.toString() }, values.subList(2, 8))
+            assertEquals(expectedCounts[index].map { it.toString() }, values.subList(3, 9))
             assertTrue(row.contains("<th scope=\"row\""))
-            assertTrue(row.contains("href=\"/ops/clusters/view?platform=${expected.platform}&amp;version=${expected.platformAppVersion ?: "none"}\""))
+            assertTrue(row.contains("href=\"/ops/clusters/view?platform=${expected.platform}&amp;version=${expected.platformAppVersion ?: "none"}&amp;kind=${expected.kind.wire}\""))
             assertTrue(row.contains("aria-label=\"Review ${expected.platform} ${expected.platformAppVersion ?: "no version"}\""))
         }
         assertPrivate(page)
