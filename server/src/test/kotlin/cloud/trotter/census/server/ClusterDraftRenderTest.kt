@@ -13,6 +13,17 @@ import org.junit.jupiter.api.Test
 import java.net.URI
 
 class ClusterDraftRenderTest {
+    @Test
+    fun `notification form stays classification only even with a supplied screen capture`() {
+        val html = ClusterDraftHtml.render("test", 10, "2026-10-02",
+            cluster.copy(kind = cloud.trotter.census.contract.SkeletonKind.NOTIFICATION), capture, null, emptyList(), json5 = "FORGED_DRAFT")
+        assertTrue(html.contains("Notification rule drafting and trusted notification captures are deferred"))
+        assertTrue(html.contains("Classification")); assertTrue(html.contains("name=\"screenClass\""))
+        assertTrue(html.contains("name=\"notes\"")); assertTrue(html.contains("value=\"classify\""))
+        for (forbidden in listOf("name=\"envelopeId\"", "name=\"intent\"", "name=\"shape\"", "FORGED_DRAFT", "Screen wireframe")) assertFalse(html.contains(forbidden))
+        assertPrivate(html)
+    }
+
     private val cluster = OpsCluster("a".repeat(64), "doordash", "new", "2026-10-01", "2026-10-02", 1, true, 4, listOf("8.10"), false, true)
     private val capture = PinnedEnvelope(7, "", "b".repeat(64), "2026-10-02", "12345678", "8.10")
     private val identity = "12345678-1234-4234-8234-123456789abc"
@@ -134,10 +145,10 @@ class ClusterDraftRenderTest {
     }
 
     @Test
-    fun `unclassified DTO retains old bytes and drafts never enter serialization`() {
+    fun `unclassified DTO adds kind and drafts never enter serialization`() {
         val json = Json { explicitNulls = false; encodeDefaults = true }
         val before = json.encodeToString(OpsCluster.serializer(), cluster)
-        val expected = """{"fingerprint":"${cluster.fingerprint}","platform":"doordash","status":"new","firstSeenDay":"2026-10-01","lastSeenDay":"2026-10-02","distinctInstalls28d":1,"seenByTrusted":true,"sightings28d":4,"versions":["8.10"],"newWithVersion":false,"unblinded":true,"notesWithheld":false}"""
+        val expected = """{"fingerprint":"${cluster.fingerprint}","platform":"doordash","status":"new","firstSeenDay":"2026-10-01","lastSeenDay":"2026-10-02","distinctInstalls28d":1,"seenByTrusted":true,"sightings28d":4,"versions":["8.10"],"newWithVersion":false,"unblinded":true,"notesWithheld":false,"kind":"screen"}"""
         assertEquals(expected, before)
         val after = json.parseToJsonElement(json.encodeToString(OpsCluster.serializer(), cluster.copy(screenClass = "idle", hasDraft = true, draftDay = "2026-10-02"))).jsonObject
         assertEquals(JsonPrimitive("idle"), after["screenClass"])

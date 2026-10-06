@@ -53,6 +53,27 @@ class EnvelopeRoutesTest {
     private val clock = object : Clock { override fun now(): Instant = Instant.parse("2026-09-18T12:00:00Z") }
 
     @Test
+    fun `screen envelopes never pair with notification clusters even on the same platform`() {
+        Database.connect(config()).use { db -> testApplication {
+            application { module(config(), db, clock) }
+            val id = UUID.randomUUID().toString(); val key = secret(91)
+            assertEquals(200, client.enrol(id, key).status.value)
+            val fp = notificationAccepted(day, "envelope_only").item.fingerprint
+            val raw = JsonObject(envelopeFixture() + ("fingerprint" to JsonPrimitive(fp)))
+            val platform = raw.getValue("platform").jsonPrimitive.content
+            sql {
+                it.update("UPDATE installs SET trusted = true WHERE install_id = ?::uuid", id)
+                it.update("INSERT INTO clusters (fingerprint, platform, kind, first_seen_day, last_seen_day) VALUES (?, ?, 'notification', ?, ?) ON CONFLICT (fingerprint) DO UPDATE SET kind = 'notification'", fp, platform, day, day)
+            }
+            assertEquals(200, client.signed(clock, id, key, HttpMethod.Post, "/v1/envelopes", batch("notification-pair", listOf(raw))).status.value)
+            assertNull(sql { connection -> connection.prepareStatement("SELECT fingerprint FROM trusted_envelopes WHERE install_id = ?::uuid").use { statement ->
+                statement.setString(1, id); statement.executeQuery().use { rows -> assertTrue(rows.next()); rows.getString(1) }
+            } })
+            sql { it.update("DELETE FROM clusters WHERE fingerprint = ?", fp) }
+        } }
+    }
+
+    @Test
     fun `trust admission privacy retries retention and withdrawal`() {
         val id = UUID.randomUUID()
         val key = secret(81)

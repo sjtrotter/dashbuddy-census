@@ -68,6 +68,7 @@ fun Route.skeletonRoutes(store: InstallStore, skeletons: SkeletonStore, clock: C
             call.respond(HttpStatusCode.UnprocessableEntity, BatchQualityResponse(rejected = rejected))
             return@post
         }
+        // Both contract kinds share this accepted count, deduplication and ledger transaction.
         val duplicate = accepted.size - accepted.map { it.item.fingerprint }.toSet().size
         val outcome = skeletons.ingest(
             installId, keyHash, today, accepted, duplicate, rejected,

@@ -57,12 +57,95 @@ import java.util.zip.GZIPInputStream
 @Testcontainers
 @EnabledIf(value = "dockerAvailable", disabledReason = "Docker unavailable: conformance tests skipped")
 class ConformanceReplayTest {
+    @org.junit.jupiter.api.BeforeEach
+    fun clean() { sql { connection -> connection.createStatement().use { it.execute("TRUNCATE installs, clusters CASCADE") } } }
+
+    @Test
+    fun `notification vectors replay through authenticated ingest with explicit policy`() {
+        val vectors = Files.readAllLines(Path.of(System.getProperty("census.contractDir"), "conformance", "notification-vectors.jsonl"))
+            .filter { it.isNotBlank() }.map { Json.parseToJsonElement(it).jsonObject }
+        val day = LocalDate.parse(vectors.first().getValue("skeleton").jsonObject.getValue("day").jsonPrimitive.content)
+        val clock = object : Clock { override fun now(): Instant = day.atTime(12, 0).toInstant(ZoneOffset.UTC) }
+        Database.connect(config()).use { db -> testApplication {
+            application { module(config(), db, clock, policy = notificationPolicy) }
+            val id = UUID.randomUUID().toString(); val key = secret(145)
+            assertEquals(200, client.enrol(id, key).status.value)
+            for ((index, vector) in vectors.withIndex()) {
+                val item = vector.getValue("skeleton").jsonObject
+                val verdict = SkeletonValidator.validate(item, notificationPolicy, day)
+                val response = client.signed(clock, id, key, HttpMethod.Post, "/v1/skeletons", batch("vector-$index", listOf(item)))
+                when (verdict) {
+                    is ItemVerdict.Accepted -> {
+                        assertEquals(200, response.status.value)
+                        val stored = sql { connection -> connection.prepareStatement("SELECT skeleton::text FROM cluster_samples WHERE fingerprint = ?").use { stmt ->
+                            stmt.setString(1, verdict.item.fingerprint)
+                            stmt.executeQuery().use { rows -> assertTrue(rows.next()); rows.getString(1) }
+                        } }
+                        assertEquals(Json.parseToJsonElement(verdict.canonicalJson), Json.parseToJsonElement(stored))
+                    }
+                    is ItemVerdict.Rejected -> {
+                        assertEquals("bad_version", verdict.reason)
+                        assertEquals(422, response.status.value)
+                        assertEquals(1, Json.parseToJsonElement(response.bodyAsText()).jsonObject.getValue("rejected").jsonObject.getValue("bad_version").jsonPrimitive.int)
+                    }
+                }
+            }
+            val screens = GZIPInputStream(Files.newInputStream(Path.of(System.getProperty("census.contractDir"), "conformance", "skeletons.jsonl.gz")))
+                .bufferedReader().useLines { lines -> lines.map { Json.parseToJsonElement(it).jsonObject.getValue("skeleton").jsonObject }
+                    .filter { it["kind"] != JsonPrimitive("notification") }.take(150).toList() }
+            val notifications = vectors.map { it.getValue("skeleton").jsonObject }
+                .filter { SkeletonValidator.validate(it, notificationPolicy, day) is ItemVerdict.Accepted }
+            val mixed = screens.flatMapIndexed { index, screen -> listOf(screen, notifications[index % notifications.size]) }
+            val mixedId = UUID.randomUUID().toString()
+            assertEquals(200, client.enrol(mixedId, key).status.value)
+            for ((index, chunk) in mixed.chunked(100).withIndex()) {
+                assertEquals(200, client.signed(clock, mixedId, key, HttpMethod.Post, "/v1/skeletons", batch("mixed-$index", chunk)).status.value)
+            }
+            assertError(client.signed(clock, mixedId, key, HttpMethod.Post, "/v1/skeletons", batch("over-quota", listOf(notifications.first()))), 429, "budget_exhausted")
+            assertEquals(200, client.signed(clock, mixedId, key, HttpMethod.Post, "/v1/skeletons", batch("mixed-0", mixed.take(100))).status.value)
+            assertEquals(300, InstallStore(db, clock).ledgerFor(UUID.fromString(mixedId), day)?.accepted)
+            val raceId = UUID.randomUUID().toString()
+            assertEquals(200, client.enrol(raceId, key).status.value)
+            val responses = coroutineScope {
+                val start = CompletableDeferred<Unit>()
+                val tasks = List(4) { index -> async {
+                    start.await()
+                    client.signed(clock, raceId, key, HttpMethod.Post, "/v1/skeletons", batch("race-$index", mixed.take(100))).status.value
+                } }
+                start.complete(Unit); tasks.awaitAll()
+            }
+            assertEquals(listOf(200, 200, 200, 429), responses.sorted())
+            assertEquals(300, InstallStore(db, clock).ledgerFor(UUID.fromString(raceId), day)?.accepted)
+        } }
+    }
+
     @Test
     fun `golden replay enforces budgets deduplication quality privacy and withdrawal`() {
-        val golden = GZIPInputStream(Files.newInputStream(
-            Path.of(System.getProperty("census.contractDir"), "conformance", "skeletons.jsonl.gz"),
-        )).bufferedReader().useLines { lines -> lines.map { Json.parseToJsonElement(it).jsonObject }.toList() }
-        assertEquals(879, golden.size) // 2026-10-05: the app corpus gained 3 fixtures (DashBuddy PRs #1216/#1220)
+        val directory = Path.of(System.getProperty("census.contractDir"), "conformance")
+        val bytes = GZIPInputStream(Files.newInputStream(directory.resolve("skeletons.jsonl.gz"))).use { it.readBytes() }
+        val manifest = Json.parseToJsonElement(Files.readString(directory.resolve("manifest.json"))).jsonObject
+        val records = bytes.toString(Charsets.UTF_8).lineSequence().filter { it.isNotBlank() }.map { Json.parseToJsonElement(it).jsonObject }.toList()
+        assertEquals(manifest.getValue("totalRecords").jsonPrimitive.int, records.size)
+        assertEquals(manifest.getValue("sha256").jsonPrimitive.content, cloud.trotter.census.server.auth.sha256Hex(bytes))
+        assertEquals(manifest.getValue("builtBySchema").jsonObject.mapValues { it.value.jsonPrimitive.int },
+            records.groupingBy { it.getValue("skeleton").jsonObject.getValue("schemaId").jsonPrimitive.content }.eachCount())
+        val vectors = Files.readAllLines(directory.resolve("notification-vectors.jsonl")).filter { it.isNotBlank() }
+            .map { Json.parseToJsonElement(it).jsonObject }
+        assertEquals(vectors, records.filter { it.getValue("skeleton").jsonObject["kind"] == JsonPrimitive("notification") })
+        for (vector in vectors) {
+            val raw = vector.getValue("skeleton").jsonObject
+            val item = cloud.trotter.census.contract.CensusSkeletonSchema.deserialize(raw.toString())
+            assertEquals(vector.getValue("fingerprint").jsonPrimitive.content, CensusFingerprint.of(item))
+            val verdict = SkeletonValidator.validate(raw, notificationPolicy, LocalDate.parse(item.day))
+            // This contract identity vector uses synthetic metadata outside the retained server allowlist.
+            if (item.rulesetReleaseTag == "synthetic") assertEquals(ItemVerdict.Rejected("bad_version"), verdict)
+            else {
+                assertTrue(verdict is ItemVerdict.Accepted)
+                assertEquals(vector.getValue("hashes").jsonArray.map { it.jsonPrimitive.content }.toSet(),
+                    (verdict as ItemVerdict.Accepted).tokens.map { it.hash }.toSet())
+            }
+        }
+        val golden = records.filter { it.getValue("skeleton").jsonObject["kind"] != JsonPrimitive("notification") }
         val items = golden.map { it.getValue("skeleton").jsonObject }
         val day = LocalDate.parse(items.first().getValue("day").jsonPrimitive.content)
         val clock = object : Clock {
@@ -121,8 +204,10 @@ class ConformanceReplayTest {
                             }
                         }
                         assertTrue(stored.isNotEmpty(), "a sample must exist for $fingerprint")
-                        val expected = SkeletonSchema.measure(SkeletonSchema.deserialize(group.first().getValue("skeleton").jsonObject.toString())).json
-                        assertEquals(Json.parseToJsonElement(expected), Json.parseToJsonElement(stored.single()))
+                        val expected = group.groupBy { it.getValue("skeleton").jsonObject["platformAppVersion"] }.values.map {
+                            Json.parseToJsonElement(SkeletonSchema.measure(SkeletonSchema.deserialize(it.first().getValue("skeleton").jsonObject.toString())).json)
+                        }.toSet()
+                        assertEquals(expected, stored.map { Json.parseToJsonElement(it) }.toSet())
                     }
                     val sightings = sql { connection ->
                         connection.prepareStatement("SELECT fingerprint, sum(count) FROM cluster_sightings WHERE install_id = ?::uuid GROUP BY fingerprint").use { statement ->
@@ -144,7 +229,7 @@ class ConformanceReplayTest {
                     }
                     assertTrue(sql { connection ->
                         connection.createStatement().use { statement ->
-                            statement.executeQuery("SELECT count(*) FROM (SELECT fingerprint FROM cluster_samples GROUP BY fingerprint HAVING count(*) > 5) excess").use { rows ->
+                            statement.executeQuery("SELECT count(*) FROM (SELECT fingerprint FROM cluster_samples GROUP BY fingerprint, platform_app_version HAVING count(*) > 5) excess").use { rows ->
                                 rows.next(); rows.getInt(1) == 0
                             }
                         }
@@ -243,7 +328,7 @@ class ConformanceReplayTest {
                     assertEquals(raceBody.toByteArray().size.toLong(), raceLedger.bytes)
                     assertEquals(listOf("race"), raceLedger.batchIds)
 
-                    // One fingerprint retains the first sample but counts sightings for both versions.
+                    // Each app version retains its own first sample and sightings.
                     val versionRoot = JsonObject(mapOf("class" to JsonPrimitive("SightingVersionProbe")))
                     val versionBase = JsonObject(items.first() + ("root" to versionRoot))
                     val versionFingerprint = requireNotNull(CensusFingerprint.of(SkeletonSchema.deserialize(versionBase.toString()).root))
@@ -265,8 +350,8 @@ class ConformanceReplayTest {
                             statement.executeQuery().use { rows -> buildMap { while (rows.next()) put(rows.getString(1), rows.getInt(2)) } }
                         }
                     })
-                    assertEquals(listOf("1.0.0"), sql { connection ->
-                        connection.prepareStatement("SELECT platform_app_version FROM cluster_samples WHERE fingerprint = ?").use { statement ->
+                    assertEquals(listOf("1.0.0", "2.0.0"), sql { connection ->
+                        connection.prepareStatement("SELECT platform_app_version FROM cluster_samples WHERE fingerprint = ? ORDER BY platform_app_version").use { statement ->
                             statement.setString(1, versionFingerprint)
                             statement.executeQuery().use { rows -> buildList { while (rows.next()) add(rows.getString(1)) } }
                         }

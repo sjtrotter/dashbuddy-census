@@ -72,7 +72,7 @@ class EnvelopeStore(private val db: Database, private val clock: Clock) {
         for (item in accepted) {
             val isPaired = select(
                 """INSERT INTO trusted_envelopes (install_id, fingerprint, envelope, received_day, purge_after)
-                    VALUES (?, (SELECT fingerprint FROM clusters WHERE fingerprint = ? AND platform = ?), ?::jsonb, ?, ?)
+                    VALUES (?, (SELECT fingerprint FROM clusters WHERE fingerprint = ? AND platform = ? AND kind = 'screen'), ?::jsonb, ?, ?)
                     RETURNING fingerprint IS NOT NULL AS paired""",
                 installId, item.fingerprint, item.platform, item.canonicalJson, day, day.plusDays(retentionDays.toLong()),
             ) { it.getBoolean("paired") }

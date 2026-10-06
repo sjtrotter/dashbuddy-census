@@ -10,6 +10,14 @@ import java.time.Instant
 import java.time.LocalDate
 
 class BudgetTest {
+    @Test
+    fun `shared accepted count exhausts at 150 screen plus 150 notification items`() {
+        val shared = Budget(clock, BudgetPolicy())
+        val row = LedgerRow(accepted = 150 + 150, duplicate = 298)
+        assertEquals(0, shared.remainingSkeletons(row))
+        assertEquals(BudgetVerdict.BudgetExhausted(60), shared.exceeded(row, 1, true))
+    }
+
     private val clock = object : Clock { override fun now(): Instant = Instant.parse("2026-10-02T23:59:00.500Z") }
     private val budget = Budget(clock, BudgetPolicy(dailySkeletonBudget = 3, dailyBytes = 10, dailyBatches = 2))
 

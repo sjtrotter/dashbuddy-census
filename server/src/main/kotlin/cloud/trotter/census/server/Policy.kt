@@ -1,5 +1,6 @@
 package cloud.trotter.census.server
 
+import cloud.trotter.census.contract.SkeletonSchema
 import kotlinx.serialization.Serializable
 
 /** Public policy defaults; POLICY_* environment overrides are a later slice (#1157 S1). */
@@ -14,7 +15,8 @@ data class Policy(
     val maxSkeletonBytes: Int = 65_536,
     val maxBatchItems: Int = 100,
     val maxBatchBytes: Int = 1_048_576,
-    val acceptedSchemaIds: List<String> = listOf("uinode.skeleton.v1"),
+    // Notification wire support is opt-in until the separate ADR lifecycle prerequisite is repaired.
+    val acceptedSchemaIds: List<String> = listOf(SkeletonSchema.SCHEMA_ID),
     val acceptedPlatforms: List<String> = listOf("doordash", "uber", "_unknown"),
     val acceptedTextKeys: List<String> = listOf("text", "desc", "state", "pane", "role", "hint", "tooltip", "error", "clickLabel", "uid"),
     val acceptedHashDomains: List<Int> = listOf(1),

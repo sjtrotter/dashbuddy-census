@@ -1,5 +1,7 @@
 package cloud.trotter.census.server.ops
 
+import cloud.trotter.census.contract.SkeletonKind
+
 import cloud.trotter.census.server.db.CLUSTER_STATUSES
 import cloud.trotter.census.server.db.OpsClusterPage
 import kotlinx.html.a
@@ -20,13 +22,24 @@ object ClustersPageHtml {
             a(href = "/ops/#clusters", classes = "action") { +"Back to the dashboard" }
         },
     ) {
-        val filter = ClusterFilter.parse(page.platform, page.platformAppVersion ?: "none", page.status, page.page.toString())
+        val filter = ClusterFilter.parse(page.platform, page.platformAppVersion ?: "none", page.status, page.page.toString(), page.kind?.wire)
         h1 {
             +"Clusters · ${platform(page.platform)} · "
             +if (page.platformAppVersion == null) "No version recorded" else "Version ${version(page.platformAppVersion)}"
         }
         p("muted") { +"${number(page.total)} clusters · ${if (page.status == null) "untriaged first, then by rank" else "by rank"}" }
         p("muted") { +"Classes · ${classSummary(page.byClass)}" }
+        nav("kind-filter") {
+            attributes["aria-label"] = "Kind filter"
+            (listOf(null) + SkeletonKind.entries).forEach { kind ->
+                filter?.href(kind = kind)?.let { href ->
+                    a(href = href, classes = if (page.kind == kind) "action current" else "action") {
+                        if (page.kind == kind) attributes["aria-current"] = "page"
+                        +(kind?.let { kindLabel(it) } ?: "All kinds")
+                    }
+                }
+            }
+        }
         nav("status-filter") {
             attributes["aria-label"] = "Status filter"
             (listOf(null) + CLUSTER_STATUSES).forEach { status ->

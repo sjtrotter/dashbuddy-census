@@ -79,22 +79,25 @@ class SkeletonStore(private val db: Database, private val clock: Clock) {
         var tokensTouched = 0
         for ((fingerprint, group) in groups.toSortedMap()) {
             val first = group.first()
-            val version = first.item.platformAppVersion ?: "unknown"
+            check(group.all { it.item.kind == first.item.kind }) { "Conflicting skeleton kind" }
             val inserted = select(
-                """INSERT INTO clusters (fingerprint, platform, first_seen_day, last_seen_day) VALUES (?, ?, ?, ?)
+                """INSERT INTO clusters (fingerprint, platform, kind, first_seen_day, last_seen_day) VALUES (?, ?, ?, ?, ?)
                     ON CONFLICT (fingerprint) DO UPDATE SET
                         last_seen_day = GREATEST(clusters.last_seen_day, EXCLUDED.last_seen_day)
+                    WHERE clusters.kind = EXCLUDED.kind
                     RETURNING (xmax = 0) AS inserted""",
-                fingerprint, first.item.platform, day, day,
+                fingerprint, first.item.platform, first.item.kind.wire, day, day,
             ) { it.getBoolean("inserted") } ?: error("Missing cluster result")
             if (inserted) newClusters++
             // The cluster upsert holds its row lock, serializing this sample cap for the fingerprint.
-            samplesStored += update(
-                """INSERT INTO cluster_samples (fingerprint, platform_app_version, received_day, skeleton)
-                    SELECT ?, ?, ?, ?::jsonb WHERE (SELECT count(*) FROM cluster_samples WHERE fingerprint = ?) < 5
-                    ON CONFLICT DO NOTHING""",
-                fingerprint, version, day, first.canonicalJson, fingerprint,
-            )
+            for ((version, samples) in group.groupBy { it.item.platformAppVersion ?: "unknown" }) {
+                samplesStored += update(
+                    """INSERT INTO cluster_samples (fingerprint, platform_app_version, received_day, skeleton)
+                        SELECT ?, ?, ?, ?::jsonb WHERE (SELECT count(*) FROM cluster_samples WHERE fingerprint = ? AND platform_app_version = ?) < 5
+                        ON CONFLICT DO NOTHING""",
+                    fingerprint, version, day, samples.first().canonicalJson, fingerprint, version,
+                )
+            }
             for ((sightingVersion, occurrences) in group.groupBy { it.item.platformAppVersion ?: "unknown" }) {
                 update(
                     """INSERT INTO cluster_sightings (fingerprint, install_id, day, platform_app_version, count)

@@ -1,5 +1,7 @@
 package cloud.trotter.census.server.ops
 
+import cloud.trotter.census.contract.SkeletonKind
+
 import cloud.trotter.census.server.db.OpsCluster
 import kotlinx.html.FlowContent
 import kotlinx.html.a
@@ -41,6 +43,7 @@ object ClusterDetailHtml {
                 id = "cluster"
                 attributes["aria-labelledby"] = "cluster-heading"
                 h1 { id = "cluster-heading"; +"Cluster detail" }
+                kindChip(cluster.kind)
                 statusChip(cluster.status)
                 classChip(cluster.screenClass)
                 cluster.draftDay?.let { day -> p { +"Draft saved "; date(day) } }
@@ -54,7 +57,7 @@ object ClusterDetailHtml {
                     else -> p { +"No operator notes." }
                 }
             }
-            panel("wireframe", "Screen wireframe") {
+            if (cluster.kind == SkeletonKind.SCREEN) panel("wireframe", "Screen wireframe") {
                 val wireframe = cluster.wireframe
                 if (wireframe == null) {
                     emptyState("No trusted capture is paired with this cluster yet. A wireframe appears once a trusted install uploads a capture that names this cluster.")
@@ -104,24 +107,28 @@ object ClusterDetailHtml {
                 }
             }
             panel("samples", "Skeleton samples") {
-                p("muted") { +"Dashed labels are privacy-redacted class or ID values. Text slots show kind only." }
+                if (cluster.kind == SkeletonKind.SCREEN) p("muted") { +"Dashed labels are privacy-redacted class or ID values. Text slots show kind only." }
                 if (cluster.samples.isNullOrEmpty()) emptyState("No skeleton samples retained for this cluster.")
                 cluster.samples.orEmpty().forEachIndexed { index, sample ->
                     article("sample") {
                         h3 { +"Version ${version(sample.platformAppVersion)}" }
                         p { +"Received "; date(sample.receivedDay); +" UTC" }
-                        div("tree-wrap") {
+                        sample.notification?.let { notification ->
+                            p { +"Channel: "; +(notification.channelId?.let { safe(it) } ?: "Withheld below privacy gate") }
+                            ul { notification.slots.forEach { (field, kind) -> li { +"${field.wire}: "; chip(safe(kind), "neutral") } } }
+                        }
+                        sample.skeleton?.let { skeleton -> div("tree-wrap") {
                             attributes["role"] = "region"
                             attributes["aria-label"] = "Skeleton sample ${index + 1}"
                             attributes["tabindex"] = "0"
-                            ul("tree") { li { tree(sample.skeleton) } }
-                        }
+                            ul("tree") { li { tree(skeleton) } }
+                        } }
                     }
                 }
             }
             if (fingerprintPattern.matches(cluster.fingerprint)) {
-                a(href = "/ops/clusters/${cluster.fingerprint}/draft", classes = "action") { +"Classify & draft" }
-                if (cluster.hasDraft) a(href = "/ops/clusters/${cluster.fingerprint}/draft.json5", classes = "action") { +"Draft (JSON5)" }
+                a(href = "/ops/clusters/${cluster.fingerprint}/draft", classes = "action") { +if (cluster.kind == SkeletonKind.NOTIFICATION) "Classify" else "Classify & draft" }
+                if (cluster.kind == SkeletonKind.SCREEN && cluster.hasDraft) a(href = "/ops/clusters/${cluster.fingerprint}/draft.json5", classes = "action") { +"Draft (JSON5)" }
                 a(href = "/ops/clusters/${cluster.fingerprint}", classes = "action") { +"Cluster JSON" }
             }
         }

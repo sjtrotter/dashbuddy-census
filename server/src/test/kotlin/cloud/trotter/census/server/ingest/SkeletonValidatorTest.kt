@@ -21,6 +21,35 @@ import java.time.LocalDate
 import java.util.zip.GZIPInputStream
 
 class SkeletonValidatorTest {
+    @Test
+    fun `notification admission is explicit bounded and uses contract reason vocabulary`() {
+        val day = LocalDate.of(2026, 10, 2)
+        val raw = cloud.trotter.census.server.notificationFixture(day)
+        val enabled = cloud.trotter.census.server.notificationPolicy
+        fun verdict(value: JsonObject) = SkeletonValidator.validate(value, enabled, day)
+        fun changed(key: String, value: JsonElement) = JsonObject(raw + (key to value))
+        assertEquals(ItemVerdict.Rejected("unknown_schema"), SkeletonValidator.validate(raw, Policy(), day))
+        assertTrue(verdict(raw) is ItemVerdict.Accepted)
+        assertEquals(5, (verdict(raw) as ItemVerdict.Accepted).tokens.size)
+        for ((key, value, reason) in listOf(
+            Triple("kind", JsonPrimitive("mystery"), "unknown_skeleton_kind"),
+            Triple("kind", JsonPrimitive("screen"), "kind_schema_mismatch"),
+            Triple("channelId", JsonPrimitive("bad channel"), "bad_channel"),
+            Triple("root", JsonObject(emptyMap()), "unknown_field"),
+            Triple("slots", JsonPrimitive("PRIVATE_TEXT"), "plaintext_field"),
+            Triple("slots", JsonObject(raw.getValue("slots").jsonObject - "title"), "bad_item"),
+            Triple("slots", JsonObject(raw.getValue("slots").jsonObject + ("desc" to JsonObject(emptyMap()))), "unknown_field"),
+        )) assertEquals(ItemVerdict.Rejected(reason), verdict(changed(key, value)))
+        assertEquals(ItemVerdict.Rejected("kind_schema_mismatch"), verdict(JsonObject(raw - "kind")))
+        val slots = raw.getValue("slots").jsonObject
+        for (kind in listOf("expired", "PRIVATE_TEXT")) {
+            val invalid = JsonObject(slots + ("title" to JsonObject(mapOf("kind" to JsonPrimitive(kind)))))
+            assertEquals(ItemVerdict.Rejected("bad_kind"), verdict(changed("slots", invalid)))
+        }
+        assertTrue(SkeletonValidator.validate(raw, enabled.copy(acceptedTextKeys = emptyList()), day) is ItemVerdict.Accepted)
+        assertEquals(ItemVerdict.Rejected("too_large"), SkeletonValidator.validate(raw, enabled.copy(maxSkeletonBytes = 1), day))
+    }
+
     private val golden = GZIPInputStream(Files.newInputStream(
         Path.of(System.getProperty("census.contractDir"), "conformance", "skeletons.jsonl.gz"),
     )).bufferedReader().use { Json.parseToJsonElement(it.readLine()).jsonObject }
@@ -34,7 +63,7 @@ class SkeletonValidatorTest {
         assertTrue(verdict is ItemVerdict.Accepted)
         val accepted = verdict as ItemVerdict.Accepted
         assertEquals(golden.getValue("hashes").jsonArray.map { it.jsonPrimitive.content }.toSet(), accepted.tokens.map { it.hash }.toSet())
-        assertEquals(SkeletonSchema.measure(accepted.item).json, accepted.canonicalJson)
+        assertEquals(cloud.trotter.census.contract.CensusSkeletonSchema.measure(accepted.item).json, accepted.canonicalJson)
         assertEquals(accepted.canonicalJson.toByteArray().size, accepted.bytes)
     }
 

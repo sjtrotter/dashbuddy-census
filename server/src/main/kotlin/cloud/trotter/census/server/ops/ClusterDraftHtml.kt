@@ -1,5 +1,7 @@
 package cloud.trotter.census.server.ops
 
+import cloud.trotter.census.contract.SkeletonKind
+
 import cloud.trotter.census.contract.authoring.RuleAuthoringVocabulary as V
 import cloud.trotter.census.server.db.OpsCluster
 import cloud.trotter.census.server.db.PinnedEnvelope
@@ -20,16 +22,19 @@ object ClusterDraftHtml {
             a(href = "/ops/clusters/${cluster.fingerprint}/view", classes = "action") { +"Back to cluster" }
         }
     }) {
+        val screen = cluster.kind == SkeletonKind.SCREEN
+        val eligibleCapture = capture?.takeIf { screen }
         section("panel") {
-            h1 { +"Classify & draft" }
+            h1 { +if (screen) "Classify & draft" else "Classify notification" }
+            kindChip(cluster.kind)
             statusChip(cluster.status)
             classChip(cluster.screenClass)
             clusterFacts(cluster, detail = true)
-            p { +"Drafts quote trusted-capture text and are operator-only. The app test suite is the gate; the server only drafts." }
-            p { +"Sensitive screens usually extend the known rule in sensitive.json5. Choose a free priority." }
+            if (screen) p { +"Drafts quote trusted-capture text and are operator-only. The app test suite is the gate; the server only drafts." }
+            if (screen) p { +"Sensitive screens usually extend the known rule in sensitive.json5. Choose a free priority." }
         }
-        if (frame != null) panel("wireframe", "Screen wireframe") {
-            val renderedRows = if (capture != null) rows.take(DraftForm.MAX_ROWS).map { it.number }.toSet() else emptySet()
+        if (screen && frame != null) panel("wireframe", "Screen wireframe") {
+            val renderedRows = if (eligibleCapture != null) rows.take(DraftForm.MAX_ROWS).map { it.number }.toSet() else emptySet()
             p("muted") {
                 +"Trusted capture · received "; date(frame.receivedDay)
                 +" · install ${prefix(frame.installPrefix)} · app version ${frame.platformAppVersion?.let { version(it) } ?: "Not recorded"}"
@@ -59,22 +64,23 @@ object ClusterDraftHtml {
                         attributes["role"] = "alert"
                         errors.forEach { li { +safe(it) } }
                         // A class can be recorded without drafting a rule; a blank intent is only a drafting problem.
-                        if (capture != null && errors.any { it.contains("intent", ignoreCase = true) }) {
+                        if (eligibleCapture != null && errors.any { it.contains("intent", ignoreCase = true) }) {
                             li { +"To record the screen class without drafting a rule, use \"Save classification only\" (no intent needed)." }
                         }
                     }
                 }
                 // Browser validation must not block the pure shape refresh or a preview of an incomplete draft.
-                if (capture == null) {
+                if (eligibleCapture == null) {
                     input(type = InputType.hidden, name = "mode") { value = "classify" }
-                    p { +"A trusted capture is needed to draft. You can still classify this cluster and save notes." }
+                    p { +if (screen) "A trusted capture is needed to draft. You can still classify this cluster and save notes."
+                        else "Notification rule drafting and trusted notification captures are deferred. Classification and notes are available." }
                 } else {
-                    input(type = InputType.hidden, name = "envelopeId") { value = capture.id.toString() }
+                    input(type = InputType.hidden, name = "envelopeId") { value = eligibleCapture.id.toString() }
                 }
                 fieldSet {
                     legend { +"Classification" }
-                    choice("screenClass", "Screen class", listOf("unknown") + V.SCREEN_CLASSES, screenClass)
-                    if (capture != null) {
+                    choice("screenClass", if (screen) "Screen class" else "Classification", listOf("unknown") + V.SCREEN_CLASSES, screenClass)
+                    if (eligibleCapture != null) {
                         choice("shape", "Shape", shapes, shape)
                         textControl("intent", "Intent", state["intent"].orEmpty(), 48) { pattern = V.INTENT.pattern }
                         textControl("priority", "Priority", state["priority"] ?: "500", 3, InputType.number) { min = "1"; max = "998" }
@@ -85,7 +91,7 @@ object ClusterDraftHtml {
                     if (cluster.notesWithheld) p { +"Notes withheld below the privacy gate" }
                     else label { +"Notes"; textArea { name = "notes"; maxLength = "2000"; +safe(state["notes"] ?: cluster.notes.orEmpty()) } }
                 }
-                if (capture != null) {
+                if (eligibleCapture != null) {
                     fieldSet {
                         legend { +"Constants" }
                         p { +"Allowed names: "; +DraftForm.constantFields(shape).joinToString(", ") { it.name }.ifEmpty { "None" } }
@@ -141,7 +147,7 @@ object ClusterDraftHtml {
                         +"Preview draft"
                     }
                 }
-                if (capture == null && state["envelopeId"] != null) {
+                if (screen && eligibleCapture == null && state["envelopeId"] != null) {
                     // Preserve typed entries without exposing an ineligible capture or repinning its node numbers.
                     fieldSet {
                         legend { +"Unsaved draft entries" }
@@ -160,7 +166,7 @@ object ClusterDraftHtml {
                         attributes["inputmode"] = "numeric"; attributes["autocomplete"] = "one-time-code"
                     }
                 }
-                if (capture == null) {
+                if (eligibleCapture == null) {
                     button(type = ButtonType.submit) { +"Save classification" }
                 } else {
                     // Classification is operator knowledge independent of any rule: saving it must not require a draft.
@@ -173,7 +179,7 @@ object ClusterDraftHtml {
                 }
             }
         }
-        if (json5 != null) section("panel") {
+        if (screen && json5 != null) section("panel") {
             h2 { +"Draft preview" }
             pre("draft") { +safe(json5) }
         }
