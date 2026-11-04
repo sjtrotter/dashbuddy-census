@@ -324,6 +324,54 @@ class OpsRoutesTest {
     }
 
     @Test
+    fun `enrol outcome counts are operator-only and count every enrol answer by reason (DashBuddy #1522)`() {
+        Database.connect(config()).use { db ->
+            testApplication {
+                application { module(config(), db, clock) }
+                assertError(client.ops("/ops/enrol", token = null), 401, "unauthorized")
+                assertError(client.ops("/ops/enrol", token = "WRONG_TOKEN_SENTINEL"), 401, "unauthorized")
+                suspend fun counts(): JsonObject {
+                    val response = client.ops("/ops/enrol")
+                    assertEquals(200, response.status.value)
+                    return Json.parseToJsonElement(response.bodyAsText()).jsonObject.getValue("counts").jsonObject
+                }
+                val keys = setOf("enrolled", "unsupported_schema", "bad_request", "unauthorized", "install_exists", "revoked")
+                assertEquals(keys, counts().keys)
+                assertTrue(counts().values.all { it.jsonPrimitive.int == 0 }, "every key is present at zero")
+                val id = UUID.randomUUID().toString()
+                val key = secret(140)
+                assertEquals(200, client.enrol(id, key).status.value)
+                assertError(client.enrol(UUID.randomUUID().toString(), secret(141), schema = "foo.v9"), 422, "unsupported_schema")
+                val afterTwo = counts()
+                assertEquals(1, afterTwo.getValue("enrolled").jsonPrimitive.int)
+                assertEquals(1, afterTwo.getValue("unsupported_schema").jsonPrimitive.int)
+                assertTrue((keys - setOf("enrolled", "unsupported_schema")).all { afterTwo.getValue(it).jsonPrimitive.int == 0 })
+                // Every other answer the enrol route gives is counted under its own key.
+                assertEquals(200, client.enrol(id, key).status.value) // same key: enrolled again
+                assertError(client.enrol("malformed", key), 401, "unauthorized")
+                assertError(client.enrol(id, key, bodyId = UUID.randomUUID().toString()), 401, "unauthorized")
+                assertError(client.enrol(id, key, version = "bad version"), 400, "bad_request")
+                assertError(client.enrolSchemas(id, key, List(9) { "other.v$it" }), 400, "bad_request")
+                assertError(client.post("/v1/enroll") {
+                    header(HttpHeaders.Authorization, "Bearer $id.$key")
+                    contentType(ContentType.Application.Json)
+                    setBody("{not json")
+                }, 400, "bad_request")
+                assertError(client.enrol(id, secret(142)), 409, "install_exists")
+                val revoked = UUID.randomUUID()
+                assertEquals(200, client.enrol(revoked.toString(), key).status.value)
+                assertTrue(InstallStore(db, clock).revoke(revoked, clock.now()))
+                assertError(client.enrol(revoked.toString(), key), 401, "revoked")
+                val totals = counts()
+                assertEquals(
+                    mapOf("enrolled" to 3, "unsupported_schema" to 1, "bad_request" to 3, "unauthorized" to 2, "install_exists" to 1, "revoked" to 1),
+                    totals.mapValues { it.value.jsonPrimitive.int },
+                )
+            }
+        }
+    }
+
+    @Test
     fun `health and alarms expose counters and delivered alarms reset on UTC day change`() {
         Database.connect(config()).use { db ->
             val alarms = HealthAlarms(HealthStore(db, clock), clock, AlarmSink { })

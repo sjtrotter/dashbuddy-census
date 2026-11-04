@@ -54,7 +54,7 @@ Typed JSON decoding rejects unknown keys. Errors use `{"error":"<code>"}` withou
 | `POST /v1/nonce` | Bearer + HMAC; empty body | `200 {"nonce":"<32 lowercase hex>","expiresInSeconds":300}` |
 | `GET /v1/me` | Bearer + HMAC; empty body | `200 {"installIdPrefix":"<8 hex>","createdDay":"YYYY-MM-DD","lastSeenDay":"YYYY-MM-DD","trusted":false,"budget":{"skeletonsRemainingToday":300,"bytesRemainingToday":10485760,"resetInSeconds":43200}}` (example remaining values) |
 
-The enrollment body ID must equal the bearer's canonical lowercase UUID v4. `appVersion` is 1–64 characters from `[A-Za-z0-9+._-]`. Every requested schema ID must be accepted by policy. Secrets encode at least 32 random bytes as canonical unpadded base64url, at most 128 characters. Request bodies are capped at 1 MiB, including bodies without Content-Length.
+The enrollment body ID must equal the bearer's canonical lowercase UUID v4. `appVersion` is 1–64 characters from `[A-Za-z0-9+._-]`. `schemaIds` lists the schemas the client can produce. The server enrolls when at least one of them is in the policy's `acceptedSchemaIds` and ignores the rest; an empty list, or one with no accepted ID, is `422 unsupported_schema`. The list holds at most 8 IDs, each 1–64 characters from `[a-z0-9_.-]`; past those bounds it is `400 bad_request`. Nothing about schemas is stored at enrollment, and uploads are still checked item by item, so an ID the policy does not accept grants nothing. Clients learn what is accepted from `GET /v1/policy` and from the policy returned by enrollment (DashBuddy #1522). Secrets encode at least 32 random bytes as canonical unpadded base64url, at most 128 characters. Request bodies are capped at 1 MiB, including bodies without Content-Length.
 
 | Applies to | Status | Error |
 | --- | --- | --- |
@@ -63,8 +63,8 @@ The enrollment body ID must equal the bearer's canonical lowercase UUID v4. `app
 | Authenticated endpoints, missing/invalid signature or timestamp outside ±300 seconds | `401` | `unauthorized` |
 | Enrollment or authenticated endpoints, matching revoked credential (enrollment rejects any reuse of a revoked ID) | `401` | `revoked` |
 | Enrollment, existing ID with another key | `409` | `install_exists` |
-| Enrollment, unsupported schema | `422` | `unsupported_schema` |
-| Enrollment/rotation, invalid JSON, unknown JSON key, invalid app version or new secret | `400` | `bad_request` |
+| Enrollment, no requested schema ID is accepted by policy (including an empty list) | `422` | `unsupported_schema` |
+| Enrollment/rotation, invalid JSON, unknown JSON key, invalid app version or new secret, more than 8 schema IDs or a malformed schema ID | `400` | `bad_request` |
 | All identity endpoints, oversized body | `413` | `payload_too_large` |
 | All identity endpoints, exhausted rate bucket | `429` | `rate_limited`, with `Retry-After` seconds |
 | Unexpected failures | `500` | `internal_error` |

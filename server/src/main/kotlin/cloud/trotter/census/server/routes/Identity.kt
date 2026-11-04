@@ -44,8 +44,13 @@ import java.time.ZoneOffset
 
 private val identityJson = Json { encodeDefaults = true; explicitNulls = false }
 private val appVersionPattern = Regex("[A-Za-z0-9+._-]{1,64}")
+private val schemaIdPattern = Regex("[a-z0-9_.-]{1,64}")
+private const val MAX_ENROL_SCHEMA_IDS = 8
 
-fun Route.identityRoutes(store: InstallStore?, clock: Clock, policy: Policy, alarms: HealthAlarms? = null, authenticated: Route.() -> Unit = {}) {
+fun Route.identityRoutes(
+    store: InstallStore?, clock: Clock, policy: Policy, alarms: HealthAlarms? = null, enrolStats: EnrolStats = EnrolStats(),
+    authenticated: Route.() -> Unit = {},
+) {
     if (store == null) {
         listOf(
             HttpMethod.Post to "/v1/enroll", HttpMethod.Post to "/v1/rotate", HttpMethod.Post to "/v1/nonce",
@@ -60,30 +65,58 @@ fun Route.identityRoutes(store: InstallStore?, clock: Clock, policy: Policy, ala
         post("/v1/enroll") {
             val bearer = parseBearer(call.request.headers[HttpHeaders.Authorization])
             if (bearer == null) {
+                enrolStats.record(EnrolResult.UNAUTHORIZED)
                 call.respond(HttpStatusCode.Unauthorized, ErrorResponse("unauthorized"))
                 return@post
             }
+            // Not counted: a body too large (413) or too slow (408), answered inside readLimitedBody, and any answer
+            // given before this handler runs (a routing-level 400, the rate limiter's 429, a 500 or 503).
             val body = call.readLimitedBody() ?: return@post
-            val request = decode<EnrolRequest>(body)
+            val request = try {
+                decode<EnrolRequest>(body)
+            } catch (failure: BadRequestException) {
+                enrolStats.record(EnrolResult.BAD_REQUEST)
+                throw failure
+            }
             if (request.installId != bearer.installId.value) {
+                enrolStats.record(EnrolResult.UNAUTHORIZED)
                 call.respond(HttpStatusCode.Unauthorized, ErrorResponse("unauthorized"))
                 return@post
             }
             if (!appVersionPattern.matches(request.appVersion)) {
+                enrolStats.record(EnrolResult.BAD_REQUEST)
                 call.respond(HttpStatusCode.BadRequest, ErrorResponse("bad_request"))
                 return@post
             }
-            if (!policy.acceptedSchemaIds.containsAll(request.schemaIds)) {
+            // DashBuddy #1522: schemaIds are the schemas the client can produce. Enrol when at least one is accepted
+            // and ignore the rest; uploads are still checked per item, so the extra ids grant nothing. Nothing about
+            // schemas is stored.
+            if (request.schemaIds.size > MAX_ENROL_SCHEMA_IDS || request.schemaIds.any { !schemaIdPattern.matches(it) }) {
+                enrolStats.record(EnrolResult.BAD_REQUEST)
+                call.respond(HttpStatusCode.BadRequest, ErrorResponse("bad_request"))
+                return@post
+            }
+            if (request.schemaIds.none { it in policy.acceptedSchemaIds }) {
+                enrolStats.record(EnrolResult.UNSUPPORTED_SCHEMA)
                 call.respond(HttpStatusCode.UnprocessableEntity, ErrorResponse("unsupported_schema"))
                 return@post
             }
             when (store.enrol(bearer.installId.toUuid(), hashSecret(bearer.secret), request.appVersion)) {
-                EnrolOutcome.Created, EnrolOutcome.SameKey -> call.respond(
-                    JsonObject(identityJson.encodeToJsonElement(policy).jsonObject +
-                        ("installIdPrefix" to JsonPrimitive(bearer.installId.value.take(8)))),
-                )
-                EnrolOutcome.KeyMismatch -> call.respond(HttpStatusCode.Conflict, ErrorResponse("install_exists"))
-                EnrolOutcome.Revoked -> call.respond(HttpStatusCode.Unauthorized, ErrorResponse("revoked"))
+                EnrolOutcome.Created, EnrolOutcome.SameKey -> {
+                    enrolStats.record(EnrolResult.ENROLLED)
+                    call.respond(
+                        JsonObject(identityJson.encodeToJsonElement(policy).jsonObject +
+                            ("installIdPrefix" to JsonPrimitive(bearer.installId.value.take(8)))),
+                    )
+                }
+                EnrolOutcome.KeyMismatch -> {
+                    enrolStats.record(EnrolResult.INSTALL_EXISTS)
+                    call.respond(HttpStatusCode.Conflict, ErrorResponse("install_exists"))
+                }
+                EnrolOutcome.Revoked -> {
+                    enrolStats.record(EnrolResult.REVOKED)
+                    call.respond(HttpStatusCode.Unauthorized, ErrorResponse("revoked"))
+                }
             }
         }
     }
