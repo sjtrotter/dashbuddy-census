@@ -69,7 +69,8 @@ fun Route.identityRoutes(
                 call.respond(HttpStatusCode.Unauthorized, ErrorResponse("unauthorized"))
                 return@post
             }
-            // A body too large (413) or too slow (408) is answered inside readLimitedBody and is not counted.
+            // Not counted: a body too large (413) or too slow (408), answered inside readLimitedBody, and any answer
+            // given before this handler runs (a routing-level 400, the rate limiter's 429, a 500 or 503).
             val body = call.readLimitedBody() ?: return@post
             val request = try {
                 decode<EnrolRequest>(body)

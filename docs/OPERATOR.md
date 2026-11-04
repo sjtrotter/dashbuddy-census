@@ -213,7 +213,7 @@ Vocabulary hashes are available only on the dedicated JSON vocabulary surface.
 | `GET /ops/installs?limit=` | Prefixes, dates, trust/revocation flags, last app version, and whether an attestation verdict exists. Default 50, maximum 200. |
 | `GET /ops/health?days=7` | `fleet` rows and per-install prefix/day/platform/version counters; maximum 90 days. |
 | `GET /ops/alarms` | Today's successfully delivered alarms and process-local `AlarmStats` counts. |
-| `GET /ops/enrol` | `{"counts": {...}}`: process-local enrol outcome counts by reason (`enrolled`, `unsupported_schema`, `bad_request`, `unauthorized`, `install_exists`, `revoked`), every key present, zero included; reset on restart. Counts only, no identities. A `413`, `408` or `429` enrol answer is not counted. |
+| `GET /ops/enrol` | `{"counts": {...}}`: process-local enrol outcome counts by reason (`enrolled`, `unsupported_schema`, `bad_request`, `unauthorized`, `install_exists`, `revoked`), every key present, zero included; reset on restart. Counts only, no identities. Not counted: a `413` or `408` from the body reader, and any answer given before the enrol handler runs (a routing-level `400` such as a malformed query escape, the rate limiter's `429`, a `500` or `503`). |
 | `GET /ops/ledger?day=YYYY-MM-DD` | Per-install prefix counters and totals; defaults to today. `batches` is a count, never the batch IDs. |
 | `GET /ops/vocabulary/queue?limit=` | Hash, kind, distinct non-trusted install count, first/last day for eligible hashes absent from vocabulary; default 50, maximum 200. |
 
