@@ -13,6 +13,9 @@ RUN ./gradlew :server:installDist --no-daemon -PcensusContractPath=${CENSUS_CONT
 
 # TODO(S6): pin by digest via Dependabot
 FROM eclipse-temurin:21-jre-alpine AS runtime
+# The base tag can lag Alpine security fixes (libexpat 2.9.0 failed the image scan on 2026-11-04), so take the
+# current Alpine packages at build time.
+RUN apk upgrade --no-cache
 RUN addgroup -g 10001 census && adduser -D -u 10001 -G census census \
     && mkdir -p /var/spool/census-alarms \
     && chown 10001:10001 /var/spool/census-alarms \
