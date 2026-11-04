@@ -11,6 +11,7 @@ import cloud.trotter.census.server.ops.ClustersPageHtml
 import cloud.trotter.census.server.ops.OpsLogging
 import cloud.trotter.census.server.ops.isOpsHtmlPath
 import cloud.trotter.census.server.ops.isOpsPath
+import cloud.trotter.census.server.routes.EnrolStats
 import cloud.trotter.census.server.routes.envelopeRoutes
 import cloud.trotter.census.server.routes.healthReportRoutes
 import cloud.trotter.census.server.routes.healthRoutes
@@ -50,6 +51,8 @@ fun Application.module(
     config: Config, db: Database?, clock: Clock = SystemClock, alarmEvaluator: HealthAlarms? = null,
     policy: Policy = config.policy(),
     lifecycle: cloud.trotter.census.server.jobs.LifecycleReport? = null,
+    // One process-local counter of enrol outcomes, shared by the enrol route and /ops/enrol.
+    enrolStats: EnrolStats = EnrolStats(),
 ) {
     install(ContentNegotiation) {
         json(
@@ -148,8 +151,8 @@ fun Application.module(
         val envelopes = db?.let { EnvelopeStore(it, clock) }
         val health = db?.let { HealthStore(it, clock) }
         val alarms = alarmEvaluator ?: health?.let { HealthAlarms(it, clock) }
-        opsRoutes(config, db?.let { OpsStore(it, clock, policy) }, alarms, clock, policy, lifecycle = lifecycle)
-        identityRoutes(store, clock, policy, alarms) {
+        opsRoutes(config, db?.let { OpsStore(it, clock, policy) }, alarms, clock, policy, lifecycle = lifecycle, enrolStats = enrolStats)
+        identityRoutes(store, clock, policy, alarms, enrolStats) {
             if (store != null && skeletons != null) skeletonRoutes(store, skeletons, clock, policy)
             if (envelopes != null) envelopeRoutes(envelopes, clock, policy)
             if (health != null && alarms != null) healthReportRoutes(health, alarms, clock, policy)

@@ -61,6 +61,7 @@ fun Route.opsRoutes(
     sessions: OpsSessions = OpsSessions(),
     replay: TotpReplay = TotpReplay(),
     lifecycle: cloud.trotter.census.server.jobs.LifecycleReport? = null,
+    enrolStats: EnrolStats = EnrolStats(),
 ) {
     route("/ops") {
         install(OpsAuth) {
@@ -147,6 +148,8 @@ fun Route.opsRoutes(
             }
             get("/health") { call.respond(store.health(call.bound("days", 7, 90))) }
             get("/alarms") { call.respond(opsAlarms(alarms)) }
+            // DashBuddy #1522: a refused enrolment creates no install, so these counts are where it shows.
+            get("/enrol") { call.respond(opsEnrol(enrolStats)) }
             get("/ledger") {
                 val value = call.request.queryParameters["day"]
                 val day = if (value == null) clock.today() else try {
@@ -198,6 +201,10 @@ internal fun opsAlarms(alarms: HealthAlarms): JsonObject = buildJsonObject {
         put("ruleIds", JsonArray(alarm.ruleIds.map { JsonPrimitive(it) }))
     } }))
     put("counts", JsonObject(alarms.stats.snapshot().mapValues { JsonPrimitive(it.value) }))
+}
+
+internal fun opsEnrol(stats: EnrolStats): JsonObject = buildJsonObject {
+    put("counts", JsonObject(stats.snapshot().mapValues { JsonPrimitive(it.value) }))
 }
 
 private fun badRequest(): Nothing = throw BadRequestException("Invalid operator request")

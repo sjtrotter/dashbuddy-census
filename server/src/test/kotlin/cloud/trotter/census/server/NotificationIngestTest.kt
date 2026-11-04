@@ -173,6 +173,21 @@ class NotificationIngestTest {
         }
     }
 
+    @Test fun `a two-schema enrolment while notifications are off still has its notification items refused per item (DashBuddy #1522)`() {
+        Database.connect(config()).use { db -> testApplication {
+            application { module(config().copy(notificationsEnabled = false), db, clock) }
+            val id = UUID.randomUUID().toString(); val key = secret(124)
+            val both = listOf(SkeletonSchema.SCHEMA_ID, NotificationSkeletonSchema.SCHEMA_ID)
+            assertEquals(200, client.enrolSchemas(id, key, both).status.value)
+            // Declaring the notification schema at enrolment grants nothing: admission still checks each item.
+            val items = List(4) { screen() } + notificationFixture(day)
+            assertEquals(200, client.signed(clock, id, key, HttpMethod.Post, "/v1/skeletons", batch("off-both", items)).status.value)
+            val ledger = requireNotNull(InstallStore(db, clock).ledgerFor(UUID.fromString(id), day))
+            assertEquals(mapOf("unknown_schema" to 1), ledger.rejectedByReason)
+            assertEquals(0, sql { it.select("SELECT count(*) FROM clusters WHERE kind = 'notification'") { row -> row.getInt(1) } })
+        } }
+    }
+
     private fun screen(): JsonObject {
         val root = UiSkeletonNodeDto(className = "android.widget.Button", text = mapOf("text" to TextSlot("0123456789abcdef", "words:1")))
         val raw = """{"schemaId":"uinode.skeleton.v1","hashDomain":1,"filterRev":1,"fingerprint":"${CensusFingerprint.of(root)}","platform":"doordash","platformAppVersion":"8.0","engineVersion":1,"day":"$day","root":${SkeletonSchema.json.encodeToString(UiSkeletonNodeDto.serializer(), root)}}"""

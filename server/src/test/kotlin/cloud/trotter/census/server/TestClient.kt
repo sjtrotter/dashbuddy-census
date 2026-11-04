@@ -12,6 +12,9 @@ import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpMethod
 import io.ktor.http.contentType
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import org.junit.jupiter.api.Assertions.assertEquals
 import java.util.Base64
 
@@ -20,6 +23,17 @@ internal suspend fun HttpClient.enrol(id: String, secret: String, schema: String
         header(HttpHeaders.Authorization, "Bearer $id.$secret")
         contentType(ContentType.Application.Json)
         setBody("{\"installId\":\"$bodyId\",\"appVersion\":\"$version\",\"schemaIds\":[\"$schema\"]}")
+    }
+
+/** DashBuddy #1522: enrol declaring a whole list of schema ids, as the app does. */
+internal suspend fun HttpClient.enrolSchemas(id: String, secret: String, schemaIds: List<String>, version: String = "1.0"): HttpResponse =
+    post("/v1/enroll") {
+        header(HttpHeaders.Authorization, "Bearer $id.$secret")
+        contentType(ContentType.Application.Json)
+        setBody(JsonObject(mapOf(
+            "installId" to JsonPrimitive(id), "appVersion" to JsonPrimitive(version),
+            "schemaIds" to JsonArray(schemaIds.map { JsonPrimitive(it) }),
+        )).toString())
     }
 
 internal suspend fun HttpClient.signed(

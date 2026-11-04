@@ -3,6 +3,9 @@ package cloud.trotter.census.server
 import ch.qos.logback.classic.Logger
 import ch.qos.logback.classic.spi.ILoggingEvent
 import ch.qos.logback.core.read.ListAppender
+import cloud.trotter.census.contract.CensusSkeletonSchema
+import cloud.trotter.census.contract.NotificationSkeletonSchema
+import cloud.trotter.census.contract.SkeletonSchema
 import cloud.trotter.census.server.auth.AdmissionLimiter
 import cloud.trotter.census.server.today
 import cloud.trotter.census.server.auth.AuthStats
@@ -43,6 +46,8 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -281,6 +286,90 @@ class IdentityRoutesTest {
                 val response = client.enrol(UUID.randomUUID().toString(), secret(5))
                 assertError(response, 429, "rate_limited")
                 assertNotNull(response.headers[HttpHeaders.RetryAfter])
+            }
+        }
+    }
+
+    @Test
+    fun `the two-schema request enrols with notifications off, on and off again and returns the advertised policy (DashBuddy #1522)`() {
+        val clock = FixedClock()
+        val both = listOf(SkeletonSchema.SCHEMA_ID, NotificationSkeletonSchema.SCHEMA_ID)
+        val offId = UUID.randomUUID().toString()
+        val onId = UUID.randomUUID().toString()
+        val key = secret(41)
+        Database.connect(config()).use { db ->
+            val store = InstallStore(db, clock)
+            for ((phase, enabled) in listOf(false, true, false).withIndex()) testApplication {
+                application { module(config().copy(notificationsEnabled = enabled), db, clock) }
+                val published = Json.parseToJsonElement(client.get("/v1/policy").bodyAsText()).jsonObject
+                assertEquals(
+                    if (enabled) both else listOf(SkeletonSchema.SCHEMA_ID),
+                    published.getValue("acceptedSchemaIds").jsonArray.map { it.jsonPrimitive.content },
+                )
+                // Phase 0 enrols a fresh install while off; phases 1 and 2 enrol the same install while on, then off.
+                val id = if (phase == 0) offId else onId
+                val enrol = client.enrolSchemas(id, key, both)
+                assertEquals(HttpStatusCode.OK, enrol.status)
+                val returned = Json.parseToJsonElement(enrol.bodyAsText()).jsonObject
+                assertEquals(id.take(8), returned.getValue("installIdPrefix").jsonPrimitive.content)
+                // The enrol response carries exactly the policy GET /v1/policy advertises.
+                assertEquals(published, JsonObject(returned - "installIdPrefix"))
+                if (phase == 2) {
+                    // The re-enrolment after the flag went off again hit the same row with the same key (SameKey).
+                    assertEquals(hashSecret(key), requireNotNull(store.lookup(UUID.fromString(onId))).keyHash)
+                    assertEquals(EnrolOutcome.SameKey, store.enrol(UUID.fromString(onId), hashSecret(key), "1.0"))
+                    assertError(client.enrolSchemas(onId, secret(42), both), 409, "install_exists")
+                }
+            }
+            runBlocking { assertNotNull(store.lookup(UUID.fromString(offId))) }
+        }
+    }
+
+    @Test
+    fun `schema lists with no accepted id are 422 and lists past the bounds are 400 (DashBuddy #1522)`() {
+        val clock = FixedClock()
+        val key = secret(43)
+        Database.connect(config()).use { db ->
+            val store = InstallStore(db, clock)
+            testApplication {
+                application { module(config(), db, clock) }
+                val refused = UUID.randomUUID().toString()
+                assertError(client.enrolSchemas(refused, key, emptyList()), 422, "unsupported_schema")
+                assertError(client.enrolSchemas(refused, key, listOf("foo.v9")), 422, "unsupported_schema")
+                // Notifications are off by default, so the notification id alone shares nothing with the policy.
+                assertError(client.enrolSchemas(refused, key, listOf(NotificationSkeletonSchema.SCHEMA_ID)), 422, "unsupported_schema")
+                val outOfBounds = listOf(
+                    listOf(SkeletonSchema.SCHEMA_ID) + List(8) { "other.v$it" }, // 9 ids
+                    listOf(SkeletonSchema.SCHEMA_ID, "a".repeat(65)),
+                    listOf(SkeletonSchema.SCHEMA_ID, "Uinode.skeleton.v1"),
+                    listOf(SkeletonSchema.SCHEMA_ID, "uinode skeleton.v1"),
+                    listOf(SkeletonSchema.SCHEMA_ID, ""),
+                )
+                // The bounds are checked before the overlap, so an accepted id does not rescue an oversized list.
+                for (ids in outOfBounds) assertError(client.enrolSchemas(refused, key, ids), 400, "bad_request")
+                assertNull(store.lookup(UUID.fromString(refused)), "a refused enrolment creates no install")
+                // Eight ids, one accepted and one at the 64-character limit, are inside the bounds: the rest are ignored.
+                val accepted = UUID.randomUUID().toString()
+                val eight = listOf(SkeletonSchema.SCHEMA_ID, "a".repeat(64)) + List(6) { "other.v$it" }
+                assertEquals(HttpStatusCode.OK, client.enrolSchemas(accepted, key, eight).status)
+                assertNotNull(store.lookup(UUID.fromString(accepted)))
+            }
+        }
+    }
+
+    @Test
+    fun `the contract's supported schema ids enrol against the default policy`() {
+        // This is the test that would have caught DashBuddy #1522: the app declares every schema the contract can
+        // build, and the server's default policy (notifications off) refused that list, so a reinstalled phone could
+        // never enrol.
+        val clock = FixedClock()
+        val defaults = config()
+        assertFalse(defaults.notificationsEnabled)
+        Database.connect(defaults).use { db ->
+            testApplication {
+                application { module(defaults, db, clock) }
+                val id = UUID.randomUUID().toString()
+                assertEquals(HttpStatusCode.OK, client.enrolSchemas(id, secret(44), CensusSkeletonSchema.SUPPORTED_SCHEMA_IDS).status)
             }
         }
     }
