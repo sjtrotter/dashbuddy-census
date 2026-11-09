@@ -22,7 +22,7 @@ jobs:
             # (workflow pin DASHBUDDY_CONTRACT_SHA — bump deliberately).
             - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
               with:
-                  repository: sjtrotter/DashBuddy
+                  repository: sjtrotter/gig.log
                   ref: ${{ env.DASHBUDDY_CONTRACT_SHA }}
                   path: DashBuddy
                   persist-credentials: false
