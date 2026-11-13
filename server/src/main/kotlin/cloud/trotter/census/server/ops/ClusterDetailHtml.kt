@@ -106,6 +106,23 @@ object ClusterDetailHtml {
                     }
                 }
             }
+            panel("slots", "Slot constancy") {
+                p("muted") {
+                    +"Each slot's class per app version and filter revision, from installs counted within one epoch (trusted and quarantined installs excluded). Constant is candidate chrome, never proof; regional and varying slots hold values."
+                }
+                val variants = cluster.slots.orEmpty()
+                if (variants.isEmpty()) emptyState("No slot sightings counted for this cluster yet.")
+                variants.forEach { reading ->
+                    val variant = reading.variant
+                    dataTable(
+                        "Version ${version(variant.platformAppVersion)} · filter revision ${number(variant.filterRev)}",
+                        listOf("Slot", "Class", "Installs", "Distinct hashes"),
+                        reading.slots.map { slot ->
+                            listOf(cell { code { +safe(slot.slot) } }, cell { slotClassChip(slot.slotClass) }, numeric(slot.installs), numeric(slot.hashes))
+                        },
+                    )
+                }
+            }
             panel("samples", "Skeleton samples") {
                 if (cluster.kind == SkeletonKind.SCREEN) p("muted") {
                     +"Dashed labels are privacy-redacted class or ID values. Text slots show kind only, or the value format for a shape. Click-action and hidden flags appear on v2 samples only."

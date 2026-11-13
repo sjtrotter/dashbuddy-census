@@ -40,6 +40,9 @@ enum class TagPurpose(val label: String) {
 
     /** Per-install health: no object, so the alarms can read one install's own history within the epoch. */
     HEALTH("health"),
+
+    /** A slot sighting (#80): the object is the whole row identity, value included ([cloud.trotter.census.server.db.SlotObject]). */
+    SLOT("slot"),
 }
 
 /**

@@ -7,6 +7,7 @@ import cloud.trotter.census.server.db.InstallStore
 import cloud.trotter.census.server.db.OpsStore
 import cloud.trotter.census.server.db.PauseStore
 import cloud.trotter.census.server.db.SkeletonStore
+import cloud.trotter.census.server.db.SlotStore
 import cloud.trotter.census.server.jobs.HealthAlarms
 import cloud.trotter.census.server.ops.ClustersPageHtml
 import cloud.trotter.census.server.ops.OpsLogging
@@ -20,6 +21,7 @@ import cloud.trotter.census.server.routes.identityRoutes
 import cloud.trotter.census.server.routes.opsRoutes
 import cloud.trotter.census.server.routes.policyRoutes
 import cloud.trotter.census.server.routes.skeletonRoutes
+import cloud.trotter.census.server.routes.slotClassRoutes
 import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
@@ -148,7 +150,8 @@ fun Application.module(
         healthRoutes(db)
         policyRoutes(policy)
         val store = db?.let { InstallStore(it, clock) }
-        val skeletons = db?.let { SkeletonStore(it, clock) }
+        val skeletons = db?.let { SkeletonStore(it, clock, policy.slotConstancy.maxSlotsPerSkeleton) }
+        val slots = db?.let { SlotStore(it, clock, policy) }
         val envelopes = db?.let { EnvelopeStore(it, clock) }
         val health = db?.let { HealthStore(it, clock, policy.retention.healthDailyDays) }
         val pause = db?.let { PauseStore(it, clock) }
@@ -156,6 +159,7 @@ fun Application.module(
         opsRoutes(config, db?.let { OpsStore(it, clock, policy) }, alarms, clock, policy, lifecycle = lifecycle, enrolStats = enrolStats, pause = pause)
         identityRoutes(store, clock, policy, alarms, enrolStats) {
             if (store != null && skeletons != null && pause != null) skeletonRoutes(store, skeletons, clock, policy, pause)
+            if (slots != null) slotClassRoutes(slots, policy)
             if (envelopes != null) envelopeRoutes(envelopes, clock, policy)
             if (health != null && alarms != null && pause != null) healthReportRoutes(health, alarms, clock, policy, pause)
         }
@@ -164,7 +168,7 @@ fun Application.module(
 
 private val LOGGABLE_PATHS = setOf(
     "/healthz", "/readyz", "/v1/policy", "/v1/enroll", "/v1/rotate", "/v1/nonce", "/v1/installs/me", "/v1/installs/me/data", "/v1/me", "/v1/skeletons",
-    "/v1/envelopes", "/v1/health", "/ops",
+    "/v1/envelopes", "/v1/health", "/v1/slot-classes", "/ops",
 )
 
 @Serializable

@@ -27,7 +27,36 @@ data class Policy(
     val acceptedHashDomains: List<Int> = listOf(1),
     val retention: Retention = Retention(),
     val hashDomain: String = ContractCompatibility.HASH_DOMAIN,
+    val slotConstancy: SlotConstancyPolicy = SlotConstancyPolicy(),
 )
+
+/**
+ * The per-slot constancy thresholds (#80, ADR-0011 §14), in whole percent of the installs that saw the slot within one
+ * epoch. A slot below [Policy.k] installs is `unknown` whatever these say. The order the classes are tested in lives
+ * in [SlotConstancy.classify].
+ */
+@Serializable
+data class SlotConstancyPolicy(
+    // A backstop firing on one install in ten means the slot sometimes holds protected text: never offered as chrome.
+    val withheldPercent: Int = 10,
+    // Most installs see a value format (money, a time) here: a parse field, never vocabulary.
+    val shapePercent: Int = 51,
+    // One hash on nine installs in ten, and on at least k of them, is candidate chrome; a single stray value is allowed.
+    val constantPercent: Int = 90,
+    // A hash on three installs is shared (a store or a zone), not one dasher's customer, which two dashers rarely share.
+    val regionalMinInstalls: Int = 3,
+    // Several shared values make a slot regional; one shared value beside noise is not enough.
+    val regionalMinValues: Int = 2,
+    // The shared values must cover half the slot's installs, or the slot is mostly one-off values.
+    val regionalPercent: Int = 50,
+    // Ingest records at most this many slots of one skeleton, in tree order; a real screen has a few hundred at most.
+    val maxSlotsPerSkeleton: Int = 1024,
+) {
+    init {
+        require(listOf(withheldPercent, shapePercent, constantPercent, regionalPercent).all { it in 1..100 })
+        require(regionalMinInstalls >= 2 && regionalMinValues >= 2 && maxSlotsPerSkeleton > 0)
+    }
+}
 
 /**
  * Half-open UTC retention deadlines, enforced on reads and by lifecycle sweeps. #79 (council round 3): per-install

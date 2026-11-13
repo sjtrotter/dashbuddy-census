@@ -546,7 +546,8 @@ class InstallStore(private val db: Database, private val clock: Clock) {
          * (#86), the rest by `install_id`. `PublicInstallsTest` fails when a table that can hold the install is missing.
          */
         val WITHDRAWAL_TABLES: List<String> = listOf(
-            "trusted_envelopes", "health_daily", "token_sightings_v5", "cluster_sightings_v5", "ingest_ledger", "nonces", "installs",
+            "trusted_envelopes", "health_daily", "token_sightings_v5", "cluster_sightings_v5", "slot_sightings", "ingest_ledger", "nonces",
+            "installs",
         )
 
         /** The content tables keyed by epoch tags instead of the install id (#86). */

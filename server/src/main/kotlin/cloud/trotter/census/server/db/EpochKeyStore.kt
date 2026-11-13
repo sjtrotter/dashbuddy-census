@@ -117,6 +117,7 @@ internal enum class TaggedTable(val table: String, val purpose: TagPurpose, priv
         "SELECT DISTINCT hash_domain::text || ':' || filter_rev::text || ':' || token_hash FROM token_sightings_v5 WHERE epoch = ?"),
     CLUSTERS("cluster_sightings_v5", TagPurpose.CLUSTER,
         "SELECT DISTINCT fingerprint::text FROM cluster_sightings_v5 WHERE epoch = ?"),
+    SLOTS("slot_sightings", TagPurpose.SLOT, "SELECT DISTINCT ${SlotObject.SQL} FROM slot_sightings WHERE epoch = ?"),
     ;
 
     /**
@@ -164,18 +165,18 @@ internal fun Connection.forInstallTags(
 }
 
 /**
- * Deletes [installId]'s token and cluster sightings under every key in [keys] (#86): withdrawal, data deletion and
+ * Deletes [installId]'s token, cluster and slot (#80) sightings under every key in [keys] (#86): withdrawal, data deletion and
  * revocation. The caller holds the install row lock, so no new sighting of it can appear meanwhile.
  */
 internal fun Connection.deleteSightings(keys: List<EpochKey>, installId: UUID): Map<String, Int> =
-    listOf(TaggedTable.TOKENS, TaggedTable.CLUSTERS).associate { table ->
+    listOf(TaggedTable.TOKENS, TaggedTable.CLUSTERS, TaggedTable.SLOTS).associate { table ->
         table.table to forInstallTags(keys, table, installId,
             "DELETE FROM ${table.table} WHERE epoch = ? AND install_tag = ANY(?::bpchar[])")
     }
 
 /** Marks [installId]'s sightings under [keys] trusted or not, with the installs row in the same transaction (#86). */
 internal fun Connection.markSightingsTrusted(keys: List<EpochKey>, installId: UUID, trusted: Boolean): Int =
-    listOf(TaggedTable.TOKENS, TaggedTable.CLUSTERS).sumOf { table ->
+    listOf(TaggedTable.TOKENS, TaggedTable.CLUSTERS, TaggedTable.SLOTS).sumOf { table ->
         forInstallTags(keys, table, installId,
             "UPDATE ${table.table} SET trusted = ? WHERE epoch = ? AND install_tag = ANY(?::bpchar[])") { epoch, tags ->
             arrayOf(trusted, epoch, tags)

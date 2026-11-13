@@ -34,14 +34,16 @@ class EpochPseudonymTest : LifecycleTestDatabase() {
         }
         rows("token_sightings_v5", "SELECT epoch, install_tag, hash_domain || ':' || filter_rev || ':' || token_hash FROM token_sightings_v5") +
             rows("cluster_sightings_v5", "SELECT epoch, install_tag, fingerprint FROM cluster_sightings_v5") +
-            rows("health_daily", "SELECT epoch, install_tag, '' FROM health_daily")
+            rows("health_daily", "SELECT epoch, install_tag, '' FROM health_daily") +
+            rows("slot_sightings", "SELECT epoch, install_tag, ${SlotObject.SQL} FROM slot_sightings")
     }
 
     private fun Connection.storedKeys(): List<EpochKey> = prepareStatement("SELECT epoch, wrapped FROM epoch_keys").use { statement ->
         statement.executeQuery().use { rows -> buildList { while (rows.next()) add(EpochKey.unwrap(testKeying, rows.getInt(1), rows.getBytes(2))) } }
     }
 
-    private val purposes = mapOf("token_sightings_v5" to TagPurpose.TOKEN, "cluster_sightings_v5" to TagPurpose.CLUSTER, "health_daily" to TagPurpose.HEALTH)
+    private val purposes = mapOf("token_sightings_v5" to TagPurpose.TOKEN, "cluster_sightings_v5" to TagPurpose.CLUSTER,
+        "health_daily" to TagPurpose.HEALTH, "slot_sightings" to TagPurpose.SLOT)
 
     /** Which of [installs] each row belongs to, by recomputing every tag under every key the database still holds. */
     private fun owners(rows: List<Row>, installs: List<UUID>): Map<Row, UUID?> = sql { connection ->
@@ -152,6 +154,13 @@ class EpochPseudonymTest : LifecycleTestDatabase() {
             }
             "cluster_sightings_v5" -> connection.update("""INSERT INTO cluster_sightings_v5 (fingerprint, epoch, install_tag, trusted, day, platform_app_version, hash_domain, filter_rev)
                 VALUES (?, ?, ?, false, ?, 'restored', 1, 1) ON CONFLICT DO NOTHING""", row.objectKey, row.epoch, row.tag, day)
+            "slot_sightings" -> {
+                val (fingerprint, domain, revision, slot, value) = row.objectKey.split(':', limit = 6)
+                val version = row.objectKey.split(':', limit = 6)[5]
+                connection.update("""INSERT INTO slot_sightings (fingerprint, platform_app_version, hash_domain, filter_rev, slot, value, epoch,
+                    install_tag, trusted, last_day) VALUES (?, ?, ?, ?, ?, ?, ?, ?, false, ?) ON CONFLICT DO NOTHING""",
+                    fingerprint, version, domain.toInt(), revision.toInt(), slot, value, row.epoch, row.tag, day)
+            }
             else -> connection.update("""INSERT INTO health_daily (epoch, install_tag, day, platform, platform_app_version, admitted, unknown, trips, rule_counts)
                 VALUES (?, ?, ?, 'doordash', 'restored', 1, 0, 0, '{}') ON CONFLICT DO NOTHING""", row.epoch, row.tag, day)
         }

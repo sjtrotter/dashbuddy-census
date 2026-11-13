@@ -266,6 +266,10 @@ class WithdrawalReplayTest {
         val cluster = connection.testTag(TagPurpose.CLUSTER, id, fingerprint, day)
         connection.update("INSERT INTO cluster_sightings_v5 (fingerprint, epoch, install_tag, trusted, day, platform_app_version, hash_domain, filter_rev) VALUES (?, ?, ?, false, ?, '1.0', 1, 1)",
             fingerprint, cluster.epoch, cluster.tag, day)
+        // #80: one slot sighting, tagged like ingest tags it.
+        val slot = connection.testTag(TagPurpose.SLOT, id, SlotObject.of(fingerprint, 1, 1, "root/text", "present", "1.0"), day)
+        connection.update("INSERT INTO slot_sightings (fingerprint, platform_app_version, hash_domain, filter_rev, slot, value, epoch, install_tag, trusted, last_day) VALUES (?, '1.0', 1, 1, 'root/text', 'present', ?, ?, false, ?)",
+            fingerprint, slot.epoch, slot.tag, day)
         connection.update("INSERT INTO ingest_ledger (install_id, day) VALUES (?, ?)", id, day)
         connection.update("INSERT INTO nonces (nonce, install_id, issued_at) VALUES (?, ?, ?)", UUID.randomUUID().toString().replace("-", ""), id, t0.atOffset(ZoneOffset.UTC))
     }
