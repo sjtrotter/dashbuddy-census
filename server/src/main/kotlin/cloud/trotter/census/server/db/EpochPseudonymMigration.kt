@@ -33,6 +33,8 @@ import java.util.UUID
  *   an install's evidence ([InstallStore.revoke]).
  * - The pre-V5 tables (`token_sightings`, `cluster_sightings`, `vocabulary`), empty since the V5 cutover, are dropped.
  * - The resulting shape is checked by `db/lifecycle-shape.sql`, which startup re-runs.
+ *
+ * It first checks the configured pepper against the one V7 recorded, so a wrong pepper changes nothing.
  */
 class EpochPseudonymMigration(private val keying: HashKeying, private val clock: Clock) : JavaMigration {
     override fun getVersion(): MigrationVersion = MigrationVersion.fromVersion("8")
@@ -42,6 +44,10 @@ class EpochPseudonymMigration(private val keying: HashKeying, private val clock:
 
     override fun migrate(context: Context) {
         val connection = context.connection
+        // Before any change: the configured pepper must be the one V7 keyed this database under. Startup checks it
+        // only after every migration, and V8 would otherwise wrap its keys under a wrong pepper and drop the install
+        // ids in the same commit, stranding the data. A mismatch rolls the whole migration back.
+        KeyedHashStorageMigration.verify(connection, keying)
         val today = clock.today()
         connection.execute(
             """CREATE TABLE epoch_keys (

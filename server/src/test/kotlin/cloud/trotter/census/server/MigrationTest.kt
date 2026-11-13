@@ -240,6 +240,44 @@ class MigrationTest {
     }
 
     @Test
+    fun `a populated V7 database under another pepper refuses V8 and stays exactly as it was`() {
+        val schema = "epoch_wrong_pepper"
+        val today = java.time.LocalDate.of(2026, 10, 6)
+        val clock = object : Clock { override fun now(): java.time.Instant = today.atTime(12, 0).toInstant(java.time.ZoneOffset.UTC) }
+        fun flyway(keying: HashKeying) = Database.flyway(postgres.jdbcUrl, postgres.username, postgres.password, keying, clock)
+            .schemas(schema).defaultSchema(schema)
+        flyway(testKeying).target("7").load().migrate()
+        val install = java.util.UUID.fromString("00000000-0000-4000-8000-000000000091")
+        DriverManager.getConnection(postgres.jdbcUrl, postgres.username, postgres.password).use { connection ->
+            connection.createStatement().use { it.execute("SET search_path TO $schema") }
+            fun run(sql: String, vararg args: Any?) = connection.prepareStatement(sql).use { statement ->
+                args.forEachIndexed { index, value -> statement.setObject(index + 1, value) }
+                statement.executeUpdate()
+            }
+            run("INSERT INTO installs (install_id, key_hash, created_day, last_seen_day) VALUES (?, repeat('a',64), ?, ?)", install, today, today)
+            run("INSERT INTO token_sightings_v5 VALUES ('1111111111111111', ?, ?, ?, 'words:1', 1, 1)", install, today, today)
+            run("INSERT INTO health_daily (install_id, day, platform, platform_app_version, admitted, unknown, trips, rule_counts) VALUES (?, ?, 'doordash', '8.0', 1, 0, 0, '{}')", install, today)
+            val before = connection.dumpRows(schema).toSet()
+
+            // #86 (Sol S1): V8 checks the pepper V7 recorded before changing anything, so a wrong one rolls it all back.
+            val failure = runCatching { flyway(HashKeying.fromHex("ab".repeat(32))).load().migrate() }.exceptionOrNull()
+            assertTrue(generateSequence(failure) { it.cause }.any { it is HashPepperMismatchException })
+            fun strings(sql: String) = connection.createStatement().use { statement ->
+                statement.executeQuery(sql).use { rows -> buildList { while (rows.next()) add(rows.getString(1)) } }
+            }
+            assertEquals(listOf("7"), strings("SELECT max(version::int)::text FROM flyway_schema_history WHERE success"))
+            assertEquals(listOf("0"), strings("SELECT count(*)::text FROM flyway_schema_history WHERE version = '8'"))
+            assertEquals(emptyList<String>(), strings("SELECT table_name FROM information_schema.tables WHERE table_schema = '$schema' AND table_name = 'epoch_keys'"))
+            assertEquals(listOf("health_daily", "token_sightings_v5"), strings("""SELECT table_name FROM information_schema.columns
+                WHERE table_schema = '$schema' AND column_name = 'install_id' AND table_name IN ('token_sightings_v5', 'health_daily') ORDER BY table_name"""))
+            assertEquals(before, connection.dumpRows(schema).toSet())
+
+            assertEquals(1, flyway(testKeying).load().migrate().migrationsExecuted)
+            assertEquals(1L, connection.installRows("token_sightings_v5", install, today))
+        }
+    }
+
+    @Test
     fun `V6 with legacy samples upgrades through V7 and the cutover keeps a valid one and removes an invalid one`() = kotlinx.coroutines.runBlocking {
         val day = java.time.LocalDate.of(2026, 10, 6)
         val config = Config.fromEnv(testEnvironment() + mapOf("DATABASE_URL" to schemaUrl("legacy_upgrade"),
