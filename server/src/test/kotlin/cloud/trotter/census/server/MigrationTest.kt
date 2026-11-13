@@ -1,11 +1,24 @@
 package cloud.trotter.census.server
 
+import cloud.trotter.census.contract.CensusFingerprint
+import cloud.trotter.census.contract.CensusHash
+import cloud.trotter.census.contract.CensusSkeletonSchema
+import cloud.trotter.census.contract.SkeletonSchema
+import cloud.trotter.census.contract.TextSlot
+import cloud.trotter.census.contract.UiSkeletonDto
+import cloud.trotter.census.contract.UiSkeletonNodeDto
+import cloud.trotter.census.server.db.HashPepperMismatchException
+import cloud.trotter.census.server.db.KeyedHashStorageMigration
+import cloud.trotter.census.server.ingest.ItemVerdict
+import cloud.trotter.census.server.ingest.atRest
 import io.ktor.client.request.get
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.testing.testApplication
 import org.flywaydb.core.Flyway
+import kotlinx.serialization.json.Json
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.condition.EnabledIf
@@ -73,6 +86,85 @@ class MigrationTest {
     }
 
     @Test
+    fun `populated V6 upgrades to V7 with every word hash and notification fingerprint keyed`() {
+        val schema = "keyed_upgrade"
+        fun flyway() = Database.flyway(postgres.jdbcUrl, postgres.username, postgres.password, testKeying)
+            .schemas(schema).defaultSchema(schema)
+        flyway().target("6").load().migrate()
+        val day = java.time.LocalDate.of(2026, 10, 1)
+        val words = listOf("Ready now", "Elm Street", "Order ready")
+        val public = words.associateWith { requireNotNull(CensusHash.of(it)) }
+        val root = UiSkeletonNodeDto(className = "android.widget.Button", text = mapOf("text" to TextSlot(public.getValue("Ready now"), "words:2")))
+        val screen = UiSkeletonDto(SkeletonSchema.SCHEMA_ID, 1, 1, requireNotNull(CensusFingerprint.of(root)), "doordash",
+            platformAppVersion = "8.0", engineVersion = 1, day = day.toString(),
+            windowTitle = TextSlot(public.getValue("Elm Street"), "words:2"), root = root)
+        val notification = CensusSkeletonSchema.deserialize(notificationFixture(day, hash = public.getValue("Order ready")).toString())
+        val install = "00000000-0000-4000-8000-000000000001"
+        DriverManager.getConnection(postgres.jdbcUrl, postgres.username, postgres.password).use { connection ->
+            connection.createStatement().use { it.execute("SET search_path TO $schema") }
+            fun run(sql: String, vararg args: Any?) = connection.prepareStatement(sql).use { statement ->
+                args.forEachIndexed { index, value -> statement.setObject(index + 1, value) }
+                statement.executeUpdate()
+            }
+            run("INSERT INTO installs (install_id, key_hash, created_day, last_seen_day) VALUES (?::uuid, repeat('a',64), ?, ?)", install, day, day)
+            for (item in listOf(screen, notification)) {
+                run("INSERT INTO clusters (fingerprint, platform, kind, first_seen_day, last_seen_day, notes, screen_class) VALUES (?, 'doordash', ?, ?, ?, 'NOTE_SENTINEL', 'idle')",
+                    item.fingerprint, item.kind.wire, day, day)
+                run("INSERT INTO cluster_samples VALUES (?, '8.0', ?, ?::jsonb, 1, 1, ?)", item.fingerprint, day, CensusSkeletonSchema.measure(item).json, day.plusDays(90))
+                run("INSERT INTO cluster_sightings_v5 VALUES (?, ?::uuid, ?, '8.0', 1, 1, 1)", item.fingerprint, install, day)
+            }
+            for (hash in public.values) run("INSERT INTO token_sightings_v5 VALUES (?, ?::uuid, ?, ?, 'words:2', 1, 1)", hash, install, day, day)
+            run("INSERT INTO vocabulary_v5 VALUES (?, 'words:2', 10, ?, 'Ready now', ?, 'corpus', 'unblinded', 1, 1)", public.getValue("Ready now"), day, day)
+            run("INSERT INTO trusted_envelopes (install_id, fingerprint, envelope, received_day, purge_after) VALUES (?::uuid, ?, '{}', ?, ?)", install, screen.fingerprint, day, day.plusDays(30))
+            val publicDump = connection.dumpRows(schema)
+            assertEquals(public.values.toSet() + notification.fingerprint, matches(publicDump, public.values + notification.fingerprint))
+
+            assertEquals(1, flyway().load().migrate().migrationsExecuted)
+            assertEquals(0, flyway().load().migrate().migrationsExecuted)
+
+            fun strings(sql: String) = connection.createStatement().use { statement ->
+                statement.executeQuery(sql).use { rows -> buildSet { while (rows.next()) add(rows.getString(1)) } }
+            }
+            val keyedFingerprint = testKeying.fingerprint(notification.fingerprint)
+            assertEquals(public.values.map { testKeying.token(it) }.toSet(), strings("SELECT token_hash FROM token_sightings_v5"))
+            assertEquals(setOf(testKeying.token(public.getValue("Ready now"))), strings("SELECT token_hash FROM vocabulary_v5"))
+            assertEquals(setOf("Ready now"), strings("SELECT clear_text FROM vocabulary_v5"))
+            assertEquals(setOf(screen.fingerprint, keyedFingerprint), strings("SELECT fingerprint FROM clusters"))
+            assertEquals(setOf("notification|NOTE_SENTINEL|idle"), strings("SELECT kind || '|' || notes || '|' || screen_class FROM clusters WHERE fingerprint = '$keyedFingerprint'"))
+            assertEquals(setOf(screen.fingerprint, keyedFingerprint), strings("SELECT fingerprint FROM cluster_sightings_v5"))
+            assertEquals(setOf(screen.fingerprint), strings("SELECT fingerprint FROM trusted_envelopes"))
+            // The migrated rows are exactly what ingest stores today for the same items.
+            for (item in listOf(screen, notification)) {
+                val expected = testKeying.atRest(ItemVerdict.Accepted(item, "", 0, emptyList()))
+                assertEquals(setOf(Json.parseToJsonElement(expected.canonicalJson)),
+                    strings("SELECT skeleton::text FROM cluster_samples WHERE fingerprint = '${expected.item.fingerprint}'").map { Json.parseToJsonElement(it) }.toSet())
+            }
+            assertEquals(setOf(testKeying.keyCheck), strings("SELECT key_check FROM hash_keying"))
+            // A thief's guess list (public hashes, the public notification fingerprint) matches nothing in the dump.
+            val keyedDump = connection.dumpRows(schema)
+            assertEquals(emptySet<String>(), matches(keyedDump, public.values + notification.fingerprint))
+            assertEquals(setOf(screen.fingerprint), matches(keyedDump, listOf(screen.fingerprint)))
+
+            KeyedHashStorageMigration.verify(connection, testKeying)
+            assertThrows(HashPepperMismatchException::class.java) {
+                KeyedHashStorageMigration.verify(connection, HashKeying.fromHex("0".repeat(63) + "1"))
+            }
+        }
+    }
+
+    @Test
+    fun `startup migration refuses a pepper other than the one the database was keyed under`() {
+        fun config(pepper: String) = Config.fromEnv(testEnvironment() + mapOf("DATABASE_URL" to postgres.jdbcUrl + "?currentSchema=pepper_check",
+            "DATABASE_USER" to postgres.username, "DATABASE_PASSWORD" to postgres.password, HashKeying.ENV to pepper))
+        DriverManager.getConnection(postgres.jdbcUrl, postgres.username, postgres.password).use { connection ->
+            connection.createStatement().use { it.execute("CREATE SCHEMA IF NOT EXISTS pepper_check") }
+        }
+        Database.migrate(config(TEST_HASH_PEPPER))
+        Database.migrate(config(TEST_HASH_PEPPER))
+        assertThrows(HashPepperMismatchException::class.java) { Database.migrate(config("ab".repeat(32))) }
+    }
+
+    @Test
     fun `V3 to V4 backfills screen and preserves sample relationship`() {
         fun migration(target: String) = Flyway.configure()
             .dataSource(postgres.jdbcUrl, postgres.username, postgres.password)
@@ -119,16 +211,14 @@ class MigrationTest {
     }
 
     @Test
-    fun `empty database applies every migration and contains exactly seventeen application tables`() {
-        val flyway = Flyway.configure()
-            .dataSource(postgres.jdbcUrl, postgres.username, postgres.password)
-            .locations("classpath:db/migration")
-            .load()
-        // V1 schema, V2 classification, V3 tombstones, V4 notifications, V5 lifecycle, V6 keep less (#79).
-        assertEquals(6, flyway.migrate().migrationsExecuted)
+    fun `empty database applies every migration and contains exactly eighteen application tables`() {
+        val flyway = Database.flyway(postgres.jdbcUrl, postgres.username, postgres.password, testKeying).load()
+        // V1 schema, V2 classification, V3 tombstones, V4 notifications, V5 lifecycle, V6 keep less (#79), V7 keyed (#85).
+        assertEquals(7, flyway.migrate().migrationsExecuted)
         val expected = setOf(
             "installs", "clusters", "cluster_samples", "cluster_sightings", "token_sightings",
             "vocabulary", "trusted_envelopes", "health_daily", "health_fleet_daily", "ingest_ledger", "nonces", "withdrawals", "token_sightings_v5", "cluster_sightings_v5", "vocabulary_v5", "filter_floor", "ingest_pause",
+            "hash_keying",
         )
         DriverManager.getConnection(postgres.jdbcUrl, postgres.username, postgres.password).use { connection ->
             connection.createStatement().use { statement ->
@@ -181,6 +271,11 @@ class MigrationTest {
                     assertEquals(listOf("date", null, "NO", null), columns["installs.created_day"])
                     assertEquals(listOf("timestamp with time zone", null, "YES", null), columns["installs.erased_through"])
                     assertEquals(listOf("integer", null, "NO", "1"), columns["cluster_sightings_v5.count"])
+                    assertEquals(listOf("character", "64", "NO", null), columns["hash_keying.key_check"])
+                }
+                // #85: a fresh database records the pepper's check value, so a later boot with another pepper refuses.
+                statement.executeQuery("SELECT key_check FROM hash_keying").use { rows ->
+                    assertTrue(rows.next()); assertEquals(testKeying.keyCheck, rows.getString(1)); assertTrue(!rows.next())
                 }
                 statement.executeQuery(
                     """

@@ -30,7 +30,7 @@ class LifecycleStoreTest : LifecycleTestDatabase() {
     @Test fun `notes cannot be written once the last sample is gone`() = runBlocking {
         Database.connect(config()).use { db ->
             val id = install(); val accepted = item(); observe(db, id, listOf(accepted))
-            val fp = accepted.item.fingerprint
+            val fp = stored(accepted).item.fingerprint
             val ops = OpsStore(db, clock, policy)
             assertTrue(ops.saveClassification(fp, "idle", "while a sample lives"))
             sql { it.update("DELETE FROM cluster_samples WHERE fingerprint=?", fp); it.update("UPDATE clusters SET notes=NULL WHERE fingerprint=?", fp) }
@@ -62,7 +62,7 @@ class LifecycleStoreTest : LifecycleTestDatabase() {
             sql { it.select("SELECT skeleton::text FROM cluster_samples") { rows -> do {
                 assertFalse(rows.getString(1).contains("0123456789abcdef")); assertFalse(rows.getString(1).contains("\"h\""))
             } while(rows.next()) } }
-            assertEquals(accepted.map { it.item.fingerprint }.toSet(),sql { it.select("SELECT fingerprint FROM cluster_samples") { rows ->
+            assertEquals(accepted.map { stored(it).item.fingerprint }.toSet(),sql { it.select("SELECT fingerprint FROM cluster_samples") { rows ->
                 buildSet { do { add(rows.getString(1)) } while(rows.next()) }
             } })
         }
@@ -108,10 +108,10 @@ class LifecycleStoreTest : LifecycleTestDatabase() {
             val id = install(); val accepted = item(); observe(db, id, listOf(accepted))
             sql { it.update("UPDATE clusters SET notes='PRIVATE_SAMPLE_NOTE'") }
             instant = instant.plusSeconds(89*86400L)
-            assertTrue(OpsStore(db, clock, policy).cluster(accepted.item.fingerprint)!!.samples!!.isNotEmpty())
+            assertTrue(OpsStore(db, clock, policy).cluster(stored(accepted).item.fingerprint)!!.samples!!.isNotEmpty())
             instant = instant.plusSeconds(86400)
-            assertTrue(OpsStore(db, clock, policy).cluster(accepted.item.fingerprint)!!.samples!!.isEmpty())
-            assertNull(OpsStore(db, clock, policy).cluster(accepted.item.fingerprint)!!.notes)
+            assertTrue(OpsStore(db, clock, policy).cluster(stored(accepted).item.fingerprint)!!.samples!!.isEmpty())
+            assertNull(OpsStore(db, clock, policy).cluster(stored(accepted).item.fingerprint)!!.notes)
             val result = LifecycleStore(db, clock, policy).runOnce()
             assertEquals(1, result.getValue("sightings").deleted)
             assertEquals(1, result.getValue("samples_notification").deleted)
@@ -123,18 +123,18 @@ class LifecycleStoreTest : LifecycleTestDatabase() {
         Database.connect(config()).use { db ->
             val id = install(); val accepted = item(); observe(db, id, listOf(accepted))
             val ops = OpsStore(db, clock, policy)
-            ops.status(accepted.item.fingerprint, "resolved", null, "PRIVATE_NOTE")
+            ops.status(stored(accepted).item.fingerprint, "resolved", null, "PRIVATE_NOTE")
             val resolved = day
             instant = instant.plusSeconds(29*86400L)
-            ops.status(accepted.item.fingerprint, "new", null, null)
+            ops.status(stored(accepted).item.fingerprint, "new", null, null)
             observe(db, id, listOf(item()))
-            ops.status(accepted.item.fingerprint, "resolved", null, null)
+            ops.status(stored(accepted).item.fingerprint, "resolved", null, null)
             assertEquals(resolved, sql { it.select("SELECT resolved_day FROM clusters") { r -> r.getObject(1, java.time.LocalDate::class.java) } })
             assertEquals(2, count("cluster_samples"))
             instant = instant.plusSeconds(86400)
             observe(db, id, listOf(item()))
             assertEquals(2, count("cluster_samples"))
-            assertTrue(ops.cluster(accepted.item.fingerprint)!!.samples!!.isEmpty())
+            assertTrue(ops.cluster(stored(accepted).item.fingerprint)!!.samples!!.isEmpty())
             assertEquals(2, LifecycleStore(db, clock, policy).runOnce().getValue("samples_notification").deleted)
         }
     }
@@ -219,7 +219,7 @@ class LifecycleStoreTest : LifecycleTestDatabase() {
             gate.complete(Unit); workers.awaitAll()
             assertEquals(day, sql { it.select("SELECT last_day FROM token_sightings_v5") { r -> r.getObject(1, java.time.LocalDate::class.java) } })
             assertEquals(1, count("cluster_samples"))
-            assertEquals(accepted.item.fingerprint, sql { it.select("SELECT fingerprint FROM cluster_samples") { r -> r.getString(1) } })
+            assertEquals(stored(accepted).item.fingerprint, sql { it.select("SELECT fingerprint FROM cluster_samples") { r -> r.getString(1) } })
         }
     }
 }

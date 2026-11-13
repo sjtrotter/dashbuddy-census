@@ -6,6 +6,7 @@ import cloud.trotter.census.server.ingest.LifecycleDeadline
 import cloud.trotter.census.server.ingest.ItemVerdict
 import cloud.trotter.census.server.ingest.BudgetPolicy
 import cloud.trotter.census.server.ingest.ConsumeOutcome
+import cloud.trotter.census.server.ingest.atRest
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.jetbrains.exposed.v1.jdbc.transactions.transaction
@@ -49,6 +50,23 @@ class SkeletonStore(private val db: Database, private val clock: Clock) {
         bodyBytes: Long,
         policy: BudgetPolicy,
         now: Instant = clock.now(),
+    ): IngestOutcome {
+        // #85: keyed before anything is written; nothing below sees a public word hash or notification fingerprint.
+        val stored = accepted.map { db.keying.atRest(it) }
+        return store(installId, keyHash, day, stored, duplicateInBatch, rejected, batchId, bodyBytes, policy, now)
+    }
+
+    private suspend fun store(
+        installId: UUID,
+        keyHash: String,
+        day: LocalDate,
+        accepted: List<ItemVerdict.Accepted>,
+        duplicateInBatch: Int,
+        rejected: Map<String, Int>,
+        batchId: String,
+        bodyBytes: Long,
+        policy: BudgetPolicy,
+        now: Instant,
     ): IngestOutcome = query {
         val current = select(
             "SELECT 1 FROM installs WHERE install_id = ? AND key_hash = ? AND revoked_at IS NULL FOR SHARE",

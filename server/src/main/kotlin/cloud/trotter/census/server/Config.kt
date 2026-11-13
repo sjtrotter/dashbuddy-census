@@ -17,6 +17,8 @@ data class Config(
     val databasePassword: String,
     val publicHost: String,
     val operatorTokenSha256: String,
+    /** #85: the pepper every stored word hash is keyed under; required, loaded once here, never logged. */
+    val hashKeying: HashKeying,
     val serverVersion: String = "dev",
     val imageDigest: String? = null,
     val operatorTotpSecret: String? = null,
@@ -58,6 +60,9 @@ data class Config(
                 "Invalid variable: OPERATOR_TOKEN_SHA256"
             }
 
+            // #85: fail closed. Without the pepper the server would store public word hashes a thief could guess against.
+            val hashKeying = HashKeying.fromHex(required(HashKeying.ENV))
+
             val minimumFilterRev = env["CENSUS_MIN_FILTER_REV"]?.let {
                 require(it.matches(Regex("[0-9]+"))) { "Invalid variable: CENSUS_MIN_FILTER_REV" }
                 it.toIntOrNull()?.takeIf { value -> value > 0 }
@@ -75,6 +80,7 @@ data class Config(
                 databasePassword = databasePassword,
                 publicHost = publicHost,
                 operatorTokenSha256 = operatorTokenSha256.lowercase(),
+                hashKeying = hashKeying,
                 serverVersion = env["SERVER_VERSION"]?.takeIf { it.isNotBlank() } ?: "dev",
                 operatorTotpSecret = env["OPERATOR_TOTP_SECRET"],
                 alarmSpoolDir = env["ALARM_SPOOL_DIR"],

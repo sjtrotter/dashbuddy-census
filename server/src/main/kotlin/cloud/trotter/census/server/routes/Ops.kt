@@ -177,7 +177,9 @@ fun Route.opsRoutes(
                 if (request.hashDomain !in policy.acceptedHashDomains || request.filterRev < policy.minimumFilterRev || !CensusHash.isWellFormed(request.tokenHash) || request.clearText != null && request.clearText.length > 128 ||
                     !Regex("trusted|corpus|rule_anchor").matches(request.source) || !request.reject && request.clearText == null
                 ) badRequest()
-                if (request.clearText != null && CensusHash.of(request.clearText) != request.tokenHash) {
+                // #85: tokenHash is the stored (keyed) value from the queue; the candidate is hashed, keyed, then compared.
+                val candidate = request.clearText?.let { config.hashKeying.candidate(it) }
+                if (request.clearText != null && (candidate == null || !config.hashKeying.same(candidate, request.tokenHash))) {
                     call.respond(HttpStatusCode.UnprocessableEntity, ErrorResponse("hash_mismatch"))
                     return@post
                 }

@@ -8,7 +8,9 @@ import org.junit.jupiter.api.Test
 class FilterReplayTest : LifecycleTestDatabase() {
     @Test fun `legacy provenance cutover scrubs valid bodies deletes malformed and expires resolved samples idempotently`() = runBlocking {
         Database.connect(config()).use { db ->
-            val id = install(); val sample = item(); observe(db,id,listOf(sample))
+            // #85: a stored notification sample's fingerprint is keyed, so the cutover cannot re-verify it against its
+            // slots and removes it; a screen sample's fingerprint covers no text, so it still verifies and is scrubbed.
+            val id = install(); val sample = screenItem(); observe(db,id,listOf(sample, item(channel="LEGACY_NOTIFICATION")))
             sql {
                 it.update("INSERT INTO token_sightings VALUES('0123456789abcdef',?,?,?,'words:1')",id,day,day)
                 it.update("INSERT INTO cluster_sightings VALUES(?,?,?,'8.0',1)",sample.item.fingerprint,id,day)
@@ -19,10 +21,11 @@ class FilterReplayTest : LifecycleTestDatabase() {
             val floors = FilterPolicyStore(db,clock)
             assertEquals(1,floors.bootstrap(1))
             assertEquals(0,count("token_sightings")); assertEquals(0,count("cluster_sightings")); assertEquals(0,count("vocabulary"))
+            assertEquals(1,count("cluster_samples"))
             val body = sql { it.select("SELECT skeleton::text FROM cluster_samples") { r -> r.getString(1) }!! }
             assertFalse(body.contains("0123456789abcdef")); assertTrue(body.contains("expired"))
-            assertEquals("HOME",sql { it.select("SELECT screen_class FROM clusters") { r -> r.getString(1) } })
-            assertNull(sql { it.select("SELECT notes FROM clusters") { r -> r.getString(1) } })
+            assertEquals("HOME",sql { it.select("SELECT screen_class FROM clusters WHERE fingerprint=?",sample.item.fingerprint) { r -> r.getString(1) } })
+            assertEquals(0L,sql { it.select("SELECT count(*) FROM clusters WHERE notes IS NOT NULL") { r -> r.getLong(1) } })
             assertEquals(1,floors.bootstrap(1)); assertEquals(0,floors.results.getValue("legacy_samples").rewritten)
             sql { it.update("INSERT INTO token_sightings VALUES('0123456789abcdef',?,?,?,'words:1')",id,day,day) }
             assertTrue(runCatching { floors.bootstrap(1) }.isFailure)
@@ -35,8 +38,8 @@ class FilterReplayTest : LifecycleTestDatabase() {
             observe(db,id,listOf(item(channel="RESOLVED"),item(channel="MALFORMED")))
             sql {
                 it.update("UPDATE cluster_samples SET hash_domain=NULL,filter_rev=NULL,purge_after=NULL")
-                it.update("UPDATE clusters SET status='resolved' WHERE fingerprint=?",item(channel="RESOLVED").item.fingerprint)
-                it.update("UPDATE cluster_samples SET skeleton='{}'::jsonb WHERE fingerprint=?",item(channel="MALFORMED").item.fingerprint)
+                it.update("UPDATE clusters SET status='resolved' WHERE fingerprint=?",stored(item(channel="RESOLVED")).item.fingerprint)
+                it.update("UPDATE cluster_samples SET skeleton='{}'::jsonb WHERE fingerprint=?",stored(item(channel="MALFORMED")).item.fingerprint)
             }
             FilterPolicyStore(db,clock).bootstrap(1)
             assertEquals(0,count("cluster_samples"))

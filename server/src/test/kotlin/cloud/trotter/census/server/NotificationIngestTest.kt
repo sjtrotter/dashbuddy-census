@@ -58,8 +58,12 @@ class NotificationIngestTest {
             assertEquals(200, client.signed(clock, id, key, HttpMethod.Post, "/v1/skeletons", batch("mixed-0", mixed)).status.value)
             assertEquals(ledger.copy(duplicate = 394), installs.ledgerFor(UUID.fromString(id), day))
             assertEquals(2, sql { it.select("SELECT count(*) FROM clusters") { row -> row.getInt(1) } })
-            val stored = sql { it.select("SELECT skeleton::text FROM cluster_samples WHERE fingerprint = ?", notification.getValue("fingerprint").jsonPrimitive.content) { row -> row.getString(1) } }
-            assertEquals(notification, Json.parseToJsonElement(requireNotNull(stored)))
+            // #85: the sample is stored keyed: keyed slot hashes under the keyed fingerprint, never the wire values.
+            val publicFingerprint = notification.getValue("fingerprint").jsonPrimitive.content
+            val stored = sql { it.select("SELECT skeleton::text FROM cluster_samples WHERE fingerprint = ?", testKeying.fingerprint(publicFingerprint)) { row -> row.getString(1) } }
+            val expected = testKeying.atRest(SkeletonValidator.validate(notification, notificationPolicy, day) as ItemVerdict.Accepted)
+            assertEquals(Json.parseToJsonElement(expected.canonicalJson), Json.parseToJsonElement(requireNotNull(stored)))
+            assertFalse(stored.contains(publicFingerprint)); assertFalse(stored.contains("0123456789abcdef"))
             assertEquals(1, sql { it.select("SELECT count(*) FROM token_sightings_v5") { row -> row.getInt(1) } })
             // Rejected items never produce samples or token rows.
             val invalid = JsonObject(notification + ("channelId" to JsonPrimitive("PRIVATE TEXT")))
@@ -102,7 +106,7 @@ class NotificationIngestTest {
                 val date = day.plusDays(offset.toLong()); instant = date.atTime(12, 0).toInstant(java.time.ZoneOffset.UTC)
                 assertTrue(ingest(listOf(notificationFixture(date, version = "8.0"), notificationFixture(date, version = "9.0")), "cap-$offset", date) is IngestOutcome.Stored)
             }
-            val fp = variants.first().getValue("fingerprint").jsonPrimitive.content
+            val fp = testKeying.fingerprint(variants.first().getValue("fingerprint").jsonPrimitive.content)
             assertEquals(10, sql { it.select("SELECT count(*) FROM cluster_samples WHERE fingerprint = ?", fp) { row -> row.getInt(1) } })
             for (version in listOf("8.0", "9.0")) assertEquals(5, sql {
                 it.select("SELECT count(*) FROM cluster_samples WHERE fingerprint = ? AND platform_app_version = ?", fp, version) { row -> row.getInt(1) }
@@ -123,28 +127,29 @@ class NotificationIngestTest {
             val installs = InstallStore(db, clock); val store = SkeletonStore(db, clock)
             val ops = OpsStore(db, clock, notificationPolicy)
             val item = notificationAccepted(day); val key = hashSecret(secret(123))
+            val fingerprint = testKeying.atRest(item).item.fingerprint
             val ids = List(10) { UUID.randomUUID() }
             for ((index, id) in ids.withIndex()) {
                 installs.enrol(id, key, "1.0")
                 store.ingest(id, key, day, listOf(item), 0, emptyMap(), "gate", 1000, BudgetPolicy())
-                if (index == 8) assertNull(ops.cluster(item.item.fingerprint)?.samples?.single()?.notification?.channelId)
+                if (index == 8) assertNull(ops.cluster(fingerprint)?.samples?.single()?.notification?.channelId)
             }
-            ops.saveClassification(item.item.fingerprint, "idle", "GATED_NOTES")
+            ops.saveClassification(fingerprint, "idle", "GATED_NOTES")
             fun visible(row: OpsCluster?) = row?.samples?.single()?.notification?.channelId != null
-            assertTrue(visible(ops.cluster(item.item.fingerprint)))
+            assertTrue(visible(ops.cluster(fingerprint)))
             assertTrue(installs.withdraw(ids.last(), key) is MutationOutcome.Applied)
-            val hidden = requireNotNull(ops.cluster(item.item.fingerprint))
+            val hidden = requireNotNull(ops.cluster(fingerprint))
             assertFalse(visible(hidden)); assertNull(hidden.notes); assertTrue(hidden.notesWithheld)
             ops.trust(ids.first(), true)
-            assertTrue(visible(ops.cluster(item.item.fingerprint)))
+            assertTrue(visible(ops.cluster(fingerprint)))
             ops.trust(ids.first(), false)
-            assertFalse(visible(ops.cluster(item.item.fingerprint)))
+            assertFalse(visible(ops.cluster(fingerprint)))
             val replacement = UUID.randomUUID(); installs.enrol(replacement, key, "1.0")
             store.ingest(replacement, key, day, listOf(item), 0, emptyMap(), "gate", 1000, BudgetPolicy())
-            assertTrue(visible(ops.cluster(item.item.fingerprint)))
+            assertTrue(visible(ops.cluster(fingerprint)))
             instant = instant.plusSeconds(28 * 86400L)
-            assertFalse(visible(ops.cluster(item.item.fingerprint)))
-            assertNull(ops.cluster(item.item.fingerprint)?.notes)
+            assertFalse(visible(ops.cluster(fingerprint)))
+            assertNull(ops.cluster(fingerprint)?.notes)
         }
     }
 
