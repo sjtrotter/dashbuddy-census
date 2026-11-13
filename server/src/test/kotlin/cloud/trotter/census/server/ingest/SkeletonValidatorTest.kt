@@ -85,7 +85,7 @@ class SkeletonValidatorTest {
     @Test
     fun `mutations receive their exact reason codes`() {
         assertRejected("bad_item", JsonArray(emptyList()))
-        assertRejected("unknown_schema", item("schemaId", JsonPrimitive("uinode.skeleton.v2")))
+        assertRejected("unknown_schema", item("schemaId", JsonPrimitive("uinode.skeleton.v3")))
         assertRejected("unknown_schema", item("schemaId", JsonPrimitive(1)))
         assertRejected("unknown_schema", JsonObject(skeleton - "schemaId"))
         assertRejected("unknown_field", slot("t" to JsonPrimitive("plain")))

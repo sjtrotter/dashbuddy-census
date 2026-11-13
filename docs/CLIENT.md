@@ -68,7 +68,7 @@ Send a signed `POST /v1/skeletons` with `Content-Type: application/json`. Sign t
 {
   "batchId": "upload-1",
   "items": [{
-    "schemaId": "uinode.skeleton.v1",
+    "schemaId": "uinode.skeleton.v2",
     "hashDomain": 1,
     "filterRev": 1,
     "fingerprint": "<CensusFingerprint.of(root)>",
@@ -80,7 +80,7 @@ Send a signed `POST /v1/skeletons` with `Content-Type: application/json`. Sign t
 }
 ```
 
-Each item must be the contract's `UiSkeletonDto` JSON object, with hashed text slots and a structural fingerprint. Replace the example's fingerprint placeholder with the contract's computed value and use the capture's day. `batchId` is 1–64 characters from `[A-Za-z0-9_-]`. Send 1–100 items, at most 1 MiB for the whole raw body. The server stores the contract's measured canonical JSON, at most 65,536 bytes per item. Trees may have at most 64 levels (root is level 1) and 4,096 nodes. Policy publishes `acceptedSchemaIds` and `acceptedHashDomains` (currently `[1]`). Item dates must lie between seven days before and one day after the server's UTC date, inclusive; sightings use the server date.
+Each item must be the contract's `UiSkeletonDto` JSON object, with hashed text slots and a structural fingerprint. Send the newest skeleton version `acceptedSchemaIds` lists (`SkeletonVersion.newestScreen`); v1 items stay accepted. A v2 item may add the node flags `hasClickAction` and `isVisibleToUser`, shape slots from the contract's closed `ShapeTemplate` list, and, on a notification, an `actions` list of at most 8 slots ([API.md](API.md#skeleton-v2-value-shapes-click-flags-notification-actions--78)). A v1 item must carry none of those keys. Replace the example's fingerprint placeholder with the contract's computed value and use the capture's day. `batchId` is 1–64 characters from `[A-Za-z0-9_-]`. Send 1–100 items, at most 1 MiB for the whole raw body. The server stores the contract's measured canonical JSON, at most 65,536 bytes per item. Trees may have at most 64 levels (root is level 1) and 4,096 nodes. Policy publishes `acceptedSchemaIds` and `acceptedHashDomains` (currently `[1]`). Item dates must lie between seven days before and one day after the server's UTC date, inclusive; sightings use the server date.
 
 Metadata is UI chrome, never free text. The policy at `/v1/policy` publishes `acceptedPlatforms` (`doordash`, `uber`, `_unknown`) and `acceptedTextKeys` (`text`, `desc`, `state`, `pane`, `role`, `hint`, `tooltip`, `error`, `clickLabel`, `uid`). Platforms also pass the bounded grammar `[a-z_][a-z0-9_]{0,31}` before allowlist lookup. Optional version strings must match their specific grammar:
 
@@ -106,11 +106,12 @@ Validation uses the first applicable reason in this order:
 | --- | --- |
 | `bad_item` | Item is not an object, a required value is missing, a value has the wrong type, `isChecked` is outside 0–2, or a remaining contract constraint fails. |
 | `unknown_schema` | Missing, non-string, or unaccepted `schemaId`. |
-| `unknown_field` | An item, node, text slot, or text map contains a key outside its allowlist. |
+| `unknown_field` | An item, node, text slot, or text map contains a key outside its allowlist, including any v2 key on a v1 item. |
 | `plaintext_field` | A JSON string occurs outside the allowed string slots, including a flag, children value, or text-map value. |
 | `too_deep` | Tree exceeds 64 levels. |
 | `too_many_nodes` | Tree exceeds 4,096 nodes. |
-| `bad_kind` | Text slot kind is not a contract wire kind. |
+| `bad_kind` | Text slot kind is not a contract wire kind, or is `shape` on a v1 item. |
+| `bad_shape` | A v2 slot's `shape` is not a template of the closed list, or `shape` and kind `shape` do not come together. |
 | `bad_hash` | A present hash is not 16 lowercase hexadecimal characters. |
 | `hash_on_withheld_kind` | A non-hashable kind carries a hash. |
 | `missing_hash` | A hashable kind (`words:1` through `words:8`) lacks its hash. |

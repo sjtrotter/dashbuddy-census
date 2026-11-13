@@ -90,6 +90,30 @@ class HashKeyingTest {
         assertEquals(accepted.bytes, keyedScreen.bytes)
     }
 
+    @Test fun `v2 action labels are keyed like every slot and v2 keeps the v1 notification key (#78)`() {
+        val day = LocalDate.of(2026, 10, 2)
+        val text = "0123456789abcdef"; val action = "fedcba9876543210"
+        val v2 = SkeletonValidator.validate(notificationV2Fixture(day, hash = text), notificationPolicy, day) as ItemVerdict.Accepted
+        val stored = testKeying.atRest(v2)
+        val item = stored.item as NotificationSkeletonDto
+        assertEquals(listOf(TextSlot(testKeying.token(action), "words:2"), TextSlot.WITHHELD), item.actions)
+        // The shape slot has no hash and is stored as sent; the hashed slots are keyed.
+        assertEquals(TextSlot.ofShape(cloud.trotter.census.contract.ShapeTemplate.MONEY), item.slots.getValue(cloud.trotter.census.contract.NotifTextField.SUB_TEXT))
+        assertFalse(stored.canonicalJson.contains(text)); assertFalse(stored.canonicalJson.contains(action))
+        assertTrue(stored.canonicalJson.contains(testKeying.token(action)))
+        assertEquals(v2.tokens.map { testKeying.token(it.hash) }, stored.tokens.map { it.hash })
+        assertEquals(v2.bytes, stored.bytes)
+        // One notification key from either version: the public fingerprint omits actions and reads a shape as mixed.
+        val v1 = SkeletonValidator.validate(asV1(notificationV2Fixture(day, hash = text)), notificationPolicy, day) as ItemVerdict.Accepted
+        assertEquals(testKeying.atRest(v1).item.fingerprint, item.fingerprint)
+        assertEquals(item.fingerprint, testKeying.storedKey(v2.item))
+        // The migration's generic sample rewrite keys the action hash the same way.
+        assertEquals(
+            kotlinx.serialization.json.Json.parseToJsonElement(stored.canonicalJson),
+            kotlinx.serialization.json.Json.parseToJsonElement(KeyedHashStorageMigration.keySample(v2.canonicalJson, testKeying, item.fingerprint)),
+        )
+    }
+
     @Test fun `the migration's sample rewrite agrees with ingest`() {
         val day = LocalDate.of(2026, 10, 2)
         val notification = notificationAccepted(day)

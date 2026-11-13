@@ -160,7 +160,7 @@ class NotificationIngestTest {
                 application { module(configured, db, clock) }
                 val published = Json.parseToJsonElement(client.get("/v1/policy").bodyAsText()).jsonObject
                 assertEquals(2, published.getValue("minimumFilterRev").jsonPrimitive.int)
-                assertEquals(if (enabled) 2 else 1, published.getValue("acceptedSchemaIds").jsonArray.size)
+                assertEquals(if (enabled) 4 else 2, published.getValue("acceptedSchemaIds").jsonArray.size)
                 val id = UUID.randomUUID().toString(); val key=secret(121)
                 val enrol = Json.parseToJsonElement(client.enrol(id,key).bodyAsText()).jsonObject
                 assertEquals(published, JsonObject(enrol - "installIdPrefix"))

@@ -61,7 +61,11 @@ object WireframeRender {
                     }?.let { safe(it) }?.let { cut(it, 120) },
                     node.string("class")?.let { safe(it) }?.substringAfterLast('.')?.let { cut(it, 64) }?.takeIf { it.isNotEmpty() },
                     node.string("id")?.let { safe(it) }?.substringAfter(":id/")?.let { cut(it, 64) }?.takeIf { it.isNotEmpty() },
-                    (node["isClickable"] as? JsonPrimitive)?.let { !it.isString && it.booleanOrNull == true } == true,
+                    // #78: a node takes a click when it is clickable or advertises the click action (Compose), as the
+                    // authoring walk below decides it.
+                    listOf("isClickable", "clickAction").any { key ->
+                        (node[key] as? JsonPrimitive)?.let { !it.isString && it.booleanOrNull == true } == true
+                    },
                 )
             } else {
                 skipped++

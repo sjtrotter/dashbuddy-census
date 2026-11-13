@@ -35,7 +35,7 @@ Public health/policy, identity, ingest and operator routes are implemented. Noti
     "maxSkeletonBytes": 65536,
     "maxBatchItems": 100,
     "maxBatchBytes": 1048576,
-    "acceptedSchemaIds": ["uinode.skeleton.v1"],
+    "acceptedSchemaIds": ["uinode.skeleton.v1", "uinode.skeleton.v2"],
     "retention": {
         "tokenSightingsDays": 30,
         "clusterSightingsDays": 30,
@@ -94,6 +94,22 @@ Withdrawal deletes `trusted_envelopes`, `health_daily`, `token_sightings_v5`, `c
 "Delete my data" (`DELETE /v1/installs/me/data`, #79) runs the same erasure in one transaction, parent row locked first, except that the `installs` row and the ledger rows from today on stay: the credential keeps working, today's quota is not reset, and a batch sent before the deletion is answered `duplicate` rather than stored again. It writes the same hashed tombstone as a withdrawal and the same off-host journal notice, and copies the tombstone instant into `installs.erased_through`; startup replay leaves a generation alone when that marker covers its tombstone. After a restore from a backup older than the deletion the marker is missing, and replay erases that generation whole (the journal does not record which kind of erasure it was), so the app re-enrols. Shared cluster samples carry no install ID: the hashes only this install sent expire at the next lifecycle pass, as do vocabulary entries it alone held at k, before `completionDeadline`. Neither request is refused by the pause switch. Deletion is synchronous; the deadline preserves a future asynchronous contract. Nonces are single-use with a 300-second validity window. HMAC signatures remain replayable within their timestamp window; S4 batch admission will use the ledger for replay protection.
 
 Budget helpers expose a 300 accepted-skeleton default, 10 MiB, 40 distinct batches and 60 health reports per install per UTC day, all from `Policy` (`Policy.budget()`, #79), with retries at the next UTC midnight. The health-report count is checked under the ledger row lock before any byte is charged. The ledger accumulates bytes, accepted/duplicate counts and rejection counts, deduplicating stored batch IDs. `tryConsume` atomically enforces byte, accepted-item, and distinct-batch limits in one conditional PostgreSQL upsert, returning remaining allowances or seconds to UTC midnight. `recordIngest` only increments rejected/duplicate counters. Ingest calls these primitives; identity routes report budgets. The purge job starts one minute after startup and runs every six hours, deleting nonces older than one hour and ledger days strictly older than today minus seven days. Operator revocation is implemented; the remaining lifecycle gaps are documented in ARCHITECTURE.md.
+
+## Skeleton v2: value shapes, click flags, notification actions — #78
+
+The policy lists `uinode.skeleton.v2` beside `uinode.skeleton.v1`, and, while notifications are enabled, `notification.skeleton.v2` beside `notification.skeleton.v1`. The order is the contract's: oldest version first, each version's screen id before its notification id. The app sends the newest version the list names, so a server without v2 keeps receiving v1, and v1 items from older apps stay accepted. The server lists only the versions it validates (`SERVED_SKELETON_VERSIONS`), never every version a newer contract pin defines.
+
+A v2 item may carry, beyond the v1 keys:
+
+- on a node, the flags `hasClickAction` (the node advertises the click action, as Compose controls do without `isClickable`) and `isVisibleToUser`, both JSON booleans;
+- on any text slot, kind `shape` with a `shape` string: a value's format with its digits removed, one of the contract's closed `ShapeTemplate` list (`$#.##`, `#:## AM/PM`, `#.# mi`, `# min(s)`, `# item(s)` and the rest). A shape slot carries no hash;
+- on a notification, `actions`: the action labels in order, at most 8, each a text slot judged like the five text slots (a hash, a coarse kind, a shape or `withheld`), never a label in clear.
+
+A shape outside the list, a `shape` key on a slot whose kind is not `shape`, or kind `shape` without one is rejected as `bad_shape`. A v1 item carrying any v2 key, whatever its value, is `unknown_field`, as any unknown key on a v1 item always was; the contract's strict v1 decoder refuses the same item. Kind `shape` on a v1 slot stays `bad_kind`.
+
+Fingerprints ignore the v2 additions: a screen's covers class, id and structure only, and a notification's omits the actions and reads a shape slot as `mixed`, the kind v1 sent for the same value. An install moving from v1 to v2 therefore keeps its clusters; a cluster can hold v1 and v2 samples side by side. Action-label hashes are tokens like any slot hash: they count toward k and the vocabulary queue, expire from stored samples on the token deadline, and are keyed under the pepper before storage (#85). Shape slots hold no hash and are stored as sent; shapes are not vocabulary.
+
+Operator projections show a shape slot as `shape:<template>` in `kinds` (a stored template off the list reads plain `shape`), the node flags as `clickable`, `clickAction` and `hidden`, and a notification's `actions` as kind badges. v1 samples carry only `clickable`. The trusted-envelope wireframe draws a node as clickable when it is clickable or advertises the click action, as the authoring walk does.
 
 ## Notification skeletons — #1189 slice 2
 

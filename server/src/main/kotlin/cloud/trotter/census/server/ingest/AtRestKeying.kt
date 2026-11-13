@@ -16,6 +16,10 @@ import cloud.trotter.census.server.HashKeying
  * fingerprint covers class and id only and stays public.
  * Validation (fingerprint recompute, size) ran on the public item; keying keeps every width, so the stored item has
  * the same shape and size.
+ *
+ * #78: a v2 notification's action-label slots are keyed like its five text slots. A shape slot carries no hash and is
+ * stored as sent. The notification key is unchanged by v2: the public fingerprint omits the actions and reads a
+ * shape slot as `mixed`, so the same notification keys to the same cluster from either version.
  */
 fun HashKeying.atRest(accepted: ItemVerdict.Accepted): ItemVerdict.Accepted {
     val item = when (val public = accepted.item) {
@@ -23,6 +27,7 @@ fun HashKeying.atRest(accepted: ItemVerdict.Accepted): ItemVerdict.Accepted {
         is NotificationSkeletonDto -> public.copy(
             fingerprint = storedKey(SkeletonKind.NOTIFICATION.wire, public.fingerprint),
             slots = public.slots.mapValues { slot(it.value) },
+            actions = public.actions.map { slot(it) },
         )
     }
     val measured = CensusSkeletonSchema.measure(item)
