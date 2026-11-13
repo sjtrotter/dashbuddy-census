@@ -5,7 +5,7 @@ DashBuddy Census will help the DashBuddy Android app understand unfamiliar scree
 What is live (v0.11.0):
 
 - Enrol, rotate, revoke, and withdraw, with signed requests.
-- Skeleton ingest (`uinode.skeleton.v1`), trusted-envelope ingest (`uinode.v1`, trusted installs only, paired to existing clusters by fingerprint), and daily recognition health (`/v1/health`).
+- Skeleton ingest (`uinode.skeleton.v1` and `.v2`, with shape slots and click flags), trusted-envelope ingest (`uinode.v1`, trusted installs only, paired to existing clusters by fingerprint), and daily recognition health (`/v1/health`).
 - Structural-fingerprint clustering, k-gated label unblinding, and the vocabulary queue.
 - Health rollup and alarms delivered by email.
 - The operator dashboard, served ONLY on the WireGuard listener with bearer or TOTP session login: platform → version cluster summary, per-group review pages, and cluster detail with skeleton samples and the trusted-capture wireframe.
@@ -66,7 +66,7 @@ Check out the app at the agreed pinned revision as `../DashBuddy`; its `census-c
 ./gradlew :server:installDist
 ```
 
-An alternate checkout uses `-PcensusContractPath=/absolute/path/to/census-contract`. Foojay provisions JDK 21. The distribution is `server/build/install/server/`; there is no fat JAR. Migration tests require Docker in CI and visibly skip locally when it is unavailable; route and configuration tests need no database. Both CI workflows pin `DASHBUDDY_CONTRACT_SHA` to `3943c39d44a80eaecd93b8caa36147c6056ee168` and use the contract checkout at that revision.
+An alternate checkout uses `-PcensusContractPath=/absolute/path/to/census-contract`. Foojay provisions JDK 21. The distribution is `server/build/install/server/`; there is no fat JAR. Migration tests require Docker in CI and visibly skip locally when it is unavailable; route and configuration tests need no database. Both CI workflows pin `DASHBUDDY_CONTRACT_SHA` to `cb175f9ec58f7186ea6efe811766a3042be45550` and use the contract checkout at that revision.
 
 Versions were pinned offline on 2026-10-01. Gradle, Kotlin, serialization, Ktor, Exposed, and the other catalog versions need validation together on the first build. Bump exact pins if necessary; do not replace them with ranges. The absent sibling contract also means `hashDomain` uses the explicit `census.v1` TODO fallback until its API is inspected.
 
