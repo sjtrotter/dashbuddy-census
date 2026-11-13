@@ -222,7 +222,7 @@ class OpsRoutesTest {
                 application { module(config().copy(operatorTotpSecret = totpSecret), db, clock) }
                 for ((index, id) in identities.withIndex()) {
                     installs.enrol(id, hashSecret(key), "1.0.0")
-                    sql { it.update("UPDATE installs SET created_day=? WHERE install_id=?", day.minusDays(7), id) }
+                    sql { it.update("UPDATE installs SET created_day=? WHERE install_id=?", day.minusDays(8), id) }
                     val items = when {
                         index < 9 -> listOf(eligible, hidden)
                         index == 9 -> listOf(eligible)

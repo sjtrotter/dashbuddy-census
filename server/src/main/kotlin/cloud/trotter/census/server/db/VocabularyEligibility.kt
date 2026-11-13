@@ -18,6 +18,9 @@ object VocabularyEligibility {
         WHERE q.installs >= ${policy.k} AND NOT EXISTS (SELECT 1 FROM vocabulary_v5 v
         WHERE v.hash_domain=q.hash_domain AND v.filter_rev=q.filter_rev AND v.token_hash=q.token_hash)"""
 
-    /** Quarantine in whole UTC days since the enrolment day (#79: no enrolment instant is stored). */
-    fun args(today: LocalDate): Array<Any> = arrayOf(today.minusDays(7), today)
+    /**
+     * Quarantine in whole UTC days (#79: no enrolment instant is stored). The enrolment day itself does not count
+     * (Sol S6): an install enrolled at 23:59 on day D qualifies on D+8, so at least seven full days always elapse.
+     */
+    fun args(today: LocalDate): Array<Any> = arrayOf(today.minusDays(8), today)
 }

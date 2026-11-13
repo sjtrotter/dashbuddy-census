@@ -13,8 +13,9 @@ class VocabularyEligibilityTest : LifecycleTestDatabase() {
             val ids = List(10) { install() }
             for (id in ids) observe(db, id)
             val tenth = ids.last()
-            // #79: quarantine counts whole UTC days from the enrolment day; the tenth enrolled six days ago.
-            sql { it.update("UPDATE installs SET created_day=? WHERE install_id=?", day.minusDays(6), tenth) }
+            // #79: quarantine counts whole UTC days after the enrolment day (Sol S6); the tenth enrolled on day - 7,
+            // which may have been 23:59, so it qualifies only tomorrow, when seven full days have certainly passed.
+            sql { it.update("UPDATE installs SET created_day=? WHERE install_id=?", day.minusDays(7), tenth) }
             val ops = OpsStore(db, clock, policy)
             assertEquals(0, ops.vocabularyQueueCount()); assertTrue(ops.vocabularyQueueDisplay().isEmpty())
             assertTrue(ops.vocabularyQueue().isEmpty())

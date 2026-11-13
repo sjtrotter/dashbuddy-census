@@ -29,7 +29,7 @@ abstract class LifecycleTestDatabase {
         "DATABASE_USER" to postgres.username, "DATABASE_PASSWORD" to postgres.password))
     protected fun <T> sql(block: (Connection) -> T): T = DriverManager.getConnection(postgres.jdbcUrl, postgres.username, postgres.password).use(block)
     protected fun count(table: String): Long = sql { it.select("SELECT count(*) FROM $table") { r -> r.getLong(1) }!! }
-    protected fun install(age: Long = 7, trusted: Boolean = false): UUID = UUID.randomUUID().also { id -> sql {
+    protected fun install(age: Long = 8, trusted: Boolean = false): UUID = UUID.randomUUID().also { id -> sql {
         it.update("""INSERT INTO installs(install_id,key_hash,created_day,last_seen_day,trusted)
             VALUES(?,?,?,?,?)""", id, key, day.minusDays(age), day, trusted)
     } }
