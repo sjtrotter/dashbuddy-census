@@ -6,7 +6,9 @@ mkdir -p backups
 dump="backups/census-$(date -u +%F).sql.gz"
 temporary="$(mktemp "${dump}.XXXXXX")"
 trap 'rm -f -- "$temporary"' EXIT
-docker compose exec -T postgres pg_dump -U census census | gzip > "$temporary"
+# #80 (Sol S2): epoch-tagged rows are written in tag order, not heap order, so a dump does not keep one upload's rows
+# together. Sort spills go to the data volume, beside the dump, never to the host's /tmp.
+docker compose exec -T postgres pg_dump -U census census | TMPDIR="$PWD/backups" ./order-tagged-dump.sh | gzip > "$temporary"
 mv -- "$temporary" "$dump"
 if [[ -n "${BACKUP_BUCKET:-}" ]]; then
     aws s3 cp "$dump" "s3://${BACKUP_BUCKET#s3://}/$(basename -- "$dump")"
