@@ -306,6 +306,29 @@ class PublicInstallsTest : LifecycleTestDatabase() {
         }
     }
 
+    @Test fun `every erasure moves the tombstone strictly forward, even after a clock rollback`() = runBlocking {
+        Database.connect(config()).use { db ->
+            val store = InstallStore(db, clock)
+            val id = install()
+            val first = requireNotNull((store.deleteData(id, key, day) as MutationOutcome.Applied).withdrawnAt)
+            instant = instant.minusSeconds(3600)
+            val second = requireNotNull((store.deleteData(id, key, day) as MutationOutcome.Applied).withdrawnAt)
+            assertTrue(second.isAfter(first), "a rollback must not reuse the first tombstone")
+            assertEquals(second, erasedThrough(id)?.toInstant())
+            // A backup taken between the two deletions carries the first marker and rows uploaded after it.
+            sql { it.update("UPDATE installs SET erased_through = ? WHERE install_id = ?", first.atOffset(ZoneOffset.UTC), id) }
+            observe(db, id, listOf(item(channel = "BETWEEN_CHANNEL")))
+            assertEquals(1, store.reapplyWithdrawals().matched)
+            assertNull(store.lookup(id))
+            // A withdrawal after a further rollback cannot move the tombstone back either.
+            assertEquals(EnrolOutcome.Created, store.enrol(id, key, "1.0"))
+            instant = instant.minusSeconds(3600)
+            val withdrawn = requireNotNull((store.withdraw(id, key) as MutationOutcome.Applied).withdrawnAt)
+            assertTrue(withdrawn.isAfter(second))
+            assertEquals(withdrawn, tombstone(id).toInstant())
+        }
+    }
+
     @Test fun `vocabulary provenance names no install`() = runBlocking {
         Database.connect(config()).use { db ->
             val ids = List(3) { install(trusted = true) }

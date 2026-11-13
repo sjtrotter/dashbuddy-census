@@ -149,13 +149,8 @@ class InstallStore(private val db: Database, private val clock: Clock) {
             active && sameHash(row.getString("key_hash"), expectedCurrentKeyHash)
         } ?: false
         if (!current) return@query MutationOutcome.StaleCredential
-        val withdrawnAt = clock.now().truncatedTo(ChronoUnit.MICROS)
-        update(
-            """INSERT INTO withdrawals (install_id_hash, withdrawn_at) VALUES (?, ?)
-                ON CONFLICT (install_id_hash) DO UPDATE SET withdrawn_at = EXCLUDED.withdrawn_at""",
-            installIdHash(installId), withdrawnAt.atOffset(ZoneOffset.UTC),
-        )
-        MutationOutcome.Applied(deleteInstallRows(installId), withdrawnAt)
+        val withdrawnAt = advanceTombstone(installId, clock.now().truncatedTo(ChronoUnit.MICROS))
+        MutationOutcome.Applied(deleteInstallRows(installId), withdrawnAt.toInstant())
     }
 
     /**
@@ -171,17 +166,23 @@ class InstallStore(private val db: Database, private val clock: Clock) {
             active && sameHash(row.getString("key_hash"), expectedCurrentKeyHash)
         } ?: false
         if (!current) return@query MutationOutcome.StaleCredential
-        val requestedAt = clock.now().truncatedTo(ChronoUnit.MICROS)
-        // GREATEST: a journal row merged with up to five minutes of host skew may already sit ahead of this clock.
-        val tombstone = select(
-            """INSERT INTO withdrawals (install_id_hash, withdrawn_at) VALUES (?, ?)
-                ON CONFLICT (install_id_hash) DO UPDATE SET withdrawn_at = GREATEST(withdrawals.withdrawn_at, EXCLUDED.withdrawn_at)
-                RETURNING withdrawn_at""",
-            installIdHash(installId), requestedAt.atOffset(ZoneOffset.UTC),
-        ) { it.getObject(1, java.time.OffsetDateTime::class.java) } ?: error("Missing tombstone")
+        val tombstone = advanceTombstone(installId, clock.now().truncatedTo(ChronoUnit.MICROS))
         update("UPDATE installs SET erased_through = ? WHERE install_id = ?", tombstone, installId)
         MutationOutcome.Applied(deleteInstallRows(installId, keepInstallFrom = today), tombstone.toInstant())
     }
+
+    /**
+     * Sol S3: every erasure (withdrawal or data deletion) moves the install's tombstone strictly forward, to the later
+     * of the request instant and one microsecond past the stored one. A clock rollback or a journal row merged with
+     * host skew can therefore never reuse an older tombstone, which a backup's `erased_through` copy would cover.
+     */
+    private fun Connection.advanceTombstone(installId: UUID, requestedAt: Instant): java.time.OffsetDateTime = select(
+        """INSERT INTO withdrawals (install_id_hash, withdrawn_at) VALUES (?, ?)
+            ON CONFLICT (install_id_hash) DO UPDATE SET
+                withdrawn_at = GREATEST(withdrawals.withdrawn_at + interval '1 microsecond', EXCLUDED.withdrawn_at)
+            RETURNING withdrawn_at""",
+        installIdHash(installId), requestedAt.atOffset(ZoneOffset.UTC),
+    ) { it.getObject(1, java.time.OffsetDateTime::class.java) } ?: error("Missing tombstone")
 
     /**
      * The one per-install erasure. [keepInstallFrom] null = withdrawal: everything, the install row last. Non-null =
