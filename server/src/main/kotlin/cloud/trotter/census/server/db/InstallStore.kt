@@ -2,6 +2,7 @@ package cloud.trotter.census.server.db
 
 import cloud.trotter.census.server.Clock
 import cloud.trotter.census.server.Database
+import cloud.trotter.census.server.Retention
 import cloud.trotter.census.server.auth.toLowerHex
 import cloud.trotter.census.server.ingest.BudgetPolicy
 import cloud.trotter.census.server.ingest.ConsumeOutcome
@@ -41,7 +42,7 @@ data class Install(
     val revokedAt: Instant?,
 ) {
     override fun toString(): String =
-        "Install(id=${id.toString().take(8)}…, keyHash=[redacted], createdDay=$createdDay, " +
+        "Install(id=[redacted], keyHash=[redacted], createdDay=$createdDay, " +
             "lastSeenDay=$lastSeenDay, trusted=$trusted, revokedAt=$revokedAt)"
 }
 
@@ -77,14 +78,13 @@ class InstallStore(private val db: Database, private val clock: Clock) {
             installId, keyHash, day, day, appVersion,
         )
         if (inserted == 1) {
-            // #1192 (Astra review): the enrolment instant is read AFTER the insert succeeded, while this
-            // transaction owns the new row — an insert that raced a withdrawal of the previous generation can
-            // only land after that withdrawal committed, so its instant is strictly later than the tombstone.
-            // A pre-insert reading could be EARLIER than a withdrawal that committed in between, and the
-            // startup replay would then erase the new generation.
+            // #79: no enrolment instant is stored. The new generation records the tombstone it postdates instead,
+            // read AFTER the insert succeeded (#1192, Astra review): an insert that raced a withdrawal of the
+            // previous generation lands only after that withdrawal committed, so this statement sees its tombstone.
             update(
-                "UPDATE installs SET enrolled_at = ? WHERE install_id = ?",
-                clock.now().truncatedTo(ChronoUnit.MICROS).atOffset(ZoneOffset.UTC), installId,
+                """UPDATE installs SET erased_through =
+                    (SELECT withdrawn_at FROM withdrawals WHERE install_id_hash = ?) WHERE install_id = ?""",
+                installIdHash(installId), installId,
             )
             return@query EnrolOutcome.Created
         }
@@ -149,27 +149,91 @@ class InstallStore(private val db: Database, private val clock: Clock) {
             active && sameHash(row.getString("key_hash"), expectedCurrentKeyHash)
         } ?: false
         if (!current) return@query MutationOutcome.StaleCredential
-        val withdrawnAt = clock.now().truncatedTo(ChronoUnit.MICROS)
-        update(
-            """INSERT INTO withdrawals (install_id_hash, withdrawn_at) VALUES (?, ?)
-                ON CONFLICT (install_id_hash) DO UPDATE SET withdrawn_at = EXCLUDED.withdrawn_at""",
-            installIdHash(installId), withdrawnAt.atOffset(ZoneOffset.UTC),
-        )
-        MutationOutcome.Applied(deleteInstallRows(installId), withdrawnAt)
+        val withdrawnAt = advanceTombstone(installId, clock.now().truncatedTo(ChronoUnit.MICROS))
+        MutationOutcome.Applied(deleteInstallRows(installId), withdrawnAt.toInstant())
     }
 
-    private fun Connection.deleteInstallRows(installId: UUID): Map<String, Int> =
-        WITHDRAWAL_TABLES.associateWith { table ->
-            if (table == "trusted_envelopes") {
+    /**
+     * #79: "delete my data" without withdrawing. One transaction, parent locked first like [withdraw]: every row keyed
+     * to the install goes except the install row itself and today's ledger row, which keeps the daily quota and the
+     * batch ids (so a deletion cannot reset the quota, and a batch sent before it cannot be re-admitted as new). The
+     * tombstone is the withdrawal tombstone, so the off-host journal and restore replay carry it unchanged; the
+     * install copies its instant into `erased_through`, which tells replay this generation already applied it.
+     */
+    suspend fun deleteData(installId: UUID, expectedCurrentKeyHash: String, today: LocalDate): MutationOutcome = query {
+        val current = select("SELECT key_hash, revoked_at FROM installs WHERE install_id = ? FOR UPDATE", installId) { row ->
+            val active = row.getObject("revoked_at") == null
+            active && sameHash(row.getString("key_hash"), expectedCurrentKeyHash)
+        } ?: false
+        if (!current) return@query MutationOutcome.StaleCredential
+        val tombstone = advanceTombstone(installId, clock.now().truncatedTo(ChronoUnit.MICROS))
+        update("UPDATE installs SET erased_through = ? WHERE install_id = ?", tombstone, installId)
+        MutationOutcome.Applied(deleteInstallRows(installId, keepInstallFrom = today), tombstone.toInstant())
+    }
+
+    /**
+     * Sol S3: every erasure (withdrawal or data deletion) moves the install's tombstone strictly forward, to the later
+     * of the request instant and one microsecond past the stored one. A clock rollback or a journal row merged with
+     * host skew can therefore never reuse an older tombstone, which a backup's `erased_through` copy would cover.
+     */
+    private fun Connection.advanceTombstone(installId: UUID, requestedAt: Instant): java.time.OffsetDateTime = select(
+        """INSERT INTO withdrawals (install_id_hash, withdrawn_at) VALUES (?, ?)
+            ON CONFLICT (install_id_hash) DO UPDATE SET
+                withdrawn_at = GREATEST(withdrawals.withdrawn_at + interval '1 microsecond', EXCLUDED.withdrawn_at)
+            RETURNING withdrawn_at""",
+        installIdHash(installId), requestedAt.atOffset(ZoneOffset.UTC),
+    ) { it.getObject(1, java.time.OffsetDateTime::class.java) } ?: error("Missing tombstone")
+
+    /**
+     * The one per-install erasure. [keepInstallFrom] null = withdrawal: everything, the install row last. Non-null =
+     * data deletion: the install row and the ledger rows from that day on stay ([deleteData]).
+     */
+    private fun Connection.deleteInstallRows(installId: UUID, keepInstallFrom: LocalDate? = null): Map<String, Int> =
+        (if (keepInstallFrom == null) WITHDRAWAL_TABLES else DATA_TABLES).associateWith { table ->
+            when (table) {
+                "ingest_ledger" -> if (keepInstallFrom == null) {
+                    update("DELETE FROM ingest_ledger WHERE install_id = ?", installId)
+                } else update("DELETE FROM ingest_ledger WHERE install_id = ? AND day < ?", installId, keepInstallFrom)
                 // Delete/lock envelopes before clusters, the same lock order as retention and draft saves.
-                deleteEnvelopesAndClearDrafts("DELETE FROM trusted_envelopes WHERE install_id = ? RETURNING id", installId)
-            } else update("DELETE FROM $table WHERE install_id = ?", installId)
+                "trusted_envelopes" -> deleteEnvelopesAndClearDrafts("DELETE FROM trusted_envelopes WHERE install_id = ? RETURNING id", installId)
+                "health_daily" -> deleteHealthAndRefold(installId)
+                else -> update("DELETE FROM $table WHERE install_id = ?", installId)
+            }
         }
 
-    /** One transaction, parent locks first, with the exact live-withdrawal deletion and lock order. */
+    /**
+     * #79: the install's per-install health rows go, and the fleet totals they still feed are recomputed without
+     * them. Fleet rows are locked before the health rows, the order ingest and the retention fold use. Only keys
+     * this DELETE actually removed are recomputed (Sol S1): if the fold committed between the key read and the
+     * locks, those rows are already folded and gone, and recomputing their key from an empty `health_daily` would
+     * zero every install's folded total.
+     */
+    private fun Connection.deleteHealthAndRefold(installId: UUID): Int {
+        val candidates = select(
+            "SELECT DISTINCT day, platform, platform_app_version FROM health_daily WHERE install_id = ?", installId,
+        ) { rows -> buildList { do { add(rows.fleetKey()) } while (rows.next()) } } ?: emptyList()
+        lockFleet(candidates)
+        val removed = prepareStatement(
+            "DELETE FROM health_daily WHERE install_id = ? RETURNING day, platform, platform_app_version",
+        ).use { statement ->
+            statement.setObject(1, installId)
+            statement.executeQuery().use { rows -> buildList { while (rows.next()) add(rows.fleetKey()) } }
+        }
+        // The install row is locked, so no new health row of this install can appear: removed keys were all locked.
+        recomputeFleet(removed.distinct())
+        return removed.size
+    }
+
+    private fun ResultSet.fleetKey(): FleetKey = FleetKey(getObject(1, LocalDate::class.java), getString(2), getString(3))
+
+    /**
+     * One transaction, parent locks first, with the exact live-withdrawal deletion and lock order. A generation is
+     * erased unless its `erased_through` marker already covers the tombstone (#79): it enrolled after that
+     * withdrawal, or it applied that data deletion while still enrolled.
+     */
     suspend fun reapplyWithdrawals(): WithdrawalReplayReport = query {
         val candidates = prepareStatement(
-            """SELECT i.install_id, i.enrolled_at <= w.withdrawn_at AS erase
+            """SELECT i.install_id, (i.erased_through IS NULL OR i.erased_through < w.withdrawn_at) AS erase
                 FROM installs i JOIN withdrawals w
                     ON w.install_id_hash = encode(sha256(i.install_id::text::bytea), 'hex')
                 ORDER BY i.install_id FOR UPDATE OF i""",
@@ -208,11 +272,38 @@ class InstallStore(private val db: Database, private val clock: Clock) {
         }
     }
 
+    /**
+     * #79: the ordering marker on installs lives no longer than the tombstone it copies, and the two go together
+     * (Sol S4). Each batch picks one bounded set of expired tombstones, locks their install rows first (the lock order
+     * of withdrawal and deletion), then clears those markers and deletes those tombstones in the same transaction, so
+     * no restart can find a cleared marker beside a surviving tombstone and erase the install.
+     */
     suspend fun purgeWithdrawals(olderThan: Instant): Int = purge("withdrawals") {
-        update(
-            "DELETE FROM withdrawals WHERE ctid IN (SELECT ctid FROM withdrawals WHERE withdrawn_at <= ? LIMIT 1000)",
-            olderThan.atOffset(ZoneOffset.UTC),
-        )
+        val cutoff = olderThan.atOffset(ZoneOffset.UTC)
+        val hashes = prepareStatement(
+            "SELECT install_id_hash FROM withdrawals WHERE withdrawn_at <= ? ORDER BY install_id_hash LIMIT 1000",
+        ).use { statement ->
+            statement.setObject(1, cutoff)
+            statement.executeQuery().use { rows -> buildList { while (rows.next()) add(rows.getString(1)) } }
+        }
+        if (hashes.isEmpty()) return@purge 0
+        val batch = createArrayOf("text", hashes.toTypedArray())
+        try {
+            select(
+                """SELECT install_id FROM installs WHERE encode(sha256(install_id::text::bytea), 'hex') = ANY(?)
+                    ORDER BY install_id FOR UPDATE""",
+                batch,
+            ) { rows -> buildList { do { add(rows.getObject(1, UUID::class.java)) } while (rows.next()) } }
+            // Rechecked under the locks: an erasure that committed first moved both past the cutoff.
+            update(
+                """UPDATE installs SET erased_through = NULL
+                    WHERE encode(sha256(install_id::text::bytea), 'hex') = ANY(?) AND erased_through <= ?""",
+                batch, cutoff,
+            )
+            update("DELETE FROM withdrawals WHERE install_id_hash = ANY(?) AND withdrawn_at <= ?", batch, cutoff)
+        } finally {
+            batch.free()
+        }
     }
 
     suspend fun issueNonce(installId: UUID?): String = query {
@@ -239,13 +330,13 @@ class InstallStore(private val db: Database, private val clock: Clock) {
         ) == 1
     }
 
-    suspend fun remainingDue(today: LocalDate, now: Instant): Map<String, Long> = query {
+    suspend fun remainingDue(today: LocalDate, now: Instant, retention: Retention = Retention()): Map<String, Long> = query {
         mapOf(
             "nonces" to (select("SELECT count(*) FROM nonces WHERE issued_at < ?", now.minusSeconds(3600).atOffset(ZoneOffset.UTC)) { it.getLong(1) } ?: 0L),
             "ledger" to (select("SELECT count(*) FROM ingest_ledger WHERE day + 7 <= ?", today) { it.getLong(1) } ?: 0L),
             "envelopes" to (select("SELECT count(*) FROM trusted_envelopes WHERE purge_after <= ?", today) { it.getLong(1) } ?: 0L),
-            "health" to (select("SELECT count(*) FROM health_daily WHERE day + 180 <= ?", today) { it.getLong(1) } ?: 0L),
-            "withdrawals" to (select("SELECT count(*) FROM withdrawals WHERE withdrawn_at <= ?", now.minusSeconds(60*86400L).atOffset(ZoneOffset.UTC)) { it.getLong(1) } ?: 0L),
+            "health" to (select("SELECT count(*) FROM health_daily WHERE day + ? <= ?", retention.healthDailyDays, today) { it.getLong(1) } ?: 0L),
+            "withdrawals" to (select("SELECT count(*) FROM withdrawals WHERE withdrawn_at <= ?", now.minusSeconds(retention.withdrawalsDays * 86400L).atOffset(ZoneOffset.UTC)) { it.getLong(1) } ?: 0L),
         )
     }
 
@@ -288,24 +379,45 @@ class InstallStore(private val db: Database, private val clock: Clock) {
         return ids.size
     }
 
-    suspend fun purgeHealthDaily(olderThan: LocalDate): Int = purge("health") {
-        update("DELETE FROM health_daily WHERE ctid IN (SELECT ctid FROM health_daily WHERE day <= ? LIMIT 1000)", olderThan)
+    /**
+     * #79: fold, then forget. Each batch locks and recomputes the fleet rows of up to 100 (day, platform, version)
+     * keys from the per-install rows still present, then deletes those rows, in one transaction. After this the
+     * day exists only as fleet totals; a later deletion request cannot (and need not) find the install in them.
+     * Health reports older than 7 days are refused at ingest, so a folded day is never recomputed from a remnant.
+     */
+    suspend fun purgeHealthDaily(olderThan: LocalDate): Int = purgeBatches("health") {
+        val keys = select(
+            """SELECT DISTINCT day, platform, platform_app_version FROM health_daily WHERE day <= ?
+                ORDER BY day, platform, platform_app_version LIMIT $HEALTH_FOLD_KEYS""",
+            olderThan,
+        ) { rows -> buildList { do { add(FleetKey(rows.getObject(1, LocalDate::class.java), rows.getString(2), rows.getString(3))) } while (rows.next()) } }
+            ?: emptyList()
+        refreshFleet(keys)
+        val deleted = keys.sumOf { key ->
+            update("DELETE FROM health_daily WHERE day = ? AND platform = ? AND platform_app_version = ?", key.day, key.platform, key.version)
+        }
+        deleted to (keys.size == HEALTH_FOLD_KEYS)
     }
 
-    private suspend fun purge(name: String, batch: Connection.() -> Int): Int {
+    private suspend fun purge(name: String, batch: Connection.() -> Int): Int =
+        purgeBatches(name) { batch().let { count -> count to (count == 1000) } }
+
+    /** Each batch reports the rows it deleted and whether it was full (so another batch may be due). */
+    private suspend fun purgeBatches(name: String, batch: Connection.() -> Pair<Int, Boolean>): Int {
         var deleted = 0
         var batches = 0
-        var count: Int
+        var full: Boolean
         do {
             currentCoroutineContext().ensureActive()
-            count = try { query(batch) } catch (failure: Exception) {
+            val (count, more) = try { query(batch) } catch (failure: Exception) {
                 if (failure is kotlinx.coroutines.CancellationException) throw failure
                 throw SweepFailure(deleted.toLong(), batches, failure)
             }
+            full = more
             deleted += count
             batches++
-        } while (count == 1000 && batches < 50)
-        purgeLog.info("purge sweep={} deleted={} batches={} capped={}", name, deleted, batches, count == 1000 && batches == 50)
+        } while (full && batches < 50)
+        purgeLog.info("purge sweep={} deleted={} batches={} capped={}", name, deleted, batches, full && batches == 50)
         return deleted
     }
 
@@ -393,15 +505,22 @@ class InstallStore(private val db: Database, private val clock: Clock) {
         /** A tombstone key: exactly 64 lower-hex characters (the ConstantTimeGuard scans this file — a tombstone is not a credential, but the shape check is a pattern, not a comparison). */
         val TOMBSTONE_HASH: Regex = Regex("^[0-9a-f]{64}$")
 
+        /** Fleet keys folded per health retention batch (#79). */
+        const val HEALTH_FOLD_KEYS: Int = 100
+
         /** How far ahead of this server's clock a journal instant may sit (host clock skew), #1192. */
         const val JOURNAL_FUTURE_SKEW_SECONDS: Long = 300
 
         fun installIdHash(installId: UUID): String =
             MessageDigest.getInstance("SHA-256").digest(installId.toString().toByteArray(Charsets.UTF_8)).toLowerHex()
 
+        /** Every table keyed by `install_id`, children first; `PublicInstallsTest` fails when a new one is missing (#79). */
         val WITHDRAWAL_TABLES: List<String> = listOf(
             "trusted_envelopes", "health_daily", "token_sightings_v5", "cluster_sightings_v5", "ingest_ledger", "nonces", "installs",
         )
+
+        /** What "delete my data" erases (#79): every install-keyed table but the install row. */
+        val DATA_TABLES: List<String> = WITHDRAWAL_TABLES - "installs"
     }
 }
 

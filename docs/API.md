@@ -10,9 +10,12 @@ Public health/policy, identity, ingest and operator routes are implemented. Noti
 | POST | `/v1/enroll` | Implemented | Create or confirm an installation |
 | POST | `/v1/rotate` | Implemented | Replace the install secret |
 | DELETE | `/v1/installs/me` | Implemented | Withdraw the install and all its keyed rows |
+| DELETE | `/v1/installs/me/data` | Implemented | Delete the install's server data without withdrawing (#79) |
 | POST | `/v1/nonce` | Implemented | Issue a challenge bound to an install |
 | GET | `/v1/me` | Implemented | Day-level identity and remaining budgets |
 | POST | `/v1/skeletons` | Implemented | Admit skeleton batches under the advertised policy |
+| POST | `/v1/health` | Implemented | Daily recognition-health reports |
+| GET, POST | `/ops/pause` | Implemented | Read or set the upload pause switch (operator; POST needs TOTP) |
 | GET | `/ops/` | Implemented | Authenticated operator dashboard |
 
 `/healthz` returns `200 {"status":"ok"}`. `/readyz` returns the same when its bounded database probe succeeds, otherwise `503 {"status":"db_unavailable"}`. No database error details are exposed.
@@ -26,17 +29,21 @@ Public health/policy, identity, ingest and operator routes are implemented. Noti
     "quarantineDays": 7,
     "activeWindowDays": 30,
     "dailySkeletonBudget": 300,
+    "dailyBytesBudget": 10485760,
+    "dailyBatchBudget": 40,
+    "dailyHealthReportBudget": 60,
     "maxSkeletonBytes": 65536,
     "maxBatchItems": 100,
     "maxBatchBytes": 1048576,
     "acceptedSchemaIds": ["uinode.skeleton.v1"],
     "retention": {
         "tokenSightingsDays": 30,
-        "clusterSightingsDays": 90,
+        "clusterSightingsDays": 30,
         "trustedEnvelopesDays": 30,
-        "healthDailyDays": 180,
+        "healthDailyDays": 30,
         "ingestLedgerDays": 7,
-        "backupsDays": 14
+        "backupsDays": 14,
+        "withdrawalsDays": 60
     },
     "hashDomain": "census.v1"
 }
@@ -44,13 +51,14 @@ Public health/policy, identity, ingest and operator routes are implemented. Noti
 
 `imageDigest` is included when configured and omitted when absent (`explicitNulls = false`). Defaults are encoded. Policy is a data class; `POLICY_*` overrides are planned. `hashDomain` currently uses the documented fallback pending inspection of the sibling contract.
 
-Typed JSON decoding rejects unknown keys. Errors use `{"error":"<code>"}` without exception text. Authentication, headers, canonical HMAC bytes, and a worked signing vector are specified in [CLIENT.md](CLIENT.md). Only the prefix derived by successful authentication is logged; `X-Install-Id-Prefix` is ignored. Full IDs, bodies, credentials, IPs, arbitrary paths, and query strings are never logged. Exception diagnostics retain only the exception class-name chain and the outermost exception’s first three frames (`class.method:line`); exception messages and suppressed exceptions are never rendered.
+Typed JSON decoding rejects unknown keys. Errors use `{"error":"<code>"}` without exception text. Authentication, headers, canonical HMAC bytes, and a worked signing vector are specified in [CLIENT.md](CLIENT.md). No part of the install ID is logged, and `X-Install-Id-Prefix` is ignored (#79). IDs, bodies, credentials, IPs, arbitrary paths, and query strings are never logged. Exception diagnostics retain only the exception class-name chain and the outermost exception’s first three frames (`class.method:line`); exception messages and suppressed exceptions are never rendered.
 
 | Endpoint | Request | Success |
 | --- | --- | --- |
 | `POST /v1/enroll` | Bearer; JSON `{"installId":"<UUID v4>","appVersion":"1.2.3","schemaIds":["uinode.skeleton.v1"]}`; no signature required | `200`: the policy object above plus `"installIdPrefix":"<8 hex>"`; same key is idempotent |
 | `POST /v1/rotate` | Bearer + HMAC with old key; JSON `{"newSecret":"<base64url>"}` | `204`, empty body; new key takes effect immediately |
 | `DELETE /v1/installs/me` | Bearer + HMAC; empty body | `202 {"status":"withdrawn","completionDeadline":"<tomorrow UTC YYYY-MM-DD>"}` |
+| `DELETE /v1/installs/me/data` | Bearer + HMAC; empty body | `200 {"status":"deleted","rows":<erased rows>,"deletedDay":"<today UTC>","completionDeadline":"<tomorrow UTC>"}`; the credential stays valid |
 | `POST /v1/nonce` | Bearer + HMAC; empty body | `200 {"nonce":"<32 lowercase hex>","expiresInSeconds":300}` |
 | `GET /v1/me` | Bearer + HMAC; empty body | `200 {"installIdPrefix":"<8 hex>","createdDay":"YYYY-MM-DD","lastSeenDay":"YYYY-MM-DD","trusted":false,"budget":{"skeletonsRemainingToday":300,"bytesRemainingToday":10485760,"resetInSeconds":43200}}` (example remaining values) |
 
@@ -67,6 +75,8 @@ The enrollment body ID must equal the bearer's canonical lowercase UUID v4. `app
 | Enrollment/rotation, invalid JSON, unknown JSON key, invalid app version or new secret, more than 8 schema IDs or a malformed schema ID | `400` | `bad_request` |
 | All identity endpoints, oversized body | `413` | `payload_too_large` |
 | All identity endpoints, exhausted rate bucket | `429` | `rate_limited`, with `Retry-After` seconds |
+| Skeleton or health upload, per-install daily quota spent | `429` | `budget_exhausted`, with `Retry-After` to UTC midnight |
+| Skeleton or health upload from a non-trusted install while paused | `503` | `paused`, with `Retry-After: 3600` |
 | Unexpected failures | `500` | `internal_error` |
 
 Before authentication reads a body or accesses the database, a global token bucket (capacity 600, refill 600/minute, configurable through `AdmissionLimiter`) runs ahead of per-ID buckets (capacity 120, refill 120/minute). Each attempt reaching the global bucket spends a token even if its per-ID check fails. A shared semaphore allows at most 32 in-flight authentication decisions, with zero wait for a permit and release in `finally`. Exhausted buckets or permits return `429 rate_limited` with `Retry-After: 1`.
@@ -79,9 +89,11 @@ Rotation and withdrawal revalidate the current credential within their own trans
 
 Authentication captures one instant in `RequestInstantKey` for admission, the signature timestamp window, the last-seen UTC day, and the route's ledger day and `resetInSeconds`. Routes fall back to the clock only when the attribute is absent. Last-seen updates are monotonic, bound to the verified credential, and exclude revoked rows; `GET /v1/me` re-reads the stored row instead of echoing the attempted day. Counters and reset describe the same UTC day even at midnight.
 
-Withdrawal deletes `trusted_envelopes`, `health_daily`, `token_sightings`, `cluster_sightings`, `ingest_ledger`, `nonces`, and `installs` in one transaction. Shared aggregate/catalog tables are retained. Deletion is synchronous; the deadline preserves a future asynchronous contract. Nonces are single-use with a 300-second validity window. HMAC signatures remain replayable within their timestamp window; S4 batch admission will use the ledger for replay protection.
+Withdrawal deletes `trusted_envelopes`, `health_daily`, `token_sightings_v5`, `cluster_sightings_v5`, `ingest_ledger`, `nonces`, and `installs` in one transaction (`InstallStore.WITHDRAWAL_TABLES`; a test fails when a table keyed by `install_id` is missing from it), and recomputes the `health_fleet_daily` rows the erased health still fed. Shared aggregate/catalog tables are retained; health days already folded into fleet totals hold no trace of the install.
 
-Budget helpers expose a 300 accepted-skeleton default, 10 MiB, and 40 distinct batches per UTC day, with retries at the next UTC midnight. The ledger accumulates bytes, accepted/duplicate counts and rejection counts, deduplicating stored batch IDs. `tryConsume` atomically enforces byte, accepted-item, and distinct-batch limits in one conditional PostgreSQL upsert, returning remaining allowances or seconds to UTC midnight. `recordIngest` only increments rejected/duplicate counters. Ingest calls these primitives; identity routes report budgets. The purge job starts one minute after startup and runs every six hours, deleting nonces older than one hour and ledger days strictly older than today minus seven days. Operator revocation is implemented; the remaining lifecycle gaps are documented in ARCHITECTURE.md.
+"Delete my data" (`DELETE /v1/installs/me/data`, #79) runs the same erasure in one transaction, parent row locked first, except that the `installs` row and the ledger rows from today on stay: the credential keeps working, today's quota is not reset, and a batch sent before the deletion is answered `duplicate` rather than stored again. It writes the same hashed tombstone as a withdrawal and the same off-host journal notice, and copies the tombstone instant into `installs.erased_through`; startup replay leaves a generation alone when that marker covers its tombstone. After a restore from a backup older than the deletion the marker is missing, and replay erases that generation whole (the journal does not record which kind of erasure it was), so the app re-enrols. Shared cluster samples carry no install ID: the hashes only this install sent expire at the next lifecycle pass, as do vocabulary entries it alone held at k, before `completionDeadline`. Neither request is refused by the pause switch. Deletion is synchronous; the deadline preserves a future asynchronous contract. Nonces are single-use with a 300-second validity window. HMAC signatures remain replayable within their timestamp window; S4 batch admission will use the ledger for replay protection.
+
+Budget helpers expose a 300 accepted-skeleton default, 10 MiB, 40 distinct batches and 60 health reports per install per UTC day, all from `Policy` (`Policy.budget()`, #79), with retries at the next UTC midnight. The health-report count is checked under the ledger row lock before any byte is charged. The ledger accumulates bytes, accepted/duplicate counts and rejection counts, deduplicating stored batch IDs. `tryConsume` atomically enforces byte, accepted-item, and distinct-batch limits in one conditional PostgreSQL upsert, returning remaining allowances or seconds to UTC midnight. `recordIngest` only increments rejected/duplicate counters. Ingest calls these primitives; identity routes report budgets. The purge job starts one minute after startup and runs every six hours, deleting nonces older than one hour and ledger days strictly older than today minus seven days. Operator revocation is implemented; the remaining lifecycle gaps are documented in ARCHITECTURE.md.
 
 ## Notification skeletons — #1189 slice 2
 

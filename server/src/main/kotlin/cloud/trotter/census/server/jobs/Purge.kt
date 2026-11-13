@@ -42,7 +42,7 @@ class PurgeJob(
         val health = sweep("health") { store.purgeHealthDaily(today.minusDays(policy.retention.healthDailyDays.toLong())) }
         val withdrawals = sweep("withdrawals") { store.purgeWithdrawals(now.minusSeconds(policy.retention.withdrawalsDays * 86400L)) }
         try {
-            for ((name, due) in store.remainingDue(today, now)) results[name] = results.getValue(name).copy(remainingDue = due)
+            for ((name, due) in store.remainingDue(today, now, policy.retention)) results[name] = results.getValue(name).copy(remainingDue = due)
         } catch (failure: Exception) {
             if (failure is CancellationException) throw failure
             results["retention_counts"] = SweepResult(failed = true)

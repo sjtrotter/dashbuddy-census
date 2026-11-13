@@ -22,8 +22,8 @@ import java.time.ZoneOffset
 import java.util.concurrent.atomic.AtomicLong
 import org.slf4j.LoggerFactory
 
-/** Only this verified prefix may reach CallLogging. Never retain the secret in attributes. */
-data class AuthenticatedInstall(val id: String, val prefix: String, val secretHash: String)
+/** The verified credential for this call. No part of [id] reaches a log (#79). Never retain the secret in attributes. */
+data class AuthenticatedInstall(val id: String, val secretHash: String)
 
 val AuthenticatedInstallKey = AttributeKey<AuthenticatedInstall>("AuthenticatedInstall")
 val AuthenticatedBodyKey = AttributeKey<ByteArray>("AuthenticatedBody")
@@ -116,7 +116,7 @@ val InstallAuth = createRouteScopedPlugin("InstallAuth", ::InstallAuthConfig) {
             val today = now.atOffset(ZoneOffset.UTC).toLocalDate()
             if (row.lastSeenDay < today) store.touchLastSeen(row.id, hash, today)
             val id = bearer.installId.value
-            call.attributes.put(AuthenticatedInstallKey, AuthenticatedInstall(id, id.take(8), hash))
+            call.attributes.put(AuthenticatedInstallKey, AuthenticatedInstall(id, hash))
             call.attributes.put(AuthenticatedBodyKey, body)
             call.attributes.put(InstallRowKey, row)
             AuthStats.record(AuthStats.ok)

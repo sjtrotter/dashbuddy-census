@@ -13,7 +13,7 @@ class InstallTest {
         val day = LocalDate.of(2026, 10, 2)
         val hash = "PRIVATE_KEY_HASH_SENTINEL"
         val rendered = Install(id, day, day, false, hash, null).toString()
-        assertTrue(rendered.startsWith("Install(id=12345678…, keyHash=[redacted], "))
+        assertTrue(rendered.startsWith("Install(id=[redacted], keyHash=[redacted], "))
         assertTrue(rendered.contains("lastSeenDay=2026-10-02"))
         assertFalse(rendered.contains(hash))
         assertFalse(rendered.contains(id.toString()))

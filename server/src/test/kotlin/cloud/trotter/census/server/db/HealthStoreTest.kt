@@ -19,6 +19,7 @@ import cloud.trotter.census.server.jobs.Alarm
 import cloud.trotter.census.server.jobs.AlarmSink
 import cloud.trotter.census.server.jobs.HealthAlarms
 import cloud.trotter.census.server.jobs.PurgeJob
+import cloud.trotter.census.server.jobs.renderAlarm
 import cloud.trotter.census.server.module
 import cloud.trotter.census.server.secret
 import cloud.trotter.census.server.signed
@@ -88,6 +89,15 @@ class HealthStoreTest {
                     SELECT ?, ?::date - n, 'doordash', '1.0.0', 0, 0, 0, '{}'::jsonb FROM generate_series(1, ?) n""", id, day.minusDays(180), rows,
             )
         }
+        // #79 (Sol S5): silence reads only health inside retention, so the trusted install needs a recent report day.
+        fun recentReport() = sql { connection ->
+            connection.update("DELETE FROM health_daily WHERE install_id = ? AND platform_app_version = '9.9.9'", id)
+            connection.update(
+                """INSERT INTO health_daily (install_id, day, platform, platform_app_version, admitted, unknown, trips, rule_counts)
+                    VALUES (?, ?, 'doordash', '9.9.9', 0, 0, 0, '{}'::jsonb)""",
+                id, instant.atOffset(ZoneOffset.UTC).toLocalDate().minusDays(2),
+            )
+        }
         try {
             Database.connect(config()).use { db ->
                 val store = InstallStore(db, clock)
@@ -102,9 +112,11 @@ class HealthStoreTest {
                     assertEquals(1001, report.healthRows)
                     assertEquals(1, count("nonces", id))
                     assertTrue(logs.list.any { it.formattedMessage == "purge sweep=nonces deleted=50000 batches=50 capped=true" })
-                    for (name in listOf("ledger", "envelopes", "health")) {
+                    for (name in listOf("ledger", "envelopes")) {
                         assertTrue(logs.list.any { it.formattedMessage == "purge sweep=$name deleted=1001 batches=2 capped=false" })
                     }
+                    // #79: health folds 100 (day, platform, version) keys per batch; the seed has 1001 distinct days.
+                    assertTrue(logs.list.any { it.formattedMessage == "purge sweep=health deleted=1001 batches=11 capped=false" })
                     assertEquals(1, job.runOnce().nonces)
                     sql { it.update("CREATE FUNCTION census_test_purge_failure() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RAISE EXCEPTION ''PRIVATE_SWEEP_FAILURE''; END;'") }
                     try {
@@ -133,6 +145,7 @@ class HealthStoreTest {
                     val alarms = HealthAlarms(HealthStore(db, clock), clock, startedAt = clock.now(), sink = AlarmSink { throw IllegalStateException("PRIVATE_SILENCE_FAILURE") })
                     instant = instant.plusSeconds(48 * 3600)
                     seed(1, 1)
+                    recentReport()
                     logs.list.clear()
                     val afterSilence = PurgeJob(store, clock, alarms = alarms).runOnce()
                     assertEquals(listOf(1, 1, 1, 1), listOf(afterSilence.nonces, afterSilence.ledgerRows, afterSilence.trustedEnvelopes, afterSilence.healthRows))
@@ -142,10 +155,11 @@ class HealthStoreTest {
                     val cancelling = HealthAlarms(HealthStore(db, clock), clock, startedAt = clock.now(), sink = AlarmSink { throw CancellationException("PRIVATE_CANCELLATION") })
                     instant = instant.plusSeconds(48 * 3600)
                     seed(1, 1)
+                    recentReport()
                     logs.list.clear()
                     assertTrue(runCatching { PurgeJob(store, clock, alarms = cancelling).runOnce() }.exceptionOrNull() is CancellationException)
                     assertTrue(logs.list.none { it.level == Level.WARN })
-                    for (table in tables.values) assertEquals(1, count(table, id))
+                    for (table in tables.values) assertEquals(if (table == "health_daily") 2 else 1, count(table, id))
                 } finally {
                     store.withdraw(id, hash)
                 }
@@ -198,7 +212,7 @@ class HealthStoreTest {
                 assertTrue(runCatching { evaluator.evaluate(second, listOf(half), hash) }.exceptionOrNull() is IllegalStateException)
                 evaluator.evaluate(second, listOf(half), hash)
                 evaluator.evaluate(second, listOf(half), hash)
-                assertEquals(listOf(Alarm("silent_rule_death", "doordash", "2.0.0", second.toString().take(8), listOf("a.b"))), delivered)
+                assertEquals(listOf(Alarm("silent_rule_death", "doordash", "2.0.0", listOf("a.b"))), delivered)
 
                 for (platform in listOf("doordash", "uber")) {
                     val report = initial.copy(platform = platform, unknown = 400)
@@ -341,7 +355,7 @@ class HealthStoreTest {
                 evaluator.evaluate(first, listOf(fuller), hash)
                 assertEquals(listOf("trips", "fleet_unknown", "new_clusters"), alarms.map { it.kind })
                 assertEquals(mapOf("trips" to 1L, "fleet_unknown" to 1L, "new_clusters" to 1L), evaluator.stats.snapshot())
-                assertEquals(first.toString().take(8), alarms.first().installPrefix)
+                assertFalse(renderAlarm(alarms.first()).contains(first.toString().take(8)))
 
                 val fixture = healthFixture()
                 for (invalid in listOf("[]", "{}", body(emptyList()), "[".repeat(97))) {
@@ -370,7 +384,7 @@ class HealthStoreTest {
                 purge.runOnce()
                 purge.runOnce()
                 assertEquals(1, alarms.count { it.kind == "silence" })
-                assertEquals(first.toString().take(8), alarms.last().installPrefix)
+                assertEquals("kind=silence\nplatform=doordash\nversion=8.0.0\ninstall_prefix=-\nrule_ids=[]", renderAlarm(alarms.last()))
                 evaluator.evaluate(first, listOf(fuller), hash)
                 assertEquals(2, alarms.count { it.kind == "trips" })
 

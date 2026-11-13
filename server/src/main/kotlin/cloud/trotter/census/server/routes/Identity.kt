@@ -3,6 +3,7 @@ package cloud.trotter.census.server.routes
 import cloud.trotter.census.server.Clock
 import cloud.trotter.census.server.ErrorResponse
 import cloud.trotter.census.server.Policy
+import cloud.trotter.census.server.budget
 import cloud.trotter.census.server.auth.AuthenticatedBodyKey
 import cloud.trotter.census.server.auth.AuthenticatedInstallKey
 import cloud.trotter.census.server.auth.InstallAuth
@@ -16,7 +17,6 @@ import cloud.trotter.census.server.db.EnrolOutcome
 import cloud.trotter.census.server.db.InstallStore
 import cloud.trotter.census.server.db.MutationOutcome
 import cloud.trotter.census.server.ingest.Budget
-import cloud.trotter.census.server.ingest.BudgetPolicy
 import cloud.trotter.census.server.ingest.parseBounded
 import cloud.trotter.census.server.jobs.HealthAlarms
 import cloud.trotter.census.server.secondsToUtcMidnight
@@ -54,7 +54,7 @@ fun Route.identityRoutes(
     if (store == null) {
         listOf(
             HttpMethod.Post to "/v1/enroll", HttpMethod.Post to "/v1/rotate", HttpMethod.Post to "/v1/nonce",
-            HttpMethod.Delete to "/v1/installs/me", HttpMethod.Get to "/v1/me", HttpMethod.Post to "/v1/skeletons",
+            HttpMethod.Delete to "/v1/installs/me", HttpMethod.Delete to "/v1/installs/me/data", HttpMethod.Get to "/v1/me", HttpMethod.Post to "/v1/skeletons",
             HttpMethod.Post to "/v1/envelopes", HttpMethod.Post to "/v1/health",
         ).forEach { (method, path) ->
             route(path, method) { handle { call.respond(HttpStatusCode.ServiceUnavailable, ErrorResponse("db_unavailable")) } }
@@ -154,6 +154,26 @@ fun Route.identityRoutes(
                     MutationOutcome.StaleCredential -> call.respond(HttpStatusCode.Unauthorized, ErrorResponse("unauthorized"))
                 }
             }
+            // #79: "delete my data" without withdrawing. Never paused. The credential stays valid; uploads may resume.
+            delete("/installs/me/data") {
+                val now = call.attributes.getOrNull(RequestInstantKey) ?: clock.now()
+                val today = now.atOffset(ZoneOffset.UTC).toLocalDate()
+                val installId = call.attributes[InstallRowKey].id
+                when (val result = store.deleteData(installId, call.attributes[AuthenticatedInstallKey].secretHash, today)) {
+                    is MutationOutcome.Applied -> {
+                        call.application.environment.log.info("delete_data rows={}", result.deletedRows.values.sum())
+                        // The same off-host journal row as a withdrawal, so a restore re-applies it; best-effort.
+                        runCatching {
+                            alarms?.recordWithdrawal(InstallStore.installIdHash(installId), requireNotNull(result.withdrawnAt))
+                        }.onFailure { call.application.environment.log.warn("deletion notice failed class={}", it.javaClass.simpleName) }
+                        call.respond(DeletionResponse(
+                            rows = result.deletedRows.values.sum(), deletedDay = today.toString(),
+                            completionDeadline = today.plusDays(1).toString(),
+                        ))
+                    }
+                    MutationOutcome.StaleCredential -> call.respond(HttpStatusCode.Unauthorized, ErrorResponse("unauthorized"))
+                }
+            }
             rateLimit(RateLimitName("nonce")) {
                 post("/nonce") {
                     call.respond(NonceResponse(store.issueNonce(call.attributes[InstallRowKey].id)))
@@ -170,7 +190,7 @@ fun Route.identityRoutes(
                     call.respond(HttpStatusCode.Unauthorized, ErrorResponse("unauthorized"))
                     return@get
                 }
-                val budget = Budget(clock, BudgetPolicy(dailySkeletonBudget = policy.dailySkeletonBudget))
+                val budget = Budget(clock, policy.budget())
                 call.respond(
                     MeResponse(
                         installId.toString().take(8), me.createdDay.toString(), me.lastSeenDay.toString(), me.trusted,
@@ -198,6 +218,18 @@ private data class EnrolRequest(val installId: String, val appVersion: String, v
 private data class RotateRequest(val newSecret: String)
 @Serializable
 private data class WithdrawalResponse(val status: String = "withdrawn", val completionDeadline: String)
+/**
+ * #79: the confirmation the app shows. [rows] counts the per-install rows erased now; shared samples lose the hashes
+ * only this install sent, and vocabulary entries it alone kept above k drop, at the next lifecycle pass, before
+ * [completionDeadline].
+ */
+@Serializable
+private data class DeletionResponse(
+    val status: String = "deleted",
+    val rows: Int,
+    val deletedDay: String,
+    val completionDeadline: String,
+)
 @Serializable
 private data class NonceResponse(val nonce: String, val expiresInSeconds: Int = 300)
 @Serializable

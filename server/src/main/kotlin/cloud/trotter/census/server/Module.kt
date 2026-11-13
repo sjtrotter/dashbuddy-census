@@ -5,6 +5,7 @@ import cloud.trotter.census.server.db.EnvelopeStore
 import cloud.trotter.census.server.db.HealthStore
 import cloud.trotter.census.server.db.InstallStore
 import cloud.trotter.census.server.db.OpsStore
+import cloud.trotter.census.server.db.PauseStore
 import cloud.trotter.census.server.db.SkeletonStore
 import cloud.trotter.census.server.jobs.HealthAlarms
 import cloud.trotter.census.server.ops.ClustersPageHtml
@@ -83,10 +84,10 @@ fun Application.module(
                 "OPTIONS" -> "OPTIONS"
                 else -> "OTHER"
             }
-            val prefix = call.attributes.getOrNull(AuthenticatedInstallKey)?.prefix ?: "-"
+            // #79: no install key of any length. Abuse handling reads the authenticated /ops ledger, not this log.
             "method=$method " +
                 "path=$path status=${call.response.status()?.value ?: 0} " +
-                "duration_ms=${call.processingTimeMillis()} install_prefix=$prefix"
+                "duration_ms=${call.processingTimeMillis()}"
         }
     }
     install(RateLimit) {
@@ -149,19 +150,20 @@ fun Application.module(
         val store = db?.let { InstallStore(it, clock) }
         val skeletons = db?.let { SkeletonStore(it, clock) }
         val envelopes = db?.let { EnvelopeStore(it, clock) }
-        val health = db?.let { HealthStore(it, clock) }
+        val health = db?.let { HealthStore(it, clock, policy.retention.healthDailyDays) }
+        val pause = db?.let { PauseStore(it, clock) }
         val alarms = alarmEvaluator ?: health?.let { HealthAlarms(it, clock) }
-        opsRoutes(config, db?.let { OpsStore(it, clock, policy) }, alarms, clock, policy, lifecycle = lifecycle, enrolStats = enrolStats)
+        opsRoutes(config, db?.let { OpsStore(it, clock, policy) }, alarms, clock, policy, lifecycle = lifecycle, enrolStats = enrolStats, pause = pause)
         identityRoutes(store, clock, policy, alarms, enrolStats) {
-            if (store != null && skeletons != null) skeletonRoutes(store, skeletons, clock, policy)
+            if (store != null && skeletons != null && pause != null) skeletonRoutes(store, skeletons, clock, policy, pause)
             if (envelopes != null) envelopeRoutes(envelopes, clock, policy)
-            if (health != null && alarms != null) healthReportRoutes(health, alarms, clock, policy)
+            if (health != null && alarms != null && pause != null) healthReportRoutes(health, alarms, clock, policy, pause)
         }
     }
 }
 
 private val LOGGABLE_PATHS = setOf(
-    "/healthz", "/readyz", "/v1/policy", "/v1/enroll", "/v1/rotate", "/v1/nonce", "/v1/installs/me", "/v1/me", "/v1/skeletons",
+    "/healthz", "/readyz", "/v1/policy", "/v1/enroll", "/v1/rotate", "/v1/nonce", "/v1/installs/me", "/v1/installs/me/data", "/v1/me", "/v1/skeletons",
     "/v1/envelopes", "/v1/health", "/ops",
 )
 

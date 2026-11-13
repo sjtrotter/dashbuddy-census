@@ -60,11 +60,11 @@ class HealthAlarmsTest {
 
     @Test
     fun `unknown surge thresholds include trips fleet ratio and new clusters`() {
-        val report = DayReport(day, "doordash", "8.0", 10, trips = 1, installPrefix = "12345678")
+        val report = DayReport(day, "doordash", "8.0", 10, trips = 1)
         val fleet = FleetDay(day, "doordash", "8.0", 2, 10, unknown = 10)
         val alarms = unknownSurge(listOf(report), listOf(fleet), listOf(NewClusterCount("doordash", "8.0", 5)))
         assertEquals(listOf("trips", "fleet_unknown", "new_clusters"), alarms.map { it.kind })
-        assertEquals("12345678", alarms.first().installPrefix)
+        assertEquals("kind=trips\nplatform=doordash\nversion=8.0\ninstall_prefix=-\nrule_ids=[]", renderAlarm(alarms.first()))
         assertTrue(unknownSurge(listOf(report.copy(trips = 0)), listOf(fleet.copy(unknown = 9)), listOf(NewClusterCount("doordash", "8.0", 4))).isEmpty())
         assertTrue(unknownSurge(emptyList(), listOf(fleet.copy(installsReporting = 1))).isEmpty())
         assertTrue(unknownSurge(emptyList(), listOf(fleet.copy(admitted = 0, unknown = 0))).isEmpty())
@@ -92,10 +92,10 @@ class HealthAlarmsTest {
         val logs = ListAppender<ILoggingEvent>().apply { start() }
         logger.addAppender(logs)
         try {
-            LoggingAlarmSink().raise(Alarm("silent_rule_death", "doordash", "8.0", "12345678", listOf(offer)))
+            LoggingAlarmSink().raise(Alarm("silent_rule_death", "doordash", "8.0", listOf(offer)))
             val event = logs.list.single()
             assertEquals(Level.WARN, event.level)
-            assertEquals("alarm kind=silent_rule_death platform=doordash version=8.0 install_prefix=12345678 rule_ids=[$offer]", event.formattedMessage)
+            assertEquals("alarm kind=silent_rule_death platform=doordash version=8.0 install_prefix=- rule_ids=[$offer]", event.formattedMessage)
             LoggingAlarmSink().raise(Alarm("trips", "doordash", "PRIVATE_CUSTOMER_JANE"))
             assertEquals("alarm kind=trips platform=doordash version=[redacted] install_prefix=- rule_ids=[]", logs.list.last().formattedMessage)
             LoggingAlarmSink().raise(Alarm("silent_rule_death", "PRIVATE_PLATFORM", "1.0.0", ruleIds = listOf("PRIVATE_RULE", offer)))

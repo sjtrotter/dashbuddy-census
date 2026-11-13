@@ -118,7 +118,7 @@ class DashboardRenderTest {
         val rules = page.substringAfter("<summary>Rule counts</summary>").substringBefore("</details>")
         assertTrue(rules.indexOf("doordash.a") < rules.indexOf("doordash.z"))
         assertTrue(page.indexOf("a_reason: 1") < page.indexOf("z_reason: 4"))
-        for (copy in listOf("12,480 B", "1,240", "Queue entries · 2 shown of 12,480", "Install records · 2 shown", "delivery_failed", "Not install-specific", "1.2.3+[build withheld]")) assertTrue(page.contains(copy), copy)
+        for (copy in listOf("12,480 B", "1,240", "Queue entries · 2 shown of 12,480", "Install records · 2 shown", "delivery_failed", "1.2.3+[build withheld]")) assertTrue(page.contains(copy), copy)
         assertEquals(2, Regex(">words:2</span>").findAll(page).count())
         val populatedMetrics = page.substringAfter("aria-label=\"Snapshot\"").substringBefore("</nav>")
         val populatedValues = Regex("href=\"#([^\"]+)\" class=\"metric\">.*?<span class=\"metric-value(?: date)?\">(.*?)</span>", RegexOption.DOT_MATCHES_ALL)

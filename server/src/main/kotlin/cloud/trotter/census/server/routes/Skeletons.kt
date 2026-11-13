@@ -3,14 +3,15 @@ package cloud.trotter.census.server.routes
 import cloud.trotter.census.server.Clock
 import cloud.trotter.census.server.ErrorResponse
 import cloud.trotter.census.server.Policy
+import cloud.trotter.census.server.budget
 import cloud.trotter.census.server.auth.AuthenticatedBodyKey
 import cloud.trotter.census.server.auth.AuthenticatedInstallKey
 import cloud.trotter.census.server.auth.InstallRowKey
 import cloud.trotter.census.server.auth.RequestInstantKey
 import cloud.trotter.census.server.db.IngestOutcome
 import cloud.trotter.census.server.db.InstallStore
+import cloud.trotter.census.server.db.PauseStore
 import cloud.trotter.census.server.db.SkeletonStore
-import cloud.trotter.census.server.ingest.BudgetPolicy
 import cloud.trotter.census.server.ingest.ItemVerdict
 import cloud.trotter.census.server.ingest.SkeletonValidator
 import cloud.trotter.census.server.ingest.parseBounded
@@ -31,8 +32,9 @@ private val batchIdPattern = Regex("[A-Za-z0-9_-]{1,64}")
 private val ingestLog = LoggerFactory.getLogger("Ingest")
 
 /** Mounted inside identityRoutes' authenticated install rate limit; the body was already read and signed. */
-fun Route.skeletonRoutes(store: InstallStore, skeletons: SkeletonStore, clock: Clock, policy: Policy) {
+fun Route.skeletonRoutes(store: InstallStore, skeletons: SkeletonStore, clock: Clock, policy: Policy, pause: PauseStore) {
     post("/skeletons") {
+        if (call.refusedByPause(pause)) return@post
         val rawBody = call.attributes[AuthenticatedBodyKey]
         val body = parseBounded(rawBody) as? JsonObject
         val batchId = (body?.get("batchId") as? JsonPrimitive)?.takeIf { it.isString }?.content
@@ -48,7 +50,6 @@ fun Route.skeletonRoutes(store: InstallStore, skeletons: SkeletonStore, clock: C
         val now = call.attributes.getOrNull(RequestInstantKey) ?: clock.now()
         val today = now.atOffset(ZoneOffset.UTC).toLocalDate()
         val installId = call.attributes[InstallRowKey].id
-        val prefix = installId.toString().take(8)
         val accepted = mutableListOf<ItemVerdict.Accepted>()
         val rejected = linkedMapOf<String, Int>()
         for (element in items) {
@@ -64,7 +65,7 @@ fun Route.skeletonRoutes(store: InstallStore, skeletons: SkeletonStore, clock: C
                 call.respond(HttpStatusCode.Unauthorized, ErrorResponse("unauthorized"))
                 return@post
             }
-            logBatch(prefix, 0, 0, rejected, rawBody.size, "batch_quality")
+            logBatch(0, 0, rejected, rawBody.size, "batch_quality")
             call.respond(HttpStatusCode.UnprocessableEntity, BatchQualityResponse(rejected = rejected))
             return@post
         }
@@ -73,21 +74,21 @@ fun Route.skeletonRoutes(store: InstallStore, skeletons: SkeletonStore, clock: C
         val outcome = skeletons.ingest(
             installId, keyHash, today, accepted, duplicate, rejected,
             batchId, rawBody.size.toLong(),
-            BudgetPolicy(dailySkeletonBudget = policy.dailySkeletonBudget), now,
+            policy.budget(), now,
         )
         when (outcome) {
             IngestOutcome.StaleCredential -> call.respond(HttpStatusCode.Unauthorized, ErrorResponse("unauthorized"))
             IngestOutcome.Duplicate -> {
-                logBatch(prefix, 0, items.size, emptyMap(), rawBody.size, "duplicate")
+                logBatch(0, items.size, emptyMap(), rawBody.size, "duplicate")
                 call.respond(SkeletonBatchResponse("duplicate", 0, items.size, emptyMap()))
             }
             is IngestOutcome.BudgetExhausted -> {
-                logBatch(prefix, 0, 0, rejected, rawBody.size, "budget_exhausted")
+                logBatch(0, 0, rejected, rawBody.size, "budget_exhausted")
                 call.response.headers.append(HttpHeaders.RetryAfter, outcome.retryAfterSeconds.toString())
                 call.respond(HttpStatusCode.TooManyRequests, ErrorResponse("budget_exhausted"))
             }
             is IngestOutcome.Stored -> {
-                logBatch(prefix, accepted.size - duplicate, duplicate, rejected, rawBody.size, "accepted")
+                logBatch(accepted.size - duplicate, duplicate, rejected, rawBody.size, "accepted")
                 val budget = outcome.consumed
                 call.respond(SkeletonBatchResponse(
                     "accepted", accepted.size - duplicate, duplicate, rejected,
@@ -100,10 +101,11 @@ fun Route.skeletonRoutes(store: InstallStore, skeletons: SkeletonStore, clock: C
     }
 }
 
-private fun logBatch(prefix: String, accepted: Int, duplicate: Int, rejected: Map<String, Int>, bytes: Int, status: String) {
+/** Counts only: no install key of any length (#79). */
+private fun logBatch(accepted: Int, duplicate: Int, rejected: Map<String, Int>, bytes: Int, status: String) {
     ingestLog.info(
-        "ingest install_prefix={} accepted={} duplicate={} rejected={} bytes={} status={}",
-        prefix, accepted, duplicate, rejected.values.sum(), bytes, status,
+        "ingest accepted={} duplicate={} rejected={} bytes={} status={}",
+        accepted, duplicate, rejected.values.sum(), bytes, status,
     )
     ingestLog.debug("ingest rejected_by_reason={}", rejected)
 }

@@ -3,13 +3,13 @@ package cloud.trotter.census.server.routes
 import cloud.trotter.census.server.Clock
 import cloud.trotter.census.server.ErrorResponse
 import cloud.trotter.census.server.Policy
+import cloud.trotter.census.server.budget
 import cloud.trotter.census.server.auth.AuthenticatedBodyKey
 import cloud.trotter.census.server.auth.AuthenticatedInstallKey
 import cloud.trotter.census.server.auth.InstallRowKey
 import cloud.trotter.census.server.auth.RequestInstantKey
 import cloud.trotter.census.server.db.EnvelopeOutcome
 import cloud.trotter.census.server.db.EnvelopeStore
-import cloud.trotter.census.server.ingest.BudgetPolicy
 import cloud.trotter.census.server.ingest.EnvelopeValidator
 import cloud.trotter.census.server.ingest.EnvelopeVerdict
 import cloud.trotter.census.server.ingest.parseBounded
@@ -63,20 +63,20 @@ fun Route.envelopeRoutes(envelopes: EnvelopeStore, clock: Clock, policy: Policy)
         fun logBatch(count: Int, duplicate: Int, reasons: Map<String, Int>, status: String, stored: EnvelopeOutcome.Stored? = null) {
             if (stored == null) {
                 envelopeLog.info(
-                    "ingest kind=envelopes install_prefix={} accepted={} duplicate={} rejected={} bytes={} status={}",
-                    install.id.toString().take(8), count, duplicate, reasons.values.sum(), rawBody.size, status,
+                    "ingest kind=envelopes accepted={} duplicate={} rejected={} bytes={} status={}",
+                    count, duplicate, reasons.values.sum(), rawBody.size, status,
                 )
             } else {
                 envelopeLog.info(
-                    "ingest kind=envelopes install_prefix={} accepted={} duplicate={} rejected={} bytes={} status={} paired={} unpaired={}",
-                    install.id.toString().take(8), count, duplicate, reasons.values.sum(), rawBody.size, status, stored.paired, stored.unpaired,
+                    "ingest kind=envelopes accepted={} duplicate={} rejected={} bytes={} status={} paired={} unpaired={}",
+                    count, duplicate, reasons.values.sum(), rawBody.size, status, stored.paired, stored.unpaired,
                 )
             }
             envelopeLog.debug("ingest kind=envelopes rejected_by_reason={}", reasons)
         }
         when (val result = envelopes.ingest(
             install.id, call.attributes[AuthenticatedInstallKey].secretHash, today, accepted, rejected, batchId,
-            rawBody.size.toLong(), BudgetPolicy(dailySkeletonBudget = policy.dailySkeletonBudget),
+            rawBody.size.toLong(), policy.budget(),
             policy.retention.trustedEnvelopesDays, now,
         )) {
             EnvelopeOutcome.StaleCredential -> call.respond(HttpStatusCode.Unauthorized, ErrorResponse("unauthorized"))

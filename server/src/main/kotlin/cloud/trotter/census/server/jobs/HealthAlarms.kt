@@ -23,7 +23,6 @@ data class DayReport(
     val unknown: Long = 0,
     val trips: Long = 0,
     val ruleCounts: Map<String, Long> = emptyMap(),
-    val installPrefix: String? = null,
 )
 
 data class FleetDay(
@@ -38,11 +37,11 @@ data class FleetDay(
 
 data class NewClusterCount(val platform: String, val version: String, val count: Int)
 
+/** An alarm names a kind, a platform and a version, never an install (#79). */
 data class Alarm(
     val kind: String,
     val platform: String,
     val version: String,
-    val installPrefix: String? = null,
     val ruleIds: List<String> = emptyList(),
     val message: String? = null,
 )
@@ -72,14 +71,14 @@ fun renderAlarm(alarm: Alarm): String {
     val kind = alarm.kind.takeIf { it in alarmKinds } ?: "[redacted]"
     val platform = alarm.platform.takeIf { platformPattern.matches(it) } ?: "[redacted]"
     val version = alarm.version.takeIf { WireGrammars.platformAppVersion.matches(it) } ?: "[redacted]"
-    val prefix = alarm.installPrefix?.let { it.takeIf { candidate -> installPrefixPattern.matches(candidate) } ?: "[redacted]" } ?: "-"
     val rules = alarm.ruleIds.map { it.takeIf { rule -> WireGrammars.ruleId.matches(rule) } ?: "[redacted]" }
-    return "kind=$kind\nplatform=$platform\nversion=$version\ninstall_prefix=$prefix\nrule_ids=$rules"
+    // #79: alarms carry no install key. The line stays, always `-`, because the deployed host publisher's grammar
+    // requires exactly these five lines; dropping it would need every host's publisher updated first.
+    return "kind=$kind\nplatform=$platform\nversion=$version\ninstall_prefix=-\nrule_ids=$rules"
 }
 
 private val alarmKinds = setOf("silent_rule_death", "rule_share_cliff", "trips", "fleet_unknown", "new_clusters", "silence", "lifecycle_failure", "lifecycle_backlog", "lifecycle_stale")
 private val platformPattern = Regex("^[a-z_][a-z0-9_]{0,31}$")
-private val installPrefixPattern = Regex("^[a-fA-F0-9]{8}$")
 /** The two-line withdrawal body: `install_id_hash=<64 lower hex>\nwithdrawn_at=<ISO-8601 UTC instant>`. */
 internal val withdrawalBodyPattern = Regex("^install_id_hash=[0-9a-f]{64}\\nwithdrawn_at=\\d{4}-\\d{2}-\\d{2}T[0-9:.]+Z$")
 
@@ -126,7 +125,7 @@ fun unknownSurge(
     newClusters: List<NewClusterCount> = emptyList(),
 ): List<Alarm> = buildList {
     for (report in reports) if (report.trips > 0) {
-        add(Alarm("trips", report.platform, report.platformAppVersion, report.installPrefix))
+        add(Alarm("trips", report.platform, report.platformAppVersion))
     }
     for (day in fleet) if (day.installsReporting >= 2 && day.admitted + day.unknown > 0 &&
         day.unknown.toDouble() / (day.admitted + day.unknown) >= 0.5
@@ -202,19 +201,20 @@ class HealthAlarms(
         }
         for (report in currentDays) {
             val rules = silentRuleDeath(inputs.history, report)
-            if (rules.isNotEmpty()) emit(Alarm("silent_rule_death", report.platform, report.platformAppVersion, report.installPrefix, rules), installId)
+            if (rules.isNotEmpty()) emit(Alarm("silent_rule_death", report.platform, report.platformAppVersion, rules), installId)
         }
         for ((previous, current) in inputs.comparisons) {
             val rules = ruleShareCliff(previous, current)
-            if (rules.isNotEmpty()) emit(Alarm("rule_share_cliff", current.platform, current.platformAppVersion, ruleIds = rules), null)
+            if (rules.isNotEmpty()) emit(Alarm("rule_share_cliff", current.platform, current.platformAppVersion, rules), null)
         }
         // Round 2 (Astra): the per-report `trips` alarm is judged on the reports THIS batch accepted only — the wider
         // `current` set (other versions already stored for the day) is for rule-death aggregation, or a backfill for a
         // different version would re-emit an older version's trips alarm after the daily dedupe reset.
         val acceptedKeys = reports.map { Triple(it.day, it.platform, it.platformAppVersion) }.toSet()
         val acceptedCurrent = inputs.current.filter { Triple(it.day, it.platform, it.platformAppVersion) in acceptedKeys }
+        // The per-install `trips` alarm still dedupes per install in memory; the delivered alarm names none.
         for (alarm in unknownSurge(acceptedCurrent, inputs.fleet, inputs.newClusters)) {
-            emit(alarm, if (alarm.installPrefix == null) null else installId)
+            emit(alarm, if (alarm.kind == "trips") installId else null)
         }
     }
 
@@ -223,7 +223,7 @@ class HealthAlarms(
         val today = now.atOffset(ZoneOffset.UTC).toLocalDate()
         for (install in store.silenceInputs()) {
             if (silence(lastReportAt[install.id], startedAt, now, install.lastReportDay, today, true)) {
-                emit(Alarm("silence", install.platform, install.version, install.id.toString().take(8)), install.id)
+                emit(Alarm("silence", install.platform, install.version), install.id)
             }
         }
     }
