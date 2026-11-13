@@ -15,6 +15,7 @@ Public health/policy, identity, ingest and operator routes are implemented. Noti
 | GET | `/v1/me` | Implemented | Day-level identity and remaining budgets |
 | POST | `/v1/skeletons` | Implemented | Admit skeleton batches under the advertised policy |
 | POST | `/v1/health` | Implemented | Daily recognition-health reports |
+| POST | `/v1/slot-classes` | Implemented | Each slot's class for a cluster variant, for the contributor review screen (#80) |
 | GET, POST | `/ops/pause` | Implemented | Read or set the upload pause switch (operator; POST needs TOTP) |
 | GET | `/ops/` | Implemented | Authenticated operator dashboard |
 
@@ -45,7 +46,16 @@ Public health/policy, identity, ingest and operator routes are implemented. Noti
         "backupsDays": 14,
         "withdrawalsDays": 60
     },
-    "hashDomain": "census.v1"
+    "hashDomain": "census.v1",
+    "slotConstancy": {
+        "withheldPercent": 10,
+        "shapePercent": 51,
+        "constantPercent": 90,
+        "regionalMinInstalls": 3,
+        "regionalMinValues": 2,
+        "regionalPercent": 50,
+        "maxSlotsPerSkeleton": 1024
+    }
 }
 ```
 
@@ -89,11 +99,38 @@ Rotation and withdrawal revalidate the current credential within their own trans
 
 Authentication captures one instant in `RequestInstantKey` for admission, the signature timestamp window, the last-seen UTC day, and the route's ledger day and `resetInSeconds`. Routes fall back to the clock only when the attribute is absent. Last-seen updates are monotonic, bound to the verified credential, and exclude revoked rows; `GET /v1/me` re-reads the stored row instead of echoing the attempted day. Counters and reset describe the same UTC day even at midnight.
 
-Withdrawal deletes `trusted_envelopes`, `health_daily`, `token_sightings_v5`, `cluster_sightings_v5`, `ingest_ledger`, `nonces`, and `installs` in one transaction (`InstallStore.WITHDRAWAL_TABLES`; a test fails when a table that can hold the install is missing from it), and recomputes the `health_fleet_daily` rows the erased health still fed. The three content tables carry epoch pseudonyms, not the install ID (#86): the server finds the install's rows by recomputing its pseudonyms under every stored epoch key. Rows under a destroyed epoch key cannot be found, by the server or anyone else, and are past retention. Shared aggregate/catalog tables are retained; health days already folded into fleet totals hold no trace of the install.
+Withdrawal deletes `trusted_envelopes`, `health_daily`, `token_sightings_v5`, `cluster_sightings_v5`, `slot_sightings`, `ingest_ledger`, `nonces`, and `installs` in one transaction (`InstallStore.WITHDRAWAL_TABLES`; a test fails when a table that can hold the install is missing from it), and recomputes the `health_fleet_daily` rows the erased health still fed. The four content tables carry epoch pseudonyms, not the install ID (#86): the server finds the install's rows by recomputing its pseudonyms under every stored epoch key. Rows under a destroyed epoch key cannot be found, by the server or anyone else, and are past retention. Shared aggregate/catalog tables are retained; health days already folded into fleet totals hold no trace of the install.
 
 "Delete my data" (`DELETE /v1/installs/me/data`, #79) runs the same erasure in one transaction, parent row locked first, except that the `installs` row and the ledger rows from today on stay: the credential keeps working, today's quota is not reset, and a batch sent before the deletion is answered `duplicate` rather than stored again. It writes the same hashed tombstone as a withdrawal and the same off-host journal notice, and copies the tombstone instant into `installs.erased_through`; startup replay leaves a generation alone when that marker covers its tombstone. After a restore from a backup older than the deletion the marker is missing, and replay erases that generation whole (the journal does not record which kind of erasure it was), so the app re-enrols. Shared cluster samples carry no install ID: the hashes only this install sent expire at the next lifecycle pass, as do vocabulary entries it alone held at k, before `completionDeadline`. Neither request is refused by the pause switch. Deletion is synchronous; the deadline preserves a future asynchronous contract. Nonces are single-use with a 300-second validity window. HMAC signatures remain replayable within their timestamp window; S4 batch admission will use the ledger for replay protection.
 
 Budget helpers expose a 300 accepted-skeleton default, 10 MiB, 40 distinct batches and 60 health reports per install per UTC day, all from `Policy` (`Policy.budget()`, #79), with retries at the next UTC midnight. The health-report count is checked under the ledger row lock before any byte is charged. The ledger accumulates bytes, accepted/duplicate counts and rejection counts, deduplicating stored batch IDs. `tryConsume` atomically enforces byte, accepted-item, and distinct-batch limits in one conditional PostgreSQL upsert, returning remaining allowances or seconds to UTC midnight. `recordIngest` only increments rejected/duplicate counters. Ingest calls these primitives; identity routes report budgets. The purge job starts one minute after startup and runs every six hours, deleting nonces older than one hour and ledger days strictly older than today minus seven days. Operator revocation is implemented; the remaining lifecycle gaps are documented in ARCHITECTURE.md.
+
+## Slot constancy — #80
+
+Each text slot of a cluster gets a class, judged across installs (ADR-0011 §14):
+
+| Class | Meaning |
+| --- | --- |
+| `constant` | One word hash on at least `constantPercent` (90%) of the installs that saw the slot, and on at least k of them. Candidate chrome, never proof. |
+| `regional` | At least `regionalMinValues` (2) hashes, each on at least `regionalMinInstalls` (3) installs, together covering `regionalPercent` (50%) of the installs: a store or zone name. Never confirmable. |
+| `varying` | Anything else seen by k installs: a new hash per frame or per install, or a value the filter never hashes (`digits`, `mixed`, `words:8+`). |
+| `withheld` | A backstop fired on at least `withheldPercent` (10%) of the installs. Tested before `constant`, so a slot that sometimes holds protected text is never offered as chrome. |
+| `shape` | At least `shapePercent` (51%) of the installs saw a value format (#78). Never vocabulary. |
+| `unknown` | Fewer than k installs saw the slot, or one hash covers the share for `constant` but on fewer than k installs. |
+
+Support is counted per cluster variant (app version, hash domain, filter revision) and slot, within one epoch (#86): the distinct epoch tags of non-trusted, out-of-quarantine rows. Of the live epochs, a slot is judged on the one where the most installs saw it; epochs are never added together. The thresholds are in `Policy.slotConstancy`, published under `/v1/policy`.
+
+The counts come from `slot_sightings` (V9), not from token sightings, which do not say where a word sat. Ingest walks each accepted, keyed skeleton and writes, per (cluster, variant, slot): one presence row (`value = 'present'`) and one row per value, the keyed word hash or a marker (`withheld`, `shape`, `unhashed`). Rows are presence only and carry an epoch tag whose object is the whole row identity, value included, so one install's rows for two values carry unrelated tags; trust and the quarantine mark ride on the row as on token sightings. Retention is the cluster sightings' 30 days on `last_day`; a floor raise deletes rows below it; withdrawal, data deletion and revocation delete the install's rows through its tags. At most `maxSlotsPerSkeleton` slots of one skeleton are recorded, in tree order.
+
+Slot ids, which the app computes from its own skeleton ([CLIENT.md](CLIENT.md#reading-slot-classes)): `root/<child index>/…/<text key>` for a screen node's text field (`root/text`, `root/0/2/desc`), `windowTitle`, a notification field's wire name (`title`, `text`, `bigText`, `tickerText`, `subText`) and `action/<index>` for a notification action. The path is the tree as sent, anonymous wrappers included.
+
+| Endpoint | Request | Success |
+| --- | --- | --- |
+| `POST /v1/slot-classes` | Bearer + HMAC; JSON `{"items":[{"kind":"screen","fingerprint":"<64 hex, public>","platformAppVersion":"8.0","hashDomain":1,"filterRev":1}]}`, 1–8 items | `200 {"items":[{"fingerprint":"<as sent>","slots":{"root/text":"constant","root/0/text":"varying"}}]}` |
+
+The answer holds classes only: never a hash, keyed or public, and never a count. A slot below k is left out of `slots`, so a cluster fewer than k installs saw answers `{}`, exactly as one nobody saw; the app treats a missing slot as `unknown`. A hash domain the policy does not accept, or a revision below its floor, also answers `{}`. `platformAppVersion` may be null (the server's `unknown` variant). Unknown keys, an empty or over-long list, a malformed fingerprint, kind, version or counter are `400 bad_request`. The route shares the authenticated install rate limit, is never paused, and writes nothing. The body is signed, so the fingerprints asked about appear in no path or log line.
+
+`GET /ops/clusters/{fingerprint}` carries `slots` (each variant's slots with class, installs and distinct hashes) and the cluster page shows them in a "Slot constancy" panel; cluster cards on `/ops/clusters/view` show the count of slots per class.
 
 ## Skeleton v2: value shapes, click flags, notification actions — #78
 

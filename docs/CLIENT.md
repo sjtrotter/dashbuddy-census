@@ -177,3 +177,19 @@ Use the actual reporting day. Send 1–30 reports with no batch ID; empty is `40
 Success is `200 {"status":"accepted","accepted":N,"rejected":{"reason":N}}`. Health is upserted by `(install, day, platform, platformAppVersion)`: repeated content leaves daily and fleet totals unchanged. Running-day counters use the greatest admitted/unknown/trips values seen, while the latest accepted report replaces `ruleCounts` and `rulesetVersion`. Send the full running rule-count map on each update. `appVersion` is validated but is not a stored health dimension. Every accepted request, including a content-identical retry, consumes its raw byte count from the shared ledger; it consumes zero item allowance and no batch slots. Each accepted report also counts against the per-install `dailyHealthReportBudget` (60 per UTC receipt day, #79), checked before any byte is spent; a request whose reports would pass it stores nothing. Report or byte exhaustion returns `429 budget_exhausted` with `Retry-After` until UTC midnight.
 
 Fleet totals are recomputed for each touched day/platform/version inside the same transaction as the daily upserts and budget reservation. Accepted reports then trigger health alarm evaluation. Per-install health rows are keyed by an epoch pseudonym that changes every 30 days, not the install ID (#86), retained for 30 days, then folded into the fleet totals and deleted (#79); withdrawal and data deletion delete the install's health rows and recompute the fleet rows they still fed. Fleet rollups have no install identifier and retain their aggregate history.
+
+## Reading slot classes
+
+The contributor review screen (app #1626) greys the slots that hold values. Ask with signed `POST /v1/slot-classes`, naming each cluster variant by the fields of the skeleton the phone holds:
+
+```json
+{"items":[{"kind":"screen","fingerprint":"<the skeleton's public fingerprint>","platformAppVersion":"8.0","hashDomain":1,"filterRev":1}]}
+```
+
+Send 1–8 items; only these keys are allowed, and `platformAppVersion` may be null. The answer, in request order:
+
+```json
+{"items":[{"fingerprint":"<as sent>","slots":{"root/text":"constant","root/0/text":"varying","windowTitle":"regional"}}]}
+```
+
+Compute slot ids from the same skeleton: `root`, then the child index of each step down the tree as the skeleton sends it (anonymous wrappers included), then the text key, e.g. `root/0/2/desc`; `windowTitle`; for a notification the field's wire name (`title`, `text`, `bigText`, `tickerText`, `subText`) or `action/<index>`. A class is `constant` (candidate chrome: show the word, which the contributor may confirm), `regional` or `varying` (a value: grey it, never unmask it), `withheld` (a backstop fired on other phones: grey it), or `shape` (a value format). A slot missing from `slots` is `unknown`: fewer than k installs saw it, so treat it as a value. The server never returns a hash or a count. Classes change as phones report, so ask again before each review rather than caching across days.
