@@ -182,7 +182,7 @@ class FilterPolicyStore(private val db: Database, private val clock: Clock) {
         counts["revision_samples"] = SweepResult(deleted=revisionSamples,rewritten=sampleCaps,batches=revisionBatches,remainingDue=0)
         counts["revision_sightings"] = SweepResult(deleted=revisionSightings,batches=revisionBatches,remainingDue=0)
         // #80: slot sightings carry the revision too; below the floor they count for nothing and go.
-        for (table in listOf("token_sightings_v5", "vocabulary_v5", "slot_sightings", "slot_evidence_released")) {
+        for (table in listOf("token_sightings_v5", "vocabulary_v5", "slot_sightings")) {
             var deleted = 0L; var passes = 0
             do {
                 currentCoroutineContext().ensureActive()

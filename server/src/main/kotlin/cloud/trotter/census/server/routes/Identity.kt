@@ -55,7 +55,7 @@ fun Route.identityRoutes(
         listOf(
             HttpMethod.Post to "/v1/enroll", HttpMethod.Post to "/v1/rotate", HttpMethod.Post to "/v1/nonce",
             HttpMethod.Delete to "/v1/installs/me", HttpMethod.Delete to "/v1/installs/me/data", HttpMethod.Get to "/v1/me", HttpMethod.Post to "/v1/skeletons",
-            HttpMethod.Post to "/v1/envelopes", HttpMethod.Post to "/v1/health", HttpMethod.Post to "/v1/slot-classes",
+            HttpMethod.Post to "/v1/envelopes", HttpMethod.Post to "/v1/health",
         ).forEach { (method, path) ->
             route(path, method) { handle { call.respond(HttpStatusCode.ServiceUnavailable, ErrorResponse("db_unavailable")) } }
         }

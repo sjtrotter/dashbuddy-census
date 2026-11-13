@@ -2,7 +2,6 @@ package cloud.trotter.census.server.db
 
 import cloud.trotter.census.contract.CensusFingerprint
 import cloud.trotter.census.contract.ShapeTemplate
-import cloud.trotter.census.contract.SkeletonKind
 import cloud.trotter.census.contract.SkeletonSchema
 import cloud.trotter.census.contract.TextSlot
 import cloud.trotter.census.contract.UiSkeletonDto
@@ -10,23 +9,14 @@ import cloud.trotter.census.contract.UiSkeletonNodeDto
 import cloud.trotter.census.server.Database
 import cloud.trotter.census.server.Epochs
 import cloud.trotter.census.server.SlotClass
-import cloud.trotter.census.server.enrol
 import cloud.trotter.census.server.ingest.ItemVerdict
 import cloud.trotter.census.server.ingest.SkeletonValidator
 import cloud.trotter.census.server.ingest.SlotWalk
-import cloud.trotter.census.server.module
 import cloud.trotter.census.server.ops.ClusterDetailHtml
-import cloud.trotter.census.server.secret
-import cloud.trotter.census.server.signed
 import cloud.trotter.census.server.testKeying
-import io.ktor.client.statement.bodyAsText
-import io.ktor.http.HttpMethod
-import io.ktor.server.testing.testApplication
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -79,12 +69,6 @@ class SlotConstancyStoreTest : LifecycleTestDatabase() {
         readings(db).singleOrNull { it.variant == of }?.slots.orEmpty().filter { it.slotClass != SlotClass.UNKNOWN }.associate { it.slot to it.slotClass }
 
     private suspend fun operatorView(db: Database): Map<String, SlotReading> = readings(db).single().slots.associateBy { it.slot }
-
-    /** What [asker] reads from the released snapshot. */
-    private suspend fun released(db: Database, asker: UUID): Map<String, SlotClass> =
-        SlotStore(db, clock, policy).appClasses(asker, SkeletonKind.SCREEN, fingerprint, variant())
-
-    private fun release() = sql { it.releaseSlotEvidence(policy, day, instant) }
 
     private fun installs(n: Int, age: Long = 40): List<UUID> = List(n) { install(age = age) }
 
@@ -238,92 +222,6 @@ class SlotConstancyStoreTest : LifecycleTestDatabase() {
         }
     }
 
-    @Test fun `an uploaded guess cannot move what its uploader reads, and its own rows never decide its own answer`() = runBlocking {
-        Database.connect(config()).use { db ->
-            // Yesterday: ten peers saw the label; nine of them shared one value in the second slot and one saw another.
-            val start = day
-            at(start.minusDays(1))
-            val peers = installs(10)
-            for ((index, id) in peers.withIndex()) see(db, id, if (index < 9) word(1) else word(2))
-            val asker = install()
-            at(start)
-            release()
-            // Nine of ten on one value is below k: the asker sees the label only.
-            assertEquals(mapOf(title to SlotClass.CONSTANT), released(db, asker))
-
-            // The asker guesses the shared value. Live, ten installs now share it; the release does not move today.
-            see(db, asker, word(1))
-            assertEquals(SlotClass.CONSTANT, classes(db)[value])
-            release()
-            assertEquals(mapOf(title to SlotClass.CONSTANT), released(db, asker))
-
-            // Tomorrow's release counts the guess, but the asker's own rows are subtracted from the asker's answer.
-            at(start.plusDays(1))
-            release()
-            assertEquals(mapOf(title to SlotClass.CONSTANT), released(db, asker))
-            // Residual: an install that uploaded nothing reads the release with the guess in it (docs/SECURITY.md).
-            assertEquals(mapOf(title to SlotClass.CONSTANT, value to SlotClass.CONSTANT), released(db, install()))
-
-            // Deleting its data after the release (so its counted rows cannot be subtracted) gets the asker nothing
-            // until the next release, which no longer counts it.
-            instant = instant.plusSeconds(60)
-            assertTrue(InstallStore(db, clock).deleteData(asker, key, day) is MutationOutcome.Applied)
-            assertEquals(emptyMap<String, SlotClass>(), released(db, asker))
-            at(start.plusDays(2))
-            release()
-            assertEquals(mapOf(title to SlotClass.CONSTANT), released(db, asker))
-        }
-    }
-
-    @Test fun `the app endpoint returns classes only, nothing below k, and refuses malformed queries`() {
-        Database.connect(config()).use { db ->
-            val start = day
-            runBlocking {
-                at(start.minusDays(1))
-                for (id in installs(10)) see(db, id, word(1))
-                for (id in installs(4)) observe(db, id, listOf(accepted(screenJson(word(1), version = "9.0"))))
-                at(start)
-                release()
-            }
-            testApplication {
-                application { module(config(), db, clock, policy = policy) }
-                val id = UUID.randomUUID().toString(); val secret = secret(80)
-                assertEquals(200, client.enrol(id, secret).status.value)
-                fun query(version: String, fp: String = fingerprint, layout: String = variant(version).layout) = JsonObject(mapOf(
-                    "kind" to JsonPrimitive("screen"), "fingerprint" to JsonPrimitive(fp), "platformAppVersion" to JsonPrimitive(version),
-                    "hashDomain" to JsonPrimitive(1), "filterRev" to JsonPrimitive(1), "layout" to JsonPrimitive(layout),
-                ))
-                val unseen = fingerprint.reversed()
-                val body = JsonObject(mapOf("items" to JsonArray(listOf(query("8.0"), query("9.0"), query("8.0", fp = unseen))))).toString()
-                val response = client.signed(clock, id, secret, HttpMethod.Post, "/v1/slot-classes", body)
-                assertEquals(200, response.status.value)
-                val expected = """{"items":[
-                    {"fingerprint":"$fingerprint","slots":{"$title":"constant","$value":"constant"}},
-                    {"fingerprint":"$fingerprint","slots":{}},
-                    {"fingerprint":"$unseen","slots":{}}]}"""
-                assertEquals(Json.parseToJsonElement(expected), Json.parseToJsonElement(response.bodyAsText()))
-                // No hash, keyed or public, and no count ever appears.
-                val text = response.bodyAsText()
-                assertFalse(text.contains(hash(1)) || text.contains(testKeying.token(hash(1))) || text.contains("installs"))
-
-                for (bad in listOf(
-                    """{"items":[]}""",
-                    JsonObject(mapOf("items" to JsonArray(List(9) { query("8.0") }))).toString(),
-                    JsonObject(mapOf("items" to JsonArray(listOf(JsonObject(query("8.0") + ("extra" to JsonPrimitive(1))))))).toString(),
-                    JsonObject(mapOf("items" to JsonArray(listOf(query("8.0", fp = "nothex"))))).toString(),
-                    JsonObject(mapOf("items" to JsonArray(listOf(query("8.0", layout = "short"))))).toString(),
-                    JsonObject(mapOf("items" to JsonArray(listOf(JsonObject(query("8.0") - "layout"))))).toString(),
-                    JsonObject(mapOf("items" to JsonArray(listOf(JsonObject(query("8.0") + ("kind" to JsonPrimitive("envelope"))))))).toString(),
-                    "not json",
-                )) {
-                    val refused = client.signed(clock, id, secret, HttpMethod.Post, "/v1/slot-classes", bad)
-                    assertEquals(400, refused.status.value, bad)
-                }
-                assertEquals(401, client.signed(clock, id, secret(81), HttpMethod.Post, "/v1/slot-classes", body).status.value)
-            }
-        }
-    }
-
     @Test fun `erasure streams a large slot table in bounded chunks`() = runBlocking {
         Database.connect(config()).use { db ->
             // Sol S6: twenty thousand other objects in the epoch, read 50 at a time, tags matched 100 at a time.
@@ -332,9 +230,9 @@ class SlotConstancyStoreTest : LifecycleTestDatabase() {
             // Two slots, each a presence row and a value row.
             assertEquals(4L, sql { it.installRows("slot_sightings", target, day) })
             sql { it.update("""INSERT INTO slot_sightings (fingerprint, platform_app_version, hash_domain, filter_rev, layout, slot, value,
-                epoch, install_tag, trusted, first_received, last_day)
-                SELECT ?, '8.0', 1, 1, ?, 'root/' || n || '/text', 'present', ?, md5(n::text) || md5(n::text || 'x'), false, ?, ?
-                FROM generate_series(1, 20000) n""", fingerprint, variant().layout, Epochs.of(day), day, day) }
+                epoch, install_tag, trusted, last_day)
+                SELECT ?, '8.0', 1, 1, ?, 'root/' || n || '/text', 'present', ?, md5(n::text) || md5(n::text || 'x'), false, ?
+                FROM generate_series(1, 20000) n""", fingerprint, variant().layout, Epochs.of(day), day) }
             var chunks = 0
             val deleted = db.exposed.let {
                 org.jetbrains.exposed.v1.jdbc.transactions.transaction(it) {

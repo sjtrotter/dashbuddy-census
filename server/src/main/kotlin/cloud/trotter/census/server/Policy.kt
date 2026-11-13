@@ -27,7 +27,8 @@ data class Policy(
     val acceptedHashDomains: List<Int> = listOf(1),
     val retention: Retention = Retention(),
     val hashDomain: String = ContractCompatibility.HASH_DOMAIN,
-    val slotConstancy: SlotConstancyPolicy = SlotConstancyPolicy(),
+    // #80: operator-side thresholds; nothing on the phone reads them, so they stay out of the published policy.
+    @kotlinx.serialization.Transient val slotConstancy: SlotConstancyPolicy = SlotConstancyPolicy(),
 )
 
 /**
@@ -35,7 +36,6 @@ data class Policy(
  * epoch. A slot below [Policy.k] installs is `unknown` whatever these say. The order the classes are tested in lives
  * in [SlotConstancy.classify].
  */
-@Serializable
 data class SlotConstancyPolicy(
     // A backstop firing on one install in ten means the slot sometimes holds protected text: never offered as chrome.
     val withheldPercent: Int = 10,

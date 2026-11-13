@@ -16,7 +16,8 @@ import java.io.ByteArrayOutputStream
 data class SlotValue(val slot: String, val value: String)
 
 /**
- * The slot positions of a skeleton (#80), the ids the app's review screen and the server agree on:
+ * The slot positions of a skeleton (#80), as the operator views name them; the contributor tier (#81) will share them
+ * with the app:
  *
  * - a screen node's text field: `root`, then the child index of every step down the tree as the skeleton sends it,
  *   then the text key: `root/text`, `root/0/2/desc`;
@@ -24,7 +25,7 @@ data class SlotValue(val slot: String, val value: String)
  * - a notification field: its wire name (`title`, `text`, `bigText`, `tickerText`, `subText`); an action label:
  *   `action/<index>`.
  *
- * The path is the tree as sent, anonymous wrappers included, so the phone computes it from the skeleton it holds. A
+ * The path is the tree as sent, anonymous wrappers included, so a phone can compute it from the skeleton it holds. A
  * cluster's fingerprint splices anonymous wrappers away, so two raw trees of one cluster can put different nodes at
  * one path (Sol S4). Slot evidence is therefore partitioned by [layout], the raw tree's own shape: one path means one
  * node only within one layout. No id contains `:`, which the epoch-tag object uses as a separator.

@@ -174,7 +174,7 @@ class SkeletonStore(
                 }
             }
             // #80: where each value sat, for per-slot constancy; keyed by epoch tags like the sightings above.
-            recordSlotSightings(tagger, installId, trusted, countsFrom, day, fingerprint, slotSightings, slotLimit)
+            recordSlotSightings(tagger, installId, trusted, countsFrom, fingerprint, slotSightings, slotLimit)
         }
         recordIngestCounters(installId, day, duplicateInBatch, rejected)
         IngestOutcome.Stored(IngestSummary(groups.size, newClusters, samplesStored, tokensTouched), consumed)

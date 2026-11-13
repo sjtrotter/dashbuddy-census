@@ -52,11 +52,11 @@ internal class SlotSighting(val item: CensusSkeletonDto, val variant: SlotVarian
  * Writes slot sightings inside the ingest transaction (#80). Per (variant, epoch): one presence row per slot the
  * install saw and one row per distinct value, each tagged under its observation day's epoch. A row's `last_day` is
  * the newest observation of that very slot and value (Sol S3), never of the batch, so an old value expires on its own
- * day. `first_received` is the receipt day [received]. Presence only: a repeat moves `last_day` and merges the
+ * day. Presence only: a repeat moves `last_day` and merges the
  * quarantine mark exactly as token sightings do.
  */
 internal fun Connection.recordSlotSightings(
-    tagger: Tagger, installId: UUID, trusted: Boolean, countsFrom: LocalDate?, received: LocalDate, fingerprint: String,
+    tagger: Tagger, installId: UUID, trusted: Boolean, countsFrom: LocalDate?, fingerprint: String,
     sightings: List<SlotSighting>, slotLimit: Int,
 ) {
     data class Row(val variant: SlotVariant, val epoch: Int, val slot: String, val value: String)
@@ -72,7 +72,7 @@ internal fun Connection.recordSlotSightings(
     var written = 0
     prepareStatement(
         """INSERT INTO slot_sightings (fingerprint, platform_app_version, hash_domain, filter_rev, layout, slot, value, epoch,
-                install_tag, trusted, counts_from, first_received, last_day) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                install_tag, trusted, counts_from, last_day) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (fingerprint, platform_app_version, hash_domain, filter_rev, layout, slot, epoch, value, install_tag) DO UPDATE SET
                 last_day = GREATEST(slot_sightings.last_day, EXCLUDED.last_day),
                 counts_from = CASE WHEN slot_sightings.counts_from IS NULL OR EXCLUDED.counts_from IS NULL
@@ -83,7 +83,7 @@ internal fun Connection.recordSlotSightings(
             val tag = tagger.tag(TagPurpose.SLOT, installId, SlotObject.of(fingerprint, variant, row.slot, row.value), day)
             check(tag.epoch == row.epoch)
             listOf(fingerprint, variant.platformAppVersion, variant.hashDomain, variant.filterRev, variant.layout, row.slot,
-                row.value, tag.epoch, tag.tag, trusted, countsFrom, received, day)
+                row.value, tag.epoch, tag.tag, trusted, countsFrom, day)
                 .forEachIndexed { index, parameter -> statement.setObject(index + 1, parameter) }
             statement.addBatch()
             if (++written % 500 == 0) statement.executeBatch()
@@ -105,7 +105,8 @@ internal fun Policy.classify(counts: SlotCounts): SlotClass =
 /**
  * The operator's live read (#80): every variant's slot readings for the stored cluster keys in [fingerprints], from the
  * rows as they stand now. Support is counted per variant and slot within ONE epoch, as vocabulary k is (#86): distinct
- * epoch tags of non-trusted, out-of-quarantine rows. The app never reads this ([SlotRelease]).
+ * epoch tags of non-trusted, out-of-quarantine rows. Operator views only: no app route serves classes until the contributor
+ * tier (#81).
  */
 internal fun Connection.slotReadings(policy: Policy, today: LocalDate, fingerprints: List<String>): Map<String, List<SlotVariantReading>> {
     if (fingerprints.isEmpty()) return emptyMap()

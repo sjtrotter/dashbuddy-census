@@ -157,8 +157,8 @@ class EpochPseudonymTest : LifecycleTestDatabase() {
             "slot_sightings" -> {
                 val fields = row.objectKey.split(':', limit = 7)
                 connection.update("""INSERT INTO slot_sightings (fingerprint, platform_app_version, hash_domain, filter_rev, layout, slot, value,
-                    epoch, install_tag, trusted, first_received, last_day) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, false, ?, ?) ON CONFLICT DO NOTHING""",
-                    fields[0], fields[6], fields[1].toInt(), fields[2].toInt(), fields[3], fields[4], fields[5], row.epoch, row.tag, day, day)
+                    epoch, install_tag, trusted, last_day) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, false, ?) ON CONFLICT DO NOTHING""",
+                    fields[0], fields[6], fields[1].toInt(), fields[2].toInt(), fields[3], fields[4], fields[5], row.epoch, row.tag, day)
             }
             else -> connection.update("""INSERT INTO health_daily (epoch, install_tag, day, platform, platform_app_version, admitted, unknown, trips, rule_counts)
                 VALUES (?, ?, ?, 'doordash', 'restored', 1, 0, 0, '{}') ON CONFLICT DO NOTHING""", row.epoch, row.tag, day)
