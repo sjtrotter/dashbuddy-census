@@ -202,19 +202,28 @@ class InstallStore(private val db: Database, private val clock: Clock) {
 
     /**
      * #79: the install's per-install health rows go, and the fleet totals they still feed are recomputed without
-     * them. Fleet rows are locked before the health rows, the order ingest and the retention fold use. Days already
-     * folded hold no per-install row, so nothing of this install can be found or removed there.
+     * them. Fleet rows are locked before the health rows, the order ingest and the retention fold use. Only keys
+     * this DELETE actually removed are recomputed (Sol S1): if the fold committed between the key read and the
+     * locks, those rows are already folded and gone, and recomputing their key from an empty `health_daily` would
+     * zero every install's folded total.
      */
     private fun Connection.deleteHealthAndRefold(installId: UUID): Int {
-        val keys = select(
+        val candidates = select(
             "SELECT DISTINCT day, platform, platform_app_version FROM health_daily WHERE install_id = ?", installId,
-        ) { rows -> buildList { do { add(FleetKey(rows.getObject(1, LocalDate::class.java), rows.getString(2), rows.getString(3))) } while (rows.next()) } }
-            ?: emptyList()
-        lockFleet(keys)
-        val deleted = update("DELETE FROM health_daily WHERE install_id = ?", installId)
-        recomputeFleet(keys)
-        return deleted
+        ) { rows -> buildList { do { add(rows.fleetKey()) } while (rows.next()) } } ?: emptyList()
+        lockFleet(candidates)
+        val removed = prepareStatement(
+            "DELETE FROM health_daily WHERE install_id = ? RETURNING day, platform, platform_app_version",
+        ).use { statement ->
+            statement.setObject(1, installId)
+            statement.executeQuery().use { rows -> buildList { while (rows.next()) add(rows.fleetKey()) } }
+        }
+        // The install row is locked, so no new health row of this install can appear: removed keys were all locked.
+        recomputeFleet(removed.distinct())
+        return removed.size
     }
+
+    private fun ResultSet.fleetKey(): FleetKey = FleetKey(getObject(1, LocalDate::class.java), getString(2), getString(3))
 
     /**
      * One transaction, parent locks first, with the exact live-withdrawal deletion and lock order. A generation is

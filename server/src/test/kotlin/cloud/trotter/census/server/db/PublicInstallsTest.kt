@@ -31,11 +31,16 @@ import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.contentType
 import io.ktor.server.testing.testApplication
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -44,8 +49,10 @@ import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.slf4j.LoggerFactory
+import java.sql.DriverManager
 import java.time.LocalDate
 import java.time.OffsetDateTime
+import java.time.ZoneOffset
 import java.util.UUID
 
 /** #79: the pause switch, per-install quotas, "delete my data", retention folding and logs without install keys. */
@@ -265,6 +272,38 @@ class PublicInstallsTest : LifecycleTestDatabase() {
         // The pre-V5 tables are empty and refused at startup if written; nothing new may join them silently.
         assertEquals(InstallStore.WITHDRAWAL_TABLES.toSet(), keyed - setOf("token_sightings", "cluster_sightings"))
         assertEquals(InstallStore.WITHDRAWAL_TABLES - "installs", InstallStore.DATA_TABLES)
+    }
+
+    @Test fun `deletion keeps folded fleet totals when the fold commits between its key read and its locks`() = runBlocking {
+        Database.connect(config()).use { db ->
+            val health = HealthStore(db, clock)
+            val (first, second) = install() to install()
+            val folded = day.minusDays(Policy().retention.healthDailyDays.toLong())
+            for ((id, admitted) in listOf(first to 100, second to 50)) {
+                assertEquals(HealthOutcome.Stored, health.upsert(id, key, day, listOf(report(folded, admitted)), emptyMap(), 1, BudgetPolicy()))
+            }
+            assertEquals(listOf(2L, 150L), fleet(folded))
+            DriverManager.getConnection(LifecycleTestDatabase.postgres.jdbcUrl, LifecycleTestDatabase.postgres.username, LifecycleTestDatabase.postgres.password).use { fold ->
+                fold.autoCommit = false
+                // The fold holds the fleet row while it folds the day.
+                fold.select("SELECT 1 FROM health_fleet_daily WHERE day = ? FOR UPDATE", folded) { true }
+                val deletion = async(Dispatchers.IO) { InstallStore(db, clock).deleteData(first, key, day) }
+                // The deletion has read its keys and now waits for the fleet lock.
+                withTimeout(30_000) {
+                    while (sql { connection ->
+                            connection.select(
+                                "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE '%health_fleet_daily%'",
+                            ) { it.getLong(1) }!!
+                        } == 0L
+                    ) delay(10)
+                }
+                fold.update("DELETE FROM health_daily WHERE day = ?", folded)
+                fold.commit()
+                assertTrue(deletion.await() is MutationOutcome.Applied)
+            }
+            // Sol S1: the folded day keeps both installs' totals; nothing was recomputed from an empty day.
+            assertEquals(listOf(2L, 150L), fleet(folded))
+        }
     }
 
     private fun nextCode(): String {
