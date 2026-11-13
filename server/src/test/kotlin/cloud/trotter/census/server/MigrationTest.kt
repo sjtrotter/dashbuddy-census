@@ -43,6 +43,36 @@ class MigrationTest {
     }
 
     @Test
+    fun `populated V5 upgrades to V6 keeping the replay order without an enrolment instant`() {
+        fun migration(target: String) = Flyway.configure().dataSource(postgres.jdbcUrl, postgres.username, postgres.password)
+            .schemas("keep_less").defaultSchema("keep_less").locations("classpath:db/migration").target(target).load()
+        migration("5").migrate()
+        val withdrawn = "00000000-0000-4000-8000-000000000001"
+        val reenrolled = "00000000-0000-4000-8000-000000000002"
+        DriverManager.getConnection(postgres.jdbcUrl, postgres.username, postgres.password).use { connection ->
+            connection.createStatement().use { statement ->
+                statement.execute("SET search_path TO keep_less")
+                for (id in listOf(withdrawn, reenrolled)) {
+                    statement.execute("INSERT INTO withdrawals VALUES (encode(sha256('$id'::bytea), 'hex'), '2026-10-01T12:00:00Z')")
+                }
+                // A resurrected generation (enrolled before its tombstone) and a re-enrolment after it.
+                statement.execute("INSERT INTO installs (install_id, key_hash, created_day, last_seen_day, enrolled_at) VALUES ('$withdrawn', repeat('a',64), '2026-10-01', '2026-10-01', '2026-10-01T11:00:00Z')")
+                statement.execute("INSERT INTO installs (install_id, key_hash, created_day, last_seen_day, enrolled_at) VALUES ('$reenrolled', repeat('a',64), '2026-10-01', '2026-10-01', '2026-10-01T13:00:00Z')")
+                statement.execute("INSERT INTO clusters (fingerprint, platform, first_seen_day, last_seen_day) VALUES (repeat('a',64), 'uber', '2026-10-01', '2026-10-01')")
+                statement.execute("INSERT INTO cluster_sightings_v5 VALUES (repeat('a',64), '$reenrolled', '2026-10-01', '1.0', 7, 1, 1)")
+                assertEquals(1, migration("6").migrate().migrationsExecuted)
+                statement.executeQuery("SELECT install_id::text, erased_through IS NOT NULL FROM installs ORDER BY install_id").use { rows ->
+                    assertTrue(rows.next()); assertEquals(withdrawn, rows.getString(1)); assertEquals(false, rows.getBoolean(2))
+                    assertTrue(rows.next()); assertEquals(reenrolled, rows.getString(1)); assertEquals(true, rows.getBoolean(2))
+                }
+                // Presence only: the old count collapses to 1 and a count above 1 is refused.
+                statement.executeQuery("SELECT count FROM cluster_sightings_v5").use { it.next(); assertEquals(1, it.getInt(1)) }
+                assertTrue(runCatching { statement.execute("UPDATE cluster_sightings_v5 SET count = 2") }.isFailure)
+            }
+        }
+    }
+
+    @Test
     fun `V3 to V4 backfills screen and preserves sample relationship`() {
         fun migration(target: String) = Flyway.configure()
             .dataSource(postgres.jdbcUrl, postgres.username, postgres.password)
@@ -94,8 +124,8 @@ class MigrationTest {
             .dataSource(postgres.jdbcUrl, postgres.username, postgres.password)
             .locations("classpath:db/migration")
             .load()
-        // V1 schema, V2 cluster classification, V3 withdrawal tombstones and enrolment instants.
-        assertEquals(5, flyway.migrate().migrationsExecuted)
+        // V1 schema, V2 classification, V3 tombstones, V4 notifications, V5 lifecycle, V6 keep less (#79).
+        assertEquals(6, flyway.migrate().migrationsExecuted)
         val expected = setOf(
             "installs", "clusters", "cluster_samples", "cluster_sightings", "token_sightings",
             "vocabulary", "trusted_envelopes", "health_daily", "health_fleet_daily", "ingest_ledger", "nonces", "withdrawals", "token_sightings_v5", "cluster_sightings_v5", "vocabulary_v5", "filter_floor",
@@ -146,7 +176,11 @@ class MigrationTest {
                     assertEquals(listOf("timestamp with time zone", null, "NO", null), columns["nonces.issued_at"])
                     assertEquals(listOf("text", null, "NO", null), columns["withdrawals.install_id_hash"])
                     assertEquals(listOf("timestamp with time zone", null, "NO", null), columns["withdrawals.withdrawn_at"])
-                    assertEquals(listOf("timestamp with time zone", null, "NO", "CURRENT_TIMESTAMP"), columns["installs.enrolled_at"])
+                    // #79: no enrolment instant; created_day is the enrolment day, erased_through orders replay.
+                    assertEquals(null, columns["installs.enrolled_at"])
+                    assertEquals(listOf("date", null, "NO", null), columns["installs.created_day"])
+                    assertEquals(listOf("timestamp with time zone", null, "YES", null), columns["installs.erased_through"])
+                    assertEquals(listOf("integer", null, "NO", "1"), columns["cluster_sightings_v5.count"])
                 }
                 statement.executeQuery(
                     """

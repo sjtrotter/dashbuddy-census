@@ -222,7 +222,7 @@ class OpsRoutesTest {
                 application { module(config().copy(operatorTotpSecret = totpSecret), db, clock) }
                 for ((index, id) in identities.withIndex()) {
                     installs.enrol(id, hashSecret(key), "1.0.0")
-                    sql { it.update("UPDATE installs SET enrolled_at=? WHERE install_id=?", clock.now().minusSeconds(7*86400L).atOffset(java.time.ZoneOffset.UTC), id) }
+                    sql { it.update("UPDATE installs SET created_day=? WHERE install_id=?", day.minusDays(7), id) }
                     val items = when {
                         index < 9 -> listOf(eligible, hidden)
                         index == 9 -> listOf(eligible)
@@ -536,13 +536,16 @@ class OpsRoutesTest {
             val tied = rankedFixtures.take(2)
             val resolved = rankedFixtures[2]
             val high = rankedFixtures[3] // Score must outrank fingerprint order within the new status.
-            val id = UUID.randomUUID()
             val keyHash = hashSecret(secret(75))
             testApplication {
                 application { module(config(), db, clock) }
-                installs.enrol(id, keyHash, "1.0.0")
-                val items = List(3) { high } + tied.flatMap { item -> List(2) { item } } + List(5) { resolved }
-                assertTrue(skeletons.ingest(id, keyHash, day, items, 0, emptyMap(), "ordered", 100, BudgetPolicy()) is IngestOutcome.Stored)
+                // #79: sightings are presence per install and day, so distinct installs carry the counts.
+                for (index in 0 until 5) {
+                    val id = UUID.randomUUID()
+                    installs.enrol(id, keyHash, "1.0.0")
+                    val items = (if (index < 3) listOf(high) else emptyList()) + (if (index < 2) tied else emptyList()) + resolved
+                    assertTrue(skeletons.ingest(id, keyHash, day, items, 0, emptyMap(), "ordered-$index", 100, BudgetPolicy()) is IngestOutcome.Stored)
+                }
                 assertTrue(ops.status(resolved.item.fingerprint, "resolved", null, null))
                 val firstPage = ops.clustersPage("doordash", "8.10", null, 1, pageSize = 2)
                 val secondPage = ops.clustersPage("doordash", "8.10", null, 2, pageSize = 2)

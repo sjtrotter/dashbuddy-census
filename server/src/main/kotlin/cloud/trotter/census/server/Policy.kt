@@ -25,13 +25,16 @@ data class Policy(
     val hashDomain: String = ContractCompatibility.HASH_DOMAIN,
 )
 
-/** Half-open UTC retention deadlines, enforced on reads and by lifecycle sweeps. */
+/**
+ * Half-open UTC retention deadlines, enforced on reads and by lifecycle sweeps. #79 (council round 3): per-install
+ * health and cluster sightings keep 30 days; health is folded into the fleet totals before its per-install rows go.
+ */
 @Serializable
 data class Retention(
     val tokenSightingsDays: Int = 30,
-    val clusterSightingsDays: Int = 90,
+    val clusterSightingsDays: Int = 30,
     val trustedEnvelopesDays: Int = 30,
-    val healthDailyDays: Int = 180,
+    val healthDailyDays: Int = 30,
     val ingestLedgerDays: Int = 7,
     val backupsDays: Int = 14,
     // Must outlive every restorable backup: backupsDays (14) + S3 noncurrent-version expiry (14) + margin.

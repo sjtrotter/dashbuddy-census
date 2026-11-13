@@ -30,8 +30,8 @@ abstract class LifecycleTestDatabase {
     protected fun <T> sql(block: (Connection) -> T): T = DriverManager.getConnection(postgres.jdbcUrl, postgres.username, postgres.password).use(block)
     protected fun count(table: String): Long = sql { it.select("SELECT count(*) FROM $table") { r -> r.getLong(1) }!! }
     protected fun install(age: Long = 7, trusted: Boolean = false): UUID = UUID.randomUUID().also { id -> sql {
-        it.update("""INSERT INTO installs(install_id,key_hash,created_day,last_seen_day,enrolled_at,trusted)
-            VALUES(?,?,?,?,?,?)""", id, key, day.minusDays(age), day, instant.minusSeconds(age*86400).atOffset(ZoneOffset.UTC), trusted)
+        it.update("""INSERT INTO installs(install_id,key_hash,created_day,last_seen_day,trusted)
+            VALUES(?,?,?,?,?)""", id, key, day.minusDays(age), day, trusted)
     } }
     protected fun item(revision: Int = 1, observation: LocalDate = day, channel: String = "CHANNEL_SENTINEL"): ItemVerdict.Accepted {
         val raw = JsonObject(notificationFixture(observation, channel) + mapOf("filterRev" to JsonPrimitive(revision)))

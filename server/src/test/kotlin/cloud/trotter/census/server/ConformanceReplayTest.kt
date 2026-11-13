@@ -213,16 +213,26 @@ class ConformanceReplayTest {
                         assertEquals(expected, stored.map { Json.parseToJsonElement(it) }.toSet())
                     }
                     val sightings = sql { connection ->
-                        connection.prepareStatement("SELECT fingerprint, sum(count) FROM cluster_sightings_v5 WHERE install_id = ?::uuid GROUP BY fingerprint").use { statement ->
+                        connection.prepareStatement("SELECT fingerprint, count(*) FROM cluster_sightings_v5 WHERE install_id = ?::uuid GROUP BY fingerprint").use { statement ->
                             statement.setString(1, id)
                             statement.executeQuery().use { rows -> buildMap { while (rows.next()) put(rows.getString(1), rows.getInt(2)) } }
                         }
                     }
-                    assertEquals(fingerprints.mapValues { it.value.size }, sightings)
+                    // #79: one presence row per observation day, version, domain and revision; never a count.
+                    assertEquals(fingerprints.mapValues { (_, group) ->
+                        group.map { entry ->
+                            val skeleton = entry.getValue("skeleton").jsonObject
+                            listOf(
+                                minOf(LocalDate.parse(skeleton.getValue("day").jsonPrimitive.content), day).toString(),
+                                skeleton["platformAppVersion"]?.jsonPrimitive?.content ?: "unknown",
+                                skeleton["hashDomain"]?.jsonPrimitive?.content, skeleton["filterRev"]?.jsonPrimitive?.content,
+                            )
+                        }.toSet().size
+                    }, sightings)
                     val pairs = fingerprints.filterValues { group -> group.map { it.getValue("file").jsonPrimitive.content }.toSet().size > 1 }
                     assertTrue(pairs.isNotEmpty(), "the admitted golden must exercise pseudonym invariance")
                     for ((fingerprint, _) in pairs) {
-                        assertTrue(sightings.getValue(fingerprint) >= 2)
+                        assertTrue(sightings.getValue(fingerprint) >= 1)
                         assertEquals(1, sql { connection ->
                             connection.prepareStatement("SELECT count(*) FROM clusters WHERE fingerprint = ?").use { statement ->
                                 statement.setString(1, fingerprint)
@@ -319,7 +329,7 @@ class ConformanceReplayTest {
                     assertEquals(listOf("accepted", "duplicate"), statuses.sorted())
                     val raceFingerprint = items.first().getValue("fingerprint").jsonPrimitive.content
                     assertEquals(1, sql { connection ->
-                        connection.prepareStatement("SELECT sum(count) FROM cluster_sightings_v5 WHERE fingerprint = ? AND install_id = ?::uuid").use { statement ->
+                        connection.prepareStatement("SELECT count(*) FROM cluster_sightings_v5 WHERE fingerprint = ? AND install_id = ?::uuid").use { statement ->
                             statement.setString(1, raceFingerprint)
                             statement.setString(2, raceId)
                             statement.executeQuery().use { rows -> rows.next(); rows.getInt(1) }
@@ -347,7 +357,7 @@ class ConformanceReplayTest {
                     assertEquals(1, versionsBody.getValue("accepted").jsonPrimitive.int)
                     assertEquals(1, versionsBody.getValue("duplicate").jsonPrimitive.int)
                     assertEquals(mapOf("1.0.0" to 1, "2.0.0" to 1), sql { connection ->
-                        connection.prepareStatement("SELECT platform_app_version, count FROM cluster_sightings_v5 WHERE fingerprint = ? AND install_id = ?::uuid").use { statement ->
+                        connection.prepareStatement("SELECT platform_app_version, count(*) FROM cluster_sightings_v5 WHERE fingerprint = ? AND install_id = ?::uuid GROUP BY platform_app_version").use { statement ->
                             statement.setString(1, versionFingerprint)
                             statement.setString(2, raceId)
                             statement.executeQuery().use { rows -> buildMap { while (rows.next()) put(rows.getString(1), rows.getInt(2)) } }

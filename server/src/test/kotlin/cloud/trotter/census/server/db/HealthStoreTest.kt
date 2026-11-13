@@ -103,9 +103,11 @@ class HealthStoreTest {
                     assertEquals(1001, report.healthRows)
                     assertEquals(1, count("nonces", id))
                     assertTrue(logs.list.any { it.formattedMessage == "purge sweep=nonces deleted=50000 batches=50 capped=true" })
-                    for (name in listOf("ledger", "envelopes", "health")) {
+                    for (name in listOf("ledger", "envelopes")) {
                         assertTrue(logs.list.any { it.formattedMessage == "purge sweep=$name deleted=1001 batches=2 capped=false" })
                     }
+                    // #79: health folds 100 (day, platform, version) keys per batch; the seed has 1001 distinct days.
+                    assertTrue(logs.list.any { it.formattedMessage == "purge sweep=health deleted=1001 batches=11 capped=false" })
                     assertEquals(1, job.runOnce().nonces)
                     sql { it.update("CREATE FUNCTION census_test_purge_failure() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RAISE EXCEPTION ''PRIVATE_SWEEP_FAILURE''; END;'") }
                     try {

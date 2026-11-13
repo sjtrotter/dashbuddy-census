@@ -115,10 +115,10 @@ class SkeletonStore(private val db: Database, private val clock: Clock) {
                 val item = acceptedItem.item
                 val observed = LifecycleDeadline.observation(LocalDate.parse(item.day), day)
                 update(
-                    """INSERT INTO cluster_sightings_v5 (fingerprint, install_id, day, platform_app_version, count, hash_domain, filter_rev)
-                        VALUES (?, ?, ?, ?, 1, ?, ?)
-                        ON CONFLICT (fingerprint, install_id, day, platform_app_version, hash_domain, filter_rev) DO UPDATE SET
-                            count = cluster_sightings_v5.count + 1""",
+                    // #79: presence only. A second sighting on the same day changes nothing.
+                    """INSERT INTO cluster_sightings_v5 (fingerprint, install_id, day, platform_app_version, hash_domain, filter_rev)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        ON CONFLICT (fingerprint, install_id, day, platform_app_version, hash_domain, filter_rev) DO NOTHING""",
                     fingerprint, installId, observed, item.platformAppVersion ?: "unknown", item.hashDomain, item.filterRev,
                 )
                 for (token in acceptedItem.tokens.distinct()) {

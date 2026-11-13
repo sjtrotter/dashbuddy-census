@@ -124,8 +124,8 @@ class WithdrawalReplayTest {
             store.withdraw(id, keyHash)
             sql { connection ->
                 connection.update(
-                    """INSERT INTO installs (install_id, key_hash, created_day, last_seen_day, enrolled_at)
-                        VALUES (?, ?, ?, ?, ?)""", id, keyHash, day, day, t0.atOffset(ZoneOffset.UTC),
+                    """INSERT INTO installs (install_id, key_hash, created_day, last_seen_day)
+                        VALUES (?, ?, ?, ?)""", id, keyHash, day, day,
                 )
             }
             seedChildren(id)
@@ -185,7 +185,7 @@ class WithdrawalReplayTest {
             assertEquals(0, replay.matched)
             assertEquals(1, replay.keptReenrolled)
             assertNotNull(store.lookup(id))
-            // Equal instants belong to the withdrawn generation, not a later re-enrolment.
+            // A tombstone newer than the generation's erased_through marker erases it (#79).
             store.mergeWithdrawalJournal(listOf(InstallStore.installIdHash(id) to now))
             assertEquals(1, store.reapplyWithdrawals().matched)
             assertNull(store.lookup(id))

@@ -59,8 +59,8 @@ class FilterReplayTest : LifecycleTestDatabase() {
             sql {
                 it.update("DELETE FROM withdrawals")
                 it.update("UPDATE filter_floor SET min_filter_rev=1")
-                it.update("""INSERT INTO installs(install_id,key_hash,created_day,last_seen_day,enrolled_at)
-                    VALUES(?,?,?,?,?)""",id,key,day.minusDays(7),day,instant.minusSeconds(7*86400L).atOffset(java.time.ZoneOffset.UTC))
+                it.update("""INSERT INTO installs(install_id,key_hash,created_day,last_seen_day)
+                    VALUES(?,?,?,?)""",id,key,day.minusDays(7),day)
             }
             observe(db,id,listOf(item(1)))
             val survivor=install()

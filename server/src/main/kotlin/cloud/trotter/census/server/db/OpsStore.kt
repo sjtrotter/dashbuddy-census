@@ -243,9 +243,9 @@ class OpsStore(private val db: Database, private val clock: Clock, private val p
                 c.screen_class, c.draft IS NOT NULL AND EXISTS (SELECT 1 FROM trusted_envelopes e
                     WHERE e.id::text=c.draft->>'envelopeId' AND e.purge_after > DATE '$today') AS has_draft, c.draft_day, count(DISTINCT s.install_id) FILTER (WHERE NOT i.trusted AND s.day >= ? AND s.day <= ?) AS installs,
                 COALESCE(bool_or(i.trusted AND s.day + 30 > DATE '$today'), false) AS trusted,
-                COALESCE(sum(s.count) FILTER (WHERE s.day >= ? AND s.day <= ?), 0) AS sightings,
+                count(s.fingerprint) FILTER (WHERE s.day >= ? AND s.day <= ?) AS sightings,
                 COALESCE(jsonb_agg(DISTINCT s.platform_app_version) FILTER (WHERE s.platform_app_version IS NOT NULL), '[]'::jsonb) AS versions
-                FROM clusters c LEFT JOIN cluster_sightings_v5 s ON s.fingerprint = c.fingerprint AND s.day + 90 > DATE '$today' AND s.hash_domain IN (${policy.acceptedHashDomains.joinToString(",")}) AND s.filter_rev >= ${policy.minimumFilterRev}
+                FROM clusters c LEFT JOIN cluster_sightings_v5 s ON s.fingerprint = c.fingerprint AND s.day + ${policy.retention.clusterSightingsDays} > DATE '$today' AND s.hash_domain IN (${policy.acceptedHashDomains.joinToString(",")}) AND s.filter_rev >= ${policy.minimumFilterRev}
                 LEFT JOIN installs i ON i.install_id = s.install_id AND i.revoked_at IS NULL
                 WHERE (?::text IS NULL OR c.status = ?) AND (?::text IS NULL OR c.fingerprint = ?)
                 GROUP BY c.fingerprint""",
@@ -271,7 +271,7 @@ class OpsStore(private val db: Database, private val clock: Clock, private val p
 
     private fun Connection.versionFirstDays(): Map<Pair<String, String>, LocalDate> = select(
         """SELECT c.platform, s.platform_app_version, min(s.day) AS day FROM cluster_sightings_v5 s
-            JOIN clusters c ON c.fingerprint = s.fingerprint WHERE s.day + 90 > DATE '${clock.today()}'
+            JOIN clusters c ON c.fingerprint = s.fingerprint WHERE s.day + ${policy.retention.clusterSightingsDays} > DATE '${clock.today()}'
             AND s.hash_domain IN (${policy.acceptedHashDomains.joinToString(",")}) AND s.filter_rev >= ${policy.minimumFilterRev}
             GROUP BY c.platform, s.platform_app_version""",
     ) { rows -> buildMap {
@@ -372,7 +372,7 @@ class OpsStore(private val db: Database, private val clock: Clock, private val p
     }
 
     private val queueSql: String get() = VocabularyEligibility.queue(policy)
-    private fun queueArgs(): Array<Any> = VocabularyEligibility.args(clock.now(), clock.today())
+    private fun queueArgs(): Array<Any> = VocabularyEligibility.args(clock.today())
 
     suspend fun vocabularyQueue(limit: Int = 50): JsonArray = query { queue(limit) }
 

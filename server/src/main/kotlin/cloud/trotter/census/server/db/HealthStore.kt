@@ -92,21 +92,7 @@ class HealthStore(private val db: Database, private val clock: Clock) {
                 report.trips, Json.encodeToString(report.ruleCounts), report.rulesetVersion,
             )
         }
-        for (key in touched) {
-            update(
-                """WITH daily AS (
-                        SELECT * FROM health_daily WHERE day = ? AND platform = ? AND platform_app_version = ?
-                    ), totals AS (
-                        SELECT count(*) AS installs, COALESCE(sum(admitted), 0) AS admitted, COALESCE(sum(unknown), 0) AS unknown FROM daily
-                    ), rules AS (
-                        SELECT key, sum(value::bigint) AS total FROM daily, jsonb_each_text(rule_counts) GROUP BY key
-                    )
-                    UPDATE health_fleet_daily SET installs_reporting = totals.installs, admitted = totals.admitted,
-                        unknown = totals.unknown, rule_counts = (SELECT COALESCE(jsonb_object_agg(key, total), '{}'::jsonb) FROM rules)
-                    FROM totals WHERE day = ? AND platform = ? AND platform_app_version = ?""",
-                key.day, key.platform, key.version, key.day, key.platform, key.version,
-            )
-        }
+        recomputeFleet(touched)
         recordIngestCounters(installId, day, 0, rejected)
         HealthOutcome.Stored
     }
@@ -171,7 +157,6 @@ class HealthStore(private val db: Database, private val clock: Clock) {
         } } ?: emptyList()
     }
 
-    private data class FleetKey(val day: LocalDate, val platform: String, val version: String)
     private fun ResultSet.dayReport(): DayReport = DayReport(
         getObject("day", LocalDate::class.java), getString("platform"), getString("platform_app_version"),
         getLong("admitted"), getLong("unknown"), getLong("trips"), Json.decodeFromString(getString("rule_counts")),
@@ -180,4 +165,52 @@ class HealthStore(private val db: Database, private val clock: Clock) {
         getObject("day", LocalDate::class.java), getString("platform"), getString("platform_app_version"),
         getInt("installs_reporting"), getLong("admitted"), getLong("unknown"), Json.decodeFromString(getString("rule_counts")),
     )
+}
+
+/** One `health_fleet_daily` row's key. */
+internal data class FleetKey(val day: LocalDate, val platform: String, val version: String)
+
+/**
+ * Claims and locks each fleet row in one global order (day, platform, version), so ingest, deletion and the
+ * retention fold never deadlock on each other. Call before changing the `health_daily` rows behind [keys].
+ */
+internal fun Connection.lockFleet(keys: Collection<FleetKey>) {
+    for (key in keys.distinct().sortedWith(compareBy({ it.day }, { it.platform }, { it.version }))) {
+        update(
+            """INSERT INTO health_fleet_daily (day, platform, platform_app_version, installs_reporting, admitted, unknown, rule_counts)
+                VALUES (?, ?, ?, 0, 0, 0, '{}'::jsonb) ON CONFLICT DO NOTHING""", key.day, key.platform, key.version,
+        )
+        select(
+            "SELECT 1 FROM health_fleet_daily WHERE day = ? AND platform = ? AND platform_app_version = ? FOR UPDATE",
+            key.day, key.platform, key.version,
+        ) { true } ?: error("Missing fleet row")
+    }
+}
+
+/**
+ * Recomputes each fleet row from the per-install rows present now. A separate statement after [lockFleet] reads a
+ * fresh snapshot, so a concurrent install's committed contribution is included.
+ */
+internal fun Connection.recomputeFleet(keys: Collection<FleetKey>) {
+    for (key in keys.distinct()) {
+        update(
+            """WITH daily AS (
+                    SELECT * FROM health_daily WHERE day = ? AND platform = ? AND platform_app_version = ?
+                ), totals AS (
+                    SELECT count(*) AS installs, COALESCE(sum(admitted), 0) AS admitted, COALESCE(sum(unknown), 0) AS unknown FROM daily
+                ), rules AS (
+                    SELECT key, sum(value::bigint) AS total FROM daily, jsonb_each_text(rule_counts) GROUP BY key
+                )
+                UPDATE health_fleet_daily SET installs_reporting = totals.installs, admitted = totals.admitted,
+                    unknown = totals.unknown, rule_counts = (SELECT COALESCE(jsonb_object_agg(key, total), '{}'::jsonb) FROM rules)
+                FROM totals WHERE day = ? AND platform = ? AND platform_app_version = ?""",
+            key.day, key.platform, key.version, key.day, key.platform, key.version,
+        )
+    }
+}
+
+/** [lockFleet] then [recomputeFleet]: the fold before per-install rows are forgotten (#79). */
+internal fun Connection.refreshFleet(keys: Collection<FleetKey>) {
+    lockFleet(keys)
+    recomputeFleet(keys)
 }

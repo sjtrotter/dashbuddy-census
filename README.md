@@ -25,18 +25,21 @@ This repository is AGPL-3.0-only. The wire contract belongs to the app's separat
 
 ## OPERATOR TRUST STATEMENT — draft
 
-Our intended operating promise is to store hashes and counts, never plaintext below **k = 10 distinct community installs** after a **7-day quarantine**, and to require human review before drafting a rule. **One stated exception:** a *trusted* install — the operator's own device, enrolled explicitly and excluded from the k count — is unblinded at k = 1 by definition, because the operator is reading their own phone's redacted captures (see the display gate in [OPERATOR.md](docs/OPERATOR.md)). We never persist or log client IP addresses — no exception, not even during an abuse incident; the Caddy edge rate limiter retains the peer address only in process memory for one window. We do not collect hardware/OS device identifiers. "Only credential digests are stored" is true of CLIENT bearers (`installs.key_hash` is a SHA-256); the host does hold two recoverable operator secrets — the TOTP seed and the database password — as an SSM SecureString rendered into a root-only `.env`, encrypted at rest, not hashed. A random, revocable install ID supports distinct-install counting. Observations use dates rather than timestamps finer than a day; nonce issuance and revocation are explicit security exceptions. Caddy discards access and runtime logs and strips forwarded client-IP headers, and the application excludes IPs, credentials, and bodies from request logs.
+Our intended operating promise is to store hashes and counts, never plaintext below **k = 10 distinct community installs** after a **7-day quarantine**, and to require human review before drafting a rule. **One stated exception:** a *trusted* install — the operator's own device, enrolled explicitly and excluded from the k count — is unblinded at k = 1 by definition, because the operator is reading their own phone's redacted captures (see the display gate in [OPERATOR.md](docs/OPERATOR.md)). We never persist or log client IP addresses — no exception, not even during an abuse incident; the Caddy edge rate limiter retains the peer address only in process memory for one window. We do not collect hardware/OS device identifiers. "Only credential digests are stored" is true of CLIENT bearers (`installs.key_hash` is a SHA-256); the host does hold two recoverable operator secrets — the TOTP seed and the database password — as an SSM SecureString rendered into a root-only `.env`, encrypted at rest, not hashed. A random, revocable install ID supports distinct-install counting. Observations and enrolment use dates rather than timestamps finer than a day; nonce issuance, revocation and deletion tombstones are explicit security exceptions. Caddy discards access and runtime logs and strips forwarded client-IP headers, and the application excludes IPs, credentials, bodies, and every part of the install ID from request logs and alarms.
 
 | Data | Retention |
 | --- | --- |
-| Token sightings | 30 days |
-| Cluster sightings | 90 days |
+| Token sightings (presence per install) | 30 days |
+| Cluster sightings (presence per install and day, no counts) | 30 days |
 | Trusted envelopes | 30 days |
-| Per-install daily health | 180 days |
+| Per-install daily health | 30 days, then folded into fleet totals |
+| Fleet health totals (no install) | kept |
+| Cluster samples (shared, no install) | 90 days after the cluster was last seen |
 | Ingest ledger | 7 days |
+| Withdrawal and deletion tombstones (hashed install ID) | 60 days |
 | Backups | 14 days |
 
-The right to withdraw will be exposed through `DELETE /v1/installs/me` (planned). Backups age out within 14 days; a restore must reapply withdrawals made since the backup. Aggregate/catalog retention and sample pruning still need their implementation policy. S1 creates the schema and advertises these targets but does not yet enforce ingest or deletion rules.
+An install withdraws through `DELETE /v1/installs/me` and deletes its server data without withdrawing through `DELETE /v1/installs/me/data` (#79); both erase every per-install row synchronously and confirm it. Backups age out within 14 days; startup and `restore.sh` re-apply every withdrawal and deletion made since the backup from the hashed tombstone journal. The operator can pause uploads from every non-trusted install without a deploy, and per-install daily quotas cap skeletons, batches, bytes and health reports. Lifecycle sweeps enforce the table above.
 
 The exact Compose file we intend to run is [this repository's file](deploy/compose/docker-compose.yml), with a production image digest pinned. The release workflow signs the image using keyless Cosign and publishes an SBOM; operators must verify the actual release signature before deploying. S1 does not claim an image has already been published or verified.
 

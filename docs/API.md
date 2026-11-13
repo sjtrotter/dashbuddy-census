@@ -32,11 +32,12 @@ Public health/policy, identity, ingest and operator routes are implemented. Noti
     "acceptedSchemaIds": ["uinode.skeleton.v1"],
     "retention": {
         "tokenSightingsDays": 30,
-        "clusterSightingsDays": 90,
+        "clusterSightingsDays": 30,
         "trustedEnvelopesDays": 30,
-        "healthDailyDays": 180,
+        "healthDailyDays": 30,
         "ingestLedgerDays": 7,
-        "backupsDays": 14
+        "backupsDays": 14,
+        "withdrawalsDays": 60
     },
     "hashDomain": "census.v1"
 }

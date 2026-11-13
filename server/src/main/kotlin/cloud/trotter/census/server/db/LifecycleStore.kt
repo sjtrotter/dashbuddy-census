@@ -48,7 +48,7 @@ class LifecycleStore(private val db: Database, private val clock: Clock, private
             { installs.purgeInactive(today) to 0 },
         )
         result["tokens"] = delete("token_sightings_v5", "last_day + 30 <= ?", today)
-        result["sightings"] = delete("cluster_sightings_v5", "day + 90 <= ?", today)
+        result["sightings"] = delete("cluster_sightings_v5", "day + ${policy.retention.clusterSightingsDays} <= ?", today)
         for (kind in listOf("screen", "notification")) result["samples_$kind"] = samples(kind, today)
         result["vocabulary"] = vocabulary(today)
         result["catalogue"] = catalogue()
@@ -101,7 +101,7 @@ class LifecycleStore(private val db: Database, private val clock: Clock, private
         AND e.filter_rev=vocabulary_v5.filter_rev AND e.installs >= ${policy.k}))"""
 
     private suspend fun vocabulary(today: LocalDate): SweepResult = delete("vocabulary_v5", vocabularyPredicate(),
-        today, *VocabularyEligibility.args(clock.now(), today))
+        today, *VocabularyEligibility.args(today))
 
     private val cataloguePredicate = """NOT EXISTS (SELECT 1 FROM cluster_samples s WHERE s.fingerprint=clusters.fingerprint)
         AND NOT EXISTS (SELECT 1 FROM cluster_sightings_v5 s WHERE s.fingerprint=clusters.fingerprint)
@@ -114,13 +114,13 @@ class LifecycleStore(private val db: Database, private val clock: Clock, private
             buildMap {
                 put("inactive_installs", select("SELECT count(*) FROM installs WHERE last_seen_day+365 <= ?",today) { it.getLong(1) }!!)
                 put("tokens", select("SELECT count(*) FROM token_sightings_v5 WHERE last_day+30 <= ?",today) { it.getLong(1) }!!)
-                put("sightings", select("SELECT count(*) FROM cluster_sightings_v5 WHERE day+90 <= ?",today) { it.getLong(1) }!!)
+                put("sightings", select("SELECT count(*) FROM cluster_sightings_v5 WHERE day+${policy.retention.clusterSightingsDays} <= ?",today) { it.getLong(1) }!!)
                 for (kind in listOf("screen","notification")) put("samples_$kind",
                     select("SELECT count(*) FROM cluster_samples s JOIN clusters c USING(fingerprint) WHERE c.kind=? AND ${sampleDue()}",kind,today,today) { it.getLong(1) }!!)
-                put("vocabulary", select("SELECT count(*) FROM vocabulary_v5 WHERE ${vocabularyPredicate()}",today,*VocabularyEligibility.args(clock.now(),today)) { it.getLong(1) }!!)
+                put("vocabulary", select("SELECT count(*) FROM vocabulary_v5 WHERE ${vocabularyPredicate()}",today,*VocabularyEligibility.args(today)) { it.getLong(1) }!!)
                 put("catalogue", select("SELECT count(*) FROM clusters WHERE $cataloguePredicate") { it.getLong(1) }!!)
             }
-        } + InstallStore(db,clock).remainingDue(today,clock.now())
+        } + InstallStore(db,clock).remainingDue(today,clock.now(),policy.retention)
     }
 
     private suspend fun catalogue(): SweepResult {

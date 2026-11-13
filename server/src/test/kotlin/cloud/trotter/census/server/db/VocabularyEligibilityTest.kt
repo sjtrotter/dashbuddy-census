@@ -13,12 +13,13 @@ class VocabularyEligibilityTest : LifecycleTestDatabase() {
             val ids = List(10) { install() }
             for (id in ids) observe(db, id)
             val tenth = ids.last()
-            sql { it.update("UPDATE installs SET enrolled_at=? WHERE install_id=?", instant.minusSeconds(7*86400L - 1).atOffset(ZoneOffset.UTC), tenth) }
+            // #79: quarantine counts whole UTC days from the enrolment day; the tenth enrolled six days ago.
+            sql { it.update("UPDATE installs SET created_day=? WHERE install_id=?", day.minusDays(6), tenth) }
             val ops = OpsStore(db, clock, policy)
             assertEquals(0, ops.vocabularyQueueCount()); assertTrue(ops.vocabularyQueueDisplay().isEmpty())
             assertTrue(ops.vocabularyQueue().isEmpty())
             assertFalse(ops.resolve("0123456789abcdef", "reviewed", "corpus", false))
-            instant = instant.plusSeconds(1)
+            instant = instant.plusSeconds(86_400)
             assertEquals(1, ops.vocabularyQueueCount()); assertEquals(10, ops.vocabularyQueueDisplay().single().distinctInstalls)
             assertEquals("0123456789abcdef", ops.vocabularyQueue().single().jsonObject["tokenHash"]!!.jsonPrimitive.content)
             assertTrue(ops.resolve("0123456789abcdef", "reviewed", "corpus", false))
