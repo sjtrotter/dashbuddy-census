@@ -62,7 +62,17 @@ class LifecycleStore(private val db: Database, private val clock: Clock, private
         for (kind in listOf("screen", "notification")) result["samples_$kind"] = samples(kind, today)
         result["vocabulary"] = vocabulary(today)
         result["catalogue"] = catalogue()
+        // #80 (Sol S1): after retention, so every row the release counts still exists until the next one.
+        result["slot_release"] = slotRelease(today)
         return result
+    }
+
+    private suspend fun slotRelease(today: LocalDate): SweepResult = try {
+        val written = query { releaseSlotEvidence(policy, today, clock.now()) }
+        SweepResult(rewritten = written?.toLong() ?: 0, batches = if (written == null) 0 else 1, remainingDue = 0)
+    } catch (failure: Exception) {
+        if (failure is CancellationException) throw failure
+        SweepResult(failed = true)
     }
 
     /**

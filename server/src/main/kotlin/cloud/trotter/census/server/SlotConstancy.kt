@@ -25,7 +25,7 @@ enum class SlotClass(val wire: String) {
  * @property topHashInstalls installs behind the most common hash.
  * @property hashes distinct hashes seen in the slot.
  * @property sharedHashes hashes seen on at least [SlotConstancyPolicy.regionalMinInstalls] installs each.
- * @property sharedHashInstalls the installs behind [sharedHashes], added up (an install that saw two of them counts twice).
+ * @property sharedHashInstalls a LOWER BOUND on the distinct installs behind [sharedHashes] ([of]).
  */
 data class SlotEvidence(
     val installs: Int,
@@ -35,7 +35,35 @@ data class SlotEvidence(
     val sharedHashInstalls: Int = 0,
     val withheldInstalls: Int = 0,
     val shapeInstalls: Int = 0,
-)
+) {
+    companion object {
+        /**
+         * Builds the evidence from one epoch's counts: [present] installs saw the slot, and [counts] maps each stored
+         * value (hash or marker; a presence entry is ignored) to the distinct installs that saw it.
+         *
+         * Sol S5: one install's rows for two values carry unrelated tags (#86), so the distinct installs behind several
+         * shared hashes cannot be counted. They are bounded instead. Every install holds at least one value, so the
+         * value rows beyond one per install number `E = Σ values − present`; an install behind `s` shared hashes adds
+         * `s − 1` of them, so the distinct installs behind the shared hashes are at least `Σ shared − E`. The bound is
+         * exact when no install saw two values, and it errs toward `varying`, never toward `regional`.
+         */
+        fun of(present: Int, counts: Map<String, Int>, policy: SlotConstancyPolicy): SlotEvidence {
+            val values = counts - SlotValues.PRESENT
+            val hashes = values.filterKeys { it !in SlotValues.MARKERS }
+            val shared = hashes.values.filter { it >= policy.regionalMinInstalls }
+            val excess = (values.values.sum() - present).coerceAtLeast(0)
+            return SlotEvidence(
+                installs = present,
+                topHashInstalls = hashes.values.maxOrNull() ?: 0,
+                hashes = hashes.size,
+                sharedHashes = shared.size,
+                sharedHashInstalls = (shared.sum() - excess).coerceAtLeast(0),
+                withheldInstalls = values[SlotValues.WITHHELD] ?: 0,
+                shapeInstalls = values[SlotValues.SHAPE] ?: 0,
+            )
+        }
+    }
+}
 
 /** The value markers a slot sighting stores in place of a hash (#80); none of them is 16 lowercase hex. */
 object SlotValues {

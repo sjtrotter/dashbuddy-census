@@ -13,6 +13,7 @@ import cloud.trotter.census.server.SlotClass
 import cloud.trotter.census.server.enrol
 import cloud.trotter.census.server.ingest.ItemVerdict
 import cloud.trotter.census.server.ingest.SkeletonValidator
+import cloud.trotter.census.server.ingest.SlotWalk
 import cloud.trotter.census.server.module
 import cloud.trotter.census.server.ops.ClusterDetailHtml
 import cloud.trotter.census.server.secret
@@ -26,11 +27,11 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNotEquals
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import java.time.LocalDate
@@ -49,29 +50,41 @@ class SlotConstancyStoreTest : LifecycleTestDatabase() {
     private fun hash(n: Int): String = "%016x".format(n.toLong() + 0x1000)
     private fun word(n: Int): TextSlot = TextSlot(hash(n), "words:2")
 
-    private fun screenJson(slot: TextSlot, observed: LocalDate = day, version: String = "8.0"): JsonObject {
-        val child = UiSkeletonNodeDto(className = "android.widget.TextView", text = mapOf("text" to slot))
-        val root = UiSkeletonNodeDto(className = "android.widget.Button", text = mapOf("text" to chrome), children = listOf(child))
+    private fun screenJson(slot: TextSlot, observed: LocalDate = day, version: String = "8.0", wrapped: Boolean = false): JsonObject {
+        val leaf = UiSkeletonNodeDto(className = "android.widget.TextView", text = mapOf("text" to slot))
+        // An empty anonymous wrapper is spliced out of the fingerprint, but it moves the leaf's raw path (Sol S4).
+        val children = if (wrapped) listOf(UiSkeletonNodeDto(className = "android.view.View"), leaf) else listOf(leaf)
+        val root = UiSkeletonNodeDto(className = "android.widget.Button", text = mapOf("text" to chrome), children = children)
         val item = UiSkeletonDto(SkeletonSchema.SCHEMA_ID_V2, 1, 1, requireNotNull(CensusFingerprint.of(root)), "doordash",
             platformAppVersion = version, engineVersion = 1, day = observed.toString(), root = root)
         return Json.parseToJsonElement(SkeletonSchema.serialize(item)).jsonObject
     }
 
-    private fun screen(slot: TextSlot, observed: LocalDate = day): ItemVerdict.Accepted =
-        SkeletonValidator.validate(screenJson(slot, observed), policy, day) as ItemVerdict.Accepted
+    private fun accepted(json: JsonObject): ItemVerdict.Accepted = SkeletonValidator.validate(json, policy, day) as ItemVerdict.Accepted
+    private fun screen(slot: TextSlot, observed: LocalDate = day): ItemVerdict.Accepted = accepted(screenJson(slot, observed))
 
     private val fingerprint: String get() = screenJson(chrome).getValue("fingerprint").jsonPrimitive.content
+    private fun variant(version: String = "8.0", wrapped: Boolean = false) =
+        SlotVariant(version, 1, 1, SlotWalk.layout(accepted(screenJson(chrome, version = version, wrapped = wrapped)).item))
 
     private fun at(on: LocalDate) { instant = on.atTime(12, 0).toInstant(ZoneOffset.UTC) }
 
     /** Each install's skeletons go in one at a time, as separate frames. */
     private suspend fun see(db: Database, id: UUID, vararg slots: TextSlot) { for (slot in slots) observe(db, id, listOf(screen(slot))) }
 
-    private suspend fun classes(db: Database): Map<String, SlotClass> = SlotStore(db, clock, policy)
-        .appClasses(SkeletonKind.SCREEN, fingerprint, SlotVariant("8.0", 1, 1))
+    private suspend fun readings(db: Database): List<SlotVariantReading> = OpsStore(db, clock, policy).cluster(fingerprint)!!.slots.orEmpty()
 
-    private suspend fun operatorView(db: Database): Map<String, SlotReading> =
-        OpsStore(db, clock, policy).cluster(fingerprint)!!.slots.orEmpty().single().slots.associateBy { it.slot }
+    /** The operator's live classes of one variant, unknown left out. */
+    private suspend fun classes(db: Database, of: SlotVariant = variant()): Map<String, SlotClass> =
+        readings(db).singleOrNull { it.variant == of }?.slots.orEmpty().filter { it.slotClass != SlotClass.UNKNOWN }.associate { it.slot to it.slotClass }
+
+    private suspend fun operatorView(db: Database): Map<String, SlotReading> = readings(db).single().slots.associateBy { it.slot }
+
+    /** What [asker] reads from the released snapshot. */
+    private suspend fun released(db: Database, asker: UUID): Map<String, SlotClass> =
+        SlotStore(db, clock, policy).appClasses(asker, SkeletonKind.SCREEN, fingerprint, variant())
+
+    private fun release() = sql { it.releaseSlotEvidence(policy, day, instant) }
 
     private fun installs(n: Int, age: Long = 40): List<UUID> = List(n) { install(age = age) }
 
@@ -79,7 +92,6 @@ class SlotConstancyStoreTest : LifecycleTestDatabase() {
         Database.connect(config()).use { db ->
             val nine = installs(9)
             for (id in nine) see(db, id, word(1))
-            // Nine of ten: below k, so nothing reaches the app, and the operator sees unknown.
             assertEquals(emptyMap<String, SlotClass>(), classes(db))
             assertEquals(SlotClass.UNKNOWN, operatorView(db).getValue(value).slotClass)
             assertEquals(9, operatorView(db).getValue(value).installs)
@@ -98,11 +110,20 @@ class SlotConstancyStoreTest : LifecycleTestDatabase() {
         }
     }
 
-    @Test fun `several hashes each on several installs is regional`() = runBlocking {
+    @Test fun `several hashes each on several installs is regional, and installs behind several hashes count once at most`() = runBlocking {
         Database.connect(config()).use { db ->
             // Four stores, each seen by three of twelve dashers.
             for ((index, id) in installs(12).withIndex()) see(db, id, word(index % 4))
             assertEquals(SlotClass.REGIONAL, classes(db)[value])
+        }
+        reset()
+        Database.connect(config()).use { db ->
+            // Sol S5: three installs each saw the same two values; nine saw one-offs. Two "shared" values, but three
+            // installs behind them, a quarter of twelve: varying.
+            val ids = installs(12)
+            for (id in ids.take(3)) see(db, id, word(1), word(2))
+            for ((index, id) in ids.drop(3).withIndex()) see(db, id, word(100 + index))
+            assertEquals(SlotClass.VARYING, classes(db)[value])
         }
     }
 
@@ -114,13 +135,24 @@ class SlotConstancyStoreTest : LifecycleTestDatabase() {
             assertEquals(SlotClass.WITHHELD, classes(db)[value])
 
             // Another variant of the same cluster, where every install sees a money shape.
-            val shapes = installs(10)
-            for (id in shapes) observe(db, id, listOf(SkeletonValidator.validate(
-                screenJson(TextSlot.ofShape(ShapeTemplate.MONEY), version = "8.1"), policy, day) as ItemVerdict.Accepted))
-            assertEquals(mapOf(title to SlotClass.CONSTANT, value to SlotClass.SHAPE), SlotStore(db, clock, policy)
-                .appClasses(SkeletonKind.SCREEN, fingerprint, SlotVariant("8.1", 1, 1)))
+            for (id in installs(10)) observe(db, id, listOf(accepted(screenJson(TextSlot.ofShape(ShapeTemplate.MONEY), version = "8.1"))))
+            assertEquals(mapOf(title to SlotClass.CONSTANT, value to SlotClass.SHAPE), classes(db, variant("8.1")))
             // Variants are counted apart: 8.0 is unchanged by the shape installs.
             assertEquals(SlotClass.WITHHELD, classes(db)[value])
+        }
+    }
+
+    @Test fun `raw layouts are counted apart, so a spliced wrapper never puts another node on a label's path`() = runBlocking {
+        Database.connect(config()).use { db ->
+            // Ten installs see the label at root/0/text; in the wrapped layout root/0 is an empty wrapper and the value
+            // sits at root/1/text. Same fingerprint, two layouts.
+            for (id in installs(10)) see(db, id, word(1))
+            for (id in installs(1)) observe(db, id, listOf(accepted(screenJson(word(999), wrapped = true))))
+            assertEquals(fingerprint, screenJson(chrome, wrapped = true).getValue("fingerprint").jsonPrimitive.content)
+            assertNotEquals(variant().layout, variant(wrapped = true).layout)
+            assertEquals(2, readings(db).size)
+            assertEquals(SlotClass.CONSTANT, classes(db)[value])
+            assertEquals(1, readings(db).single { it.variant == variant(wrapped = true) }.slots.single { it.slot == "root/1/text" }.installs)
         }
     }
 
@@ -128,8 +160,7 @@ class SlotConstancyStoreTest : LifecycleTestDatabase() {
         Database.connect(config()).use { db ->
             for (id in installs(5)) see(db, id, word(1))
             for (id in installs(5, age = 3)) see(db, id, word(1))
-            val trusted = install(trusted = true)
-            see(db, trusted, word(1))
+            see(db, install(trusted = true), word(1))
             assertEquals(emptyMap<String, SlotClass>(), classes(db))
             assertEquals(5, operatorView(db).getValue(value).installs)
             // The quarantine ends; the marks clear and those five count.
@@ -154,6 +185,24 @@ class SlotConstancyStoreTest : LifecycleTestDatabase() {
             // The early five again, now in the later epoch: ten within one epoch.
             for (id in early) see(db, id, word(1))
             assertEquals(SlotClass.CONSTANT, classes(db)[value])
+        }
+    }
+
+    @Test fun `each value keeps its own last day and expires on it`() = runBlocking {
+        Database.connect(config()).use { db ->
+            // Sol S3: one batch carries an old frame and a new one; the old value must not ride the new frame's day.
+            val id = install()
+            val start = day
+            observe(db, id, listOf(screen(word(1), observed = start.minusDays(2)), screen(word(2), observed = start)))
+            fun lastDay(of: String) = sql { it.select("SELECT last_day FROM slot_sightings WHERE slot = ? AND value = ?", value, of) { r ->
+                r.getObject(1, LocalDate::class.java) } }
+            assertEquals(start.minusDays(2), lastDay(testKeying.token(hash(1))))
+            assertEquals(start, lastDay(testKeying.token(hash(2))))
+            assertEquals(start, lastDay("present"))
+            at(start.plusDays(28))
+            LifecycleStore(db, clock, policy).runOnce()
+            assertEquals(null, lastDay(testKeying.token(hash(1))))
+            assertEquals(start, lastDay(testKeying.token(hash(2))))
         }
     }
 
@@ -189,21 +238,62 @@ class SlotConstancyStoreTest : LifecycleTestDatabase() {
         }
     }
 
+    @Test fun `an uploaded guess cannot move what its uploader reads, and its own rows never decide its own answer`() = runBlocking {
+        Database.connect(config()).use { db ->
+            // Yesterday: ten peers saw the label; nine of them shared one value in the second slot and one saw another.
+            val start = day
+            at(start.minusDays(1))
+            val peers = installs(10)
+            for ((index, id) in peers.withIndex()) see(db, id, if (index < 9) word(1) else word(2))
+            val asker = install()
+            at(start)
+            release()
+            // Nine of ten on one value is below k: the asker sees the label only.
+            assertEquals(mapOf(title to SlotClass.CONSTANT), released(db, asker))
+
+            // The asker guesses the shared value. Live, ten installs now share it; the release does not move today.
+            see(db, asker, word(1))
+            assertEquals(SlotClass.CONSTANT, classes(db)[value])
+            release()
+            assertEquals(mapOf(title to SlotClass.CONSTANT), released(db, asker))
+
+            // Tomorrow's release counts the guess, but the asker's own rows are subtracted from the asker's answer.
+            at(start.plusDays(1))
+            release()
+            assertEquals(mapOf(title to SlotClass.CONSTANT), released(db, asker))
+            // Residual: an install that uploaded nothing reads the release with the guess in it (docs/SECURITY.md).
+            assertEquals(mapOf(title to SlotClass.CONSTANT, value to SlotClass.CONSTANT), released(db, install()))
+
+            // Deleting its data after the release (so its counted rows cannot be subtracted) gets the asker nothing
+            // until the next release, which no longer counts it.
+            instant = instant.plusSeconds(60)
+            assertTrue(InstallStore(db, clock).deleteData(asker, key, day) is MutationOutcome.Applied)
+            assertEquals(emptyMap<String, SlotClass>(), released(db, asker))
+            at(start.plusDays(2))
+            release()
+            assertEquals(mapOf(title to SlotClass.CONSTANT), released(db, asker))
+        }
+    }
+
     @Test fun `the app endpoint returns classes only, nothing below k, and refuses malformed queries`() {
         Database.connect(config()).use { db ->
+            val start = day
             runBlocking {
+                at(start.minusDays(1))
                 for (id in installs(10)) see(db, id, word(1))
-                for (id in installs(4)) observe(db, id, listOf(SkeletonValidator.validate(screenJson(word(1), version = "9.0"), policy, day) as ItemVerdict.Accepted))
+                for (id in installs(4)) observe(db, id, listOf(accepted(screenJson(word(1), version = "9.0"))))
+                at(start)
+                release()
             }
             testApplication {
                 application { module(config(), db, clock, policy = policy) }
                 val id = UUID.randomUUID().toString(); val secret = secret(80)
                 assertEquals(200, client.enrol(id, secret).status.value)
-                fun query(version: String, revision: Int = 1, fp: String = fingerprint) = JsonObject(mapOf(
-                    "kind" to JsonPrimitive("screen"), "fingerprint" to JsonPrimitive(fp),
-                    "platformAppVersion" to JsonPrimitive(version), "hashDomain" to JsonPrimitive(1), "filterRev" to JsonPrimitive(revision),
+                fun query(version: String, fp: String = fingerprint, layout: String = variant(version).layout) = JsonObject(mapOf(
+                    "kind" to JsonPrimitive("screen"), "fingerprint" to JsonPrimitive(fp), "platformAppVersion" to JsonPrimitive(version),
+                    "hashDomain" to JsonPrimitive(1), "filterRev" to JsonPrimitive(1), "layout" to JsonPrimitive(layout),
                 ))
-                val unseen = screenJson(chrome).getValue("fingerprint").jsonPrimitive.content.reversed()
+                val unseen = fingerprint.reversed()
                 val body = JsonObject(mapOf("items" to JsonArray(listOf(query("8.0"), query("9.0"), query("8.0", fp = unseen))))).toString()
                 val response = client.signed(clock, id, secret, HttpMethod.Post, "/v1/slot-classes", body)
                 assertEquals(200, response.status.value)
@@ -221,6 +311,8 @@ class SlotConstancyStoreTest : LifecycleTestDatabase() {
                     JsonObject(mapOf("items" to JsonArray(List(9) { query("8.0") }))).toString(),
                     JsonObject(mapOf("items" to JsonArray(listOf(JsonObject(query("8.0") + ("extra" to JsonPrimitive(1))))))).toString(),
                     JsonObject(mapOf("items" to JsonArray(listOf(query("8.0", fp = "nothex"))))).toString(),
+                    JsonObject(mapOf("items" to JsonArray(listOf(query("8.0", layout = "short"))))).toString(),
+                    JsonObject(mapOf("items" to JsonArray(listOf(JsonObject(query("8.0") - "layout"))))).toString(),
                     JsonObject(mapOf("items" to JsonArray(listOf(JsonObject(query("8.0") + ("kind" to JsonPrimitive("envelope"))))))).toString(),
                     "not json",
                 )) {
@@ -229,6 +321,33 @@ class SlotConstancyStoreTest : LifecycleTestDatabase() {
                 }
                 assertEquals(401, client.signed(clock, id, secret(81), HttpMethod.Post, "/v1/slot-classes", body).status.value)
             }
+        }
+    }
+
+    @Test fun `erasure streams a large slot table in bounded chunks`() = runBlocking {
+        Database.connect(config()).use { db ->
+            // Sol S6: twenty thousand other objects in the epoch, read 50 at a time, tags matched 100 at a time.
+            val target = install()
+            see(db, target, word(1))
+            // Two slots, each a presence row and a value row.
+            assertEquals(4L, sql { it.installRows("slot_sightings", target, day) })
+            sql { it.update("""INSERT INTO slot_sightings (fingerprint, platform_app_version, hash_domain, filter_rev, layout, slot, value,
+                epoch, install_tag, trusted, first_received, last_day)
+                SELECT ?, '8.0', 1, 1, ?, 'root/' || n || '/text', 'present', ?, md5(n::text) || md5(n::text || 'x'), false, ?, ?
+                FROM generate_series(1, 20000) n""", fingerprint, variant().layout, Epochs.of(day), day, day) }
+            var chunks = 0
+            val deleted = db.exposed.let {
+                org.jetbrains.exposed.v1.jdbc.transactions.transaction(it) {
+                    val connection = connection.connection as java.sql.Connection
+                    val key = with(EpochKeyStore) { connection.storedKeys(testKeying) }
+                    connection.forInstallTags(key, TaggedTable.SLOTS, target,
+                        "DELETE FROM slot_sightings WHERE epoch = ? AND install_tag = ANY(?::bpchar[])", chunkSize = 100, fetchSize = 50,
+                    ) { epoch, tags -> chunks++; arrayOf(epoch, tags) }
+                }
+            }
+            assertEquals(4, deleted)
+            assertTrue(chunks >= 200, "chunks=$chunks")
+            assertEquals(20_000L, count("slot_sightings"))
         }
     }
 

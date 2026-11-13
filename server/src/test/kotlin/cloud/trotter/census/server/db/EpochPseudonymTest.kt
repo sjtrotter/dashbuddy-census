@@ -155,11 +155,10 @@ class EpochPseudonymTest : LifecycleTestDatabase() {
             "cluster_sightings_v5" -> connection.update("""INSERT INTO cluster_sightings_v5 (fingerprint, epoch, install_tag, trusted, day, platform_app_version, hash_domain, filter_rev)
                 VALUES (?, ?, ?, false, ?, 'restored', 1, 1) ON CONFLICT DO NOTHING""", row.objectKey, row.epoch, row.tag, day)
             "slot_sightings" -> {
-                val (fingerprint, domain, revision, slot, value) = row.objectKey.split(':', limit = 6)
-                val version = row.objectKey.split(':', limit = 6)[5]
-                connection.update("""INSERT INTO slot_sightings (fingerprint, platform_app_version, hash_domain, filter_rev, slot, value, epoch,
-                    install_tag, trusted, last_day) VALUES (?, ?, ?, ?, ?, ?, ?, ?, false, ?) ON CONFLICT DO NOTHING""",
-                    fingerprint, version, domain.toInt(), revision.toInt(), slot, value, row.epoch, row.tag, day)
+                val fields = row.objectKey.split(':', limit = 7)
+                connection.update("""INSERT INTO slot_sightings (fingerprint, platform_app_version, hash_domain, filter_rev, layout, slot, value,
+                    epoch, install_tag, trusted, first_received, last_day) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, false, ?, ?) ON CONFLICT DO NOTHING""",
+                    fields[0], fields[6], fields[1].toInt(), fields[2].toInt(), fields[3], fields[4], fields[5], row.epoch, row.tag, day, day)
             }
             else -> connection.update("""INSERT INTO health_daily (epoch, install_tag, day, platform, platform_app_version, admitted, unknown, trips, rule_counts)
                 VALUES (?, ?, ?, 'doordash', 'restored', 1, 0, 0, '{}') ON CONFLICT DO NOTHING""", row.epoch, row.tag, day)

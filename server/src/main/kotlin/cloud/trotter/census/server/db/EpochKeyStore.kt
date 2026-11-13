@@ -121,38 +121,58 @@ internal enum class TaggedTable(val table: String, val purpose: TagPurpose, priv
     ;
 
     /**
-     * [installId]'s tags in this table under [key]: one per object stored in that epoch (a table without objects has
-     * one tag). Rows of other installs never match (a tag covers the install id), and rows under a destroyed key are
-     * never found: no live key reproduces their tags.
+     * [installId]'s tags in this table under [key], handed to [block] [chunkSize] at a time: one per object stored in
+     * that epoch (a table without objects has one tag). Rows of other installs never match (a tag covers the install
+     * id), and rows under a destroyed key are never found: no live key reproduces their tags.
+     *
+     * #80 (Sol S6): the objects are streamed with a bounded fetch size, so a fleet-wide table never sits in the heap
+     * whole; only one chunk of tags does. Inside a transaction (autocommit off) the driver reads [fetchSize] rows at a
+     * time; [block] may run other statements on the same connection meanwhile.
      */
-    fun tags(connection: Connection, key: EpochKey, installId: UUID): List<String> {
-        val objectKeys = if (objects == null) listOf("") else connection.prepareStatement(objects).use { statement ->
+    fun forEachTagChunk(
+        connection: Connection, key: EpochKey, installId: UUID,
+        chunkSize: Int = CHUNK, fetchSize: Int = FETCH, block: (List<String>) -> Unit,
+    ) {
+        if (objects == null) return block(listOf(key.tag(purpose, installId, "")))
+        connection.prepareStatement(objects).use { statement ->
+            statement.fetchSize = fetchSize
             statement.setInt(1, key.epoch)
-            statement.executeQuery().use { rows -> buildList { while (rows.next()) add(rows.getString(1)) } }
+            statement.executeQuery().use { rows ->
+                val chunk = ArrayList<String>(chunkSize)
+                while (rows.next()) {
+                    chunk += key.tag(purpose, installId, rows.getString(1))
+                    if (chunk.size == chunkSize) { block(chunk.toList()); chunk.clear() }
+                }
+                if (chunk.isNotEmpty()) block(chunk.toList())
+            }
         }
-        return objectKeys.map { key.tag(purpose, installId, it) }
     }
 
     companion object {
         /** Tags matched per statement, so one install's rows are found with bounded parameter arrays. */
         const val CHUNK: Int = 5000
+
+        /** Objects read from the database per round trip while tags are computed (#80, Sol S6). */
+        const val FETCH: Int = 1000
     }
 }
 
 /**
  * Runs [statement] once per chunk of [installId]'s tags in [table], for every key in [keys]; [bind] orders the
- * parameters from the epoch and the tag array. Returns the summed update counts.
+ * parameters from the epoch and the tag array. Returns the summed update counts. Objects stream ([TaggedTable.forEachTagChunk]).
  */
 internal fun Connection.forInstallTags(
     keys: List<EpochKey>,
     table: TaggedTable,
     installId: UUID,
     statement: String,
+    chunkSize: Int = TaggedTable.CHUNK,
+    fetchSize: Int = TaggedTable.FETCH,
     bind: (epoch: Int, tags: java.sql.Array) -> Array<Any?> = { epoch, tags -> arrayOf(epoch, tags) },
 ): Int {
     var total = 0
     for (key in keys) {
-        for (chunk in table.tags(this, key, installId).chunked(TaggedTable.CHUNK)) {
+        table.forEachTagChunk(this, key, installId, chunkSize, fetchSize) { chunk ->
             val tags = createArrayOf("text", chunk.toTypedArray())
             try {
                 total += update(statement, *bind(key.epoch, tags))

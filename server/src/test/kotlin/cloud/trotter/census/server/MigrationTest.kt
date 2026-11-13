@@ -430,7 +430,7 @@ class MigrationTest {
     }
 
     @Test
-    fun `empty database applies every migration and contains exactly seventeen application tables`() {
+    fun `empty database applies every migration and contains exactly nineteen application tables`() {
         val flyway = Database.flyway(postgres.jdbcUrl, postgres.username, postgres.password, testKeying).load()
         // V1 schema, V2 classification, V3 tombstones, V4 notifications, V5 lifecycle, V6 keep less (#79), V7 keyed (#85),
         // V8 epoch pseudonyms (#86, which drops the three pre-V5 tables), V9 slot sightings (#80).
@@ -438,7 +438,7 @@ class MigrationTest {
         val expected = setOf(
             "installs", "clusters", "cluster_samples", "trusted_envelopes", "health_daily", "health_fleet_daily", "ingest_ledger",
             "nonces", "withdrawals", "token_sightings_v5", "cluster_sightings_v5", "vocabulary_v5", "filter_floor", "ingest_pause",
-            "hash_keying", "epoch_keys", "slot_sightings",
+            "hash_keying", "epoch_keys", "slot_sightings", "slot_evidence_released", "slot_release",
         )
         DriverManager.getConnection(postgres.jdbcUrl, postgres.username, postgres.password).use { connection ->
             connection.createStatement().use { statement ->

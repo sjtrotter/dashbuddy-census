@@ -15,14 +15,16 @@ import java.util.UUID
 internal fun Connection.installRows(table: String, installId: UUID, today: LocalDate?): Long {
     val tagged = TaggedTable.entries.singleOrNull { it.table == table }
         ?: return select("SELECT count(*) FROM $table WHERE install_id = ?", installId) { it.getLong(1) }!!
-    return keys(today).sumOf { key ->
-        val tags = createArrayOf("text", tagged.tags(this, key, installId).toTypedArray())
+    var rows = 0L
+    for (key in keys(today)) tagged.forEachTagChunk(this, key, installId) { chunk ->
+        val tags = createArrayOf("text", chunk.toTypedArray())
         try {
-            select("SELECT count(*) FROM $table WHERE epoch = ? AND install_tag = ANY(?::bpchar[])", key.epoch, tags) { it.getLong(1) }!!
+            rows += select("SELECT count(*) FROM $table WHERE epoch = ? AND install_tag = ANY(?::bpchar[])", key.epoch, tags) { it.getLong(1) }!!
         } finally {
             tags.free()
         }
     }
+    return rows
 }
 
 /** Deletes [installId]'s rows of [table] the way [installRows] finds them. */

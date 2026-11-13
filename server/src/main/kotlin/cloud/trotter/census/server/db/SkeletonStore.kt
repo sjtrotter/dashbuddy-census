@@ -8,6 +8,7 @@ import cloud.trotter.census.server.ingest.LifecycleDeadline
 import cloud.trotter.census.server.ingest.ItemVerdict
 import cloud.trotter.census.server.ingest.BudgetPolicy
 import cloud.trotter.census.server.ingest.ConsumeOutcome
+import cloud.trotter.census.server.ingest.SlotWalk
 import cloud.trotter.census.server.ingest.atRest
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -145,7 +146,8 @@ class SkeletonStore(
             for (acceptedItem in group) {
                 val item = acceptedItem.item
                 val observed = LifecycleDeadline.observation(LocalDate.parse(item.day), day)
-                slotSightings += SlotSighting(item, SlotVariant(item.platformAppVersion ?: "unknown", item.hashDomain, item.filterRev), observed)
+                slotSightings += SlotSighting(item, SlotVariant(item.platformAppVersion ?: "unknown", item.hashDomain, item.filterRev,
+                    SlotWalk.layout(item)), observed)
                 // #86: keyed by an epoch tag of (install, cluster) under the observation day's epoch, never the install.
                 val sighting = tagger.tag(TagPurpose.CLUSTER, installId, fingerprint, observed)
                 update(
@@ -172,7 +174,7 @@ class SkeletonStore(
                 }
             }
             // #80: where each value sat, for per-slot constancy; keyed by epoch tags like the sightings above.
-            recordSlotSightings(tagger, installId, trusted, countsFrom, fingerprint, slotSightings, slotLimit)
+            recordSlotSightings(tagger, installId, trusted, countsFrom, day, fingerprint, slotSightings, slotLimit)
         }
         recordIngestCounters(installId, day, duplicateInBatch, rejected)
         IngestOutcome.Stored(IngestSummary(groups.size, newClusters, samplesStored, tokensTouched), consumed)
