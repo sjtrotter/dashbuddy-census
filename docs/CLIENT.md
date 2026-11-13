@@ -54,7 +54,7 @@ Withdraw using a signed `DELETE /v1/installs/me` with no body. `202 {"status":"w
 
 Honor `Retry-After` on `429 rate_limited`. Before timestamp checks, body reads, or database I/O, authenticated routes apply an admission token bucket keyed by the bearer’s unverified install ID string: capacity 120, refilling at 120/minute. Exhaustion returns `429 rate_limited` with `Retry-After: 1`. The synchronized LRU retains at most 10,000 IDs and never uses IP addresses. Enrollment shares one server-process bucket of 120/hour; authenticated traffic shares 60/minute per install, with an additional 30/hour per install for nonces. These in-memory buckets reset on restart. A per-client-address limit runs at the Caddy edge in front of these (`/v1/enroll` 10/min and 20/h, all of `/v1` 200/min; a refusal is a `429` with `Retry-After` and an empty body — treat it like the application's); the application never obtains, stores, or logs an IP address.
 
-Server route authors: `InstallAuth` consumes the request channel once, with a 1 MiB limit, and places the verified raw bytes in `AuthenticatedBodyKey`. Decode that attribute; do not call `receive()` or `receiveChannel()` again. The verified identity is in `AuthenticatedInstallKey`. Only its eight-character prefix may appear in logs.
+Server route authors: `InstallAuth` consumes the request channel once, with a 1 MiB limit, and places the verified raw bytes in `AuthenticatedBodyKey`. Decode that attribute; do not call `receive()` or `receiveChannel()` again. The verified identity is in `AuthenticatedInstallKey`. No part of it may appear in logs (#79).
 
 ## Uploading skeletons
 

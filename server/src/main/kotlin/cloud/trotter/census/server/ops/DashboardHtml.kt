@@ -240,7 +240,7 @@ private fun FlowContent.alarmSection(alarms: JsonObject) = panel("alarms", "Alar
     val today = alarms.rows("today")
     val counts = alarms.obj("counts")
     if (today.isEmpty()) emptyState("No alarms recorded today by this process. Check reporting health below; this is not an all-clear.")
-    else dataTable("Alarms delivered by this process today · newest recorded first", listOf("Alarm", "Platform", "Version", "Install", "Rules"), today.asReversed().map { row ->
+    else dataTable("Alarms delivered by this process today · newest recorded first", listOf("Alarm", "Platform", "Version", "Rules"), today.asReversed().map { row ->
         listOf(
             cell {
                 val display = alarmCatalogue.find { it.kind == row.text("kind") }
@@ -253,7 +253,6 @@ private fun FlowContent.alarmSection(alarms: JsonObject) = panel("alarms", "Alar
                 val version = row.text("version")
                 if (version == "unknown" || version == "_unknown") +"Not recorded" else code { +validated(version, WireGrammars.platformAppVersion) }
             },
-            cell { row.optionalText("installPrefix")?.let { code { +prefix(it) } } ?: run { +"Not install-specific" } },
             blockCell {
                 val rules = row["ruleIds"] as? JsonArray ?: JsonArray(emptyList())
                 if (rules.isEmpty()) +"None" else ul("rule-list") { rules.forEach { li { code { +rule(it.jsonPrimitive.content) } } } }

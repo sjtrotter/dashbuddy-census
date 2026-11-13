@@ -83,10 +83,10 @@ fun Application.module(
                 "OPTIONS" -> "OPTIONS"
                 else -> "OTHER"
             }
-            val prefix = call.attributes.getOrNull(AuthenticatedInstallKey)?.prefix ?: "-"
+            // #79: no install key of any length. Abuse handling reads the authenticated /ops ledger, not this log.
             "method=$method " +
                 "path=$path status=${call.response.status()?.value ?: 0} " +
-                "duration_ms=${call.processingTimeMillis()} install_prefix=$prefix"
+                "duration_ms=${call.processingTimeMillis()}"
         }
     }
     install(RateLimit) {

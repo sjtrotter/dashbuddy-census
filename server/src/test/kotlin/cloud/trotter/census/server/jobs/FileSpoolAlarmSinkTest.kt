@@ -23,7 +23,7 @@ class FileSpoolAlarmSinkTest {
     lateinit var dir: Path
 
     private val clock = MutableClock()
-    private val alarm = Alarm("silent_rule_death", "doordash", "8.0", "12345678", listOf("doordash.screen.offer"))
+    private val alarm = Alarm("silent_rule_death", "doordash", "8.0", listOf("doordash.screen.offer"))
 
     @Test
     fun `fallback runs first and atomic file contains exactly the rendered alarm`() {

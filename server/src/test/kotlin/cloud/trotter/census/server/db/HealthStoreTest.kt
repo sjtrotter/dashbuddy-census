@@ -19,6 +19,7 @@ import cloud.trotter.census.server.jobs.Alarm
 import cloud.trotter.census.server.jobs.AlarmSink
 import cloud.trotter.census.server.jobs.HealthAlarms
 import cloud.trotter.census.server.jobs.PurgeJob
+import cloud.trotter.census.server.jobs.renderAlarm
 import cloud.trotter.census.server.module
 import cloud.trotter.census.server.secret
 import cloud.trotter.census.server.signed
@@ -198,7 +199,7 @@ class HealthStoreTest {
                 assertTrue(runCatching { evaluator.evaluate(second, listOf(half), hash) }.exceptionOrNull() is IllegalStateException)
                 evaluator.evaluate(second, listOf(half), hash)
                 evaluator.evaluate(second, listOf(half), hash)
-                assertEquals(listOf(Alarm("silent_rule_death", "doordash", "2.0.0", second.toString().take(8), listOf("a.b"))), delivered)
+                assertEquals(listOf(Alarm("silent_rule_death", "doordash", "2.0.0", listOf("a.b"))), delivered)
 
                 for (platform in listOf("doordash", "uber")) {
                     val report = initial.copy(platform = platform, unknown = 400)
@@ -341,7 +342,7 @@ class HealthStoreTest {
                 evaluator.evaluate(first, listOf(fuller), hash)
                 assertEquals(listOf("trips", "fleet_unknown", "new_clusters"), alarms.map { it.kind })
                 assertEquals(mapOf("trips" to 1L, "fleet_unknown" to 1L, "new_clusters" to 1L), evaluator.stats.snapshot())
-                assertEquals(first.toString().take(8), alarms.first().installPrefix)
+                assertFalse(renderAlarm(alarms.first()).contains(first.toString().take(8)))
 
                 val fixture = healthFixture()
                 for (invalid in listOf("[]", "{}", body(emptyList()), "[".repeat(97))) {
@@ -370,7 +371,7 @@ class HealthStoreTest {
                 purge.runOnce()
                 purge.runOnce()
                 assertEquals(1, alarms.count { it.kind == "silence" })
-                assertEquals(first.toString().take(8), alarms.last().installPrefix)
+                assertEquals("kind=silence\nplatform=doordash\nversion=8.0.0\ninstall_prefix=-\nrule_ids=[]", renderAlarm(alarms.last()))
                 evaluator.evaluate(first, listOf(fuller), hash)
                 assertEquals(2, alarms.count { it.kind == "trips" })
 

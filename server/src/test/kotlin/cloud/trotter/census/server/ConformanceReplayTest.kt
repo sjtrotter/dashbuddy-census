@@ -385,7 +385,7 @@ class ConformanceReplayTest {
             }
             val ingestInfo = logs.list.filter { it.loggerName == "Ingest" && it.level == Level.INFO }
             assertEquals(16, ingestInfo.size)
-            val linePattern = Regex("ingest install_prefix=[0-9a-f]{8} accepted=[0-9]+ duplicate=[0-9]+ rejected=[0-9]+ bytes=[0-9]+ status=(accepted|duplicate|batch_quality|budget_exhausted)")
+            val linePattern = Regex("ingest accepted=[0-9]+ duplicate=[0-9]+ rejected=[0-9]+ bytes=[0-9]+ status=(accepted|duplicate|batch_quality|budget_exhausted)")
             val forbiddenHex = Regex("(?<![0-9a-fA-F])(?:[0-9a-fA-F]{64}|[0-9a-fA-F]{16})(?![0-9a-fA-F])")
             for (event in ingestInfo) {
                 assertTrue(linePattern.matches(event.formattedMessage))

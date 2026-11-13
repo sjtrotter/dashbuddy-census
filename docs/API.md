@@ -44,7 +44,7 @@ Public health/policy, identity, ingest and operator routes are implemented. Noti
 
 `imageDigest` is included when configured and omitted when absent (`explicitNulls = false`). Defaults are encoded. Policy is a data class; `POLICY_*` overrides are planned. `hashDomain` currently uses the documented fallback pending inspection of the sibling contract.
 
-Typed JSON decoding rejects unknown keys. Errors use `{"error":"<code>"}` without exception text. Authentication, headers, canonical HMAC bytes, and a worked signing vector are specified in [CLIENT.md](CLIENT.md). Only the prefix derived by successful authentication is logged; `X-Install-Id-Prefix` is ignored. Full IDs, bodies, credentials, IPs, arbitrary paths, and query strings are never logged. Exception diagnostics retain only the exception class-name chain and the outermost exception’s first three frames (`class.method:line`); exception messages and suppressed exceptions are never rendered.
+Typed JSON decoding rejects unknown keys. Errors use `{"error":"<code>"}` without exception text. Authentication, headers, canonical HMAC bytes, and a worked signing vector are specified in [CLIENT.md](CLIENT.md). No part of the install ID is logged, and `X-Install-Id-Prefix` is ignored (#79). IDs, bodies, credentials, IPs, arbitrary paths, and query strings are never logged. Exception diagnostics retain only the exception class-name chain and the outermost exception’s first three frames (`class.method:line`); exception messages and suppressed exceptions are never rendered.
 
 | Endpoint | Request | Success |
 | --- | --- | --- |

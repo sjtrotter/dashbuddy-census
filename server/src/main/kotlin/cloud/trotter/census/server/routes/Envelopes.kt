@@ -63,13 +63,13 @@ fun Route.envelopeRoutes(envelopes: EnvelopeStore, clock: Clock, policy: Policy)
         fun logBatch(count: Int, duplicate: Int, reasons: Map<String, Int>, status: String, stored: EnvelopeOutcome.Stored? = null) {
             if (stored == null) {
                 envelopeLog.info(
-                    "ingest kind=envelopes install_prefix={} accepted={} duplicate={} rejected={} bytes={} status={}",
-                    install.id.toString().take(8), count, duplicate, reasons.values.sum(), rawBody.size, status,
+                    "ingest kind=envelopes accepted={} duplicate={} rejected={} bytes={} status={}",
+                    count, duplicate, reasons.values.sum(), rawBody.size, status,
                 )
             } else {
                 envelopeLog.info(
-                    "ingest kind=envelopes install_prefix={} accepted={} duplicate={} rejected={} bytes={} status={} paired={} unpaired={}",
-                    install.id.toString().take(8), count, duplicate, reasons.values.sum(), rawBody.size, status, stored.paired, stored.unpaired,
+                    "ingest kind=envelopes accepted={} duplicate={} rejected={} bytes={} status={} paired={} unpaired={}",
+                    count, duplicate, reasons.values.sum(), rawBody.size, status, stored.paired, stored.unpaired,
                 )
             }
             envelopeLog.debug("ingest kind=envelopes rejected_by_reason={}", reasons)

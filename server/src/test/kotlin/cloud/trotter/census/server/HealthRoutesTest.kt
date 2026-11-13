@@ -156,7 +156,8 @@ class HealthRoutesTest {
             application { module(Config.fromEnv(testEnvironment()), db = null) }
             client.get("/healthz") { header("X-Install-Id-Prefix", "deadbeef") }.bodyAsText()
         }
-        assertTrue(logs.list.any { it.formattedMessage.contains("install_prefix=-") })
+        assertTrue(logs.list.any { it.formattedMessage.startsWith("method=GET path=/healthz status=200") })
+        assertFalse(logs.list.any { it.formattedMessage.contains("install_prefix") })
         assertFalse(logs.list.any { it.formattedMessage.contains("deadbeef") })
     }
 

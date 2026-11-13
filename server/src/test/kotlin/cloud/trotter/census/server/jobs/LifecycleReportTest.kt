@@ -19,7 +19,7 @@ class LifecycleReportTest {
         now = now.plusSeconds(1); report.watchdog()
         assertEquals("lifecycle_stale", alarms.last().kind)
         for (alarm in alarms) {
-            val output = renderAlarm(alarm.copy(message = "PRIVATE_FAILURE", installPrefix = null))
+            val output = renderAlarm(alarm.copy(message = "PRIVATE_FAILURE"))
             assertTrue(output.startsWith("kind=lifecycle_"))
             assertFalse(output.contains("PRIVATE_FAILURE"))
             assertFalse(output.contains("[redacted]"))

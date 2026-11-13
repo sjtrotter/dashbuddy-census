@@ -197,7 +197,6 @@ private suspend fun ApplicationCall.seeOther(path: String) {
 internal fun opsAlarms(alarms: HealthAlarms): JsonObject = buildJsonObject {
     put("today", JsonArray(alarms.raisedToday().map { alarm -> buildJsonObject {
         put("kind", alarm.kind); put("platform", alarm.platform); put("version", alarm.version)
-        alarm.installPrefix?.let { put("installPrefix", it) }
         put("ruleIds", JsonArray(alarm.ruleIds.map { JsonPrimitive(it) }))
     } }))
     put("counts", JsonObject(alarms.stats.snapshot().mapValues { JsonPrimitive(it.value) }))

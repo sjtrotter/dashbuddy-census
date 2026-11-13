@@ -114,7 +114,6 @@ class IdentityRoutesTest {
                 assertEquals(1, files.size)
                 assertEquals(expected, Files.readString(files.single()))
                 assertFalse(expected.contains(id))
-                assertNull(alarm.installPrefix)
                 assertTrue(alarm.ruleIds.isEmpty())
                 LoggingAlarmSink().raise(alarm)
                 assertPrivateLogs(logs.list, listOf(id, key, InstallStore.installIdHash(UUID.fromString(id))))
@@ -210,7 +209,9 @@ class IdentityRoutesTest {
             }
             val forbidden = listOf(secret, replacement, "Bearer $id.$secret", "Bearer $id.$replacement", id) + signatures
             assertPrivateLogs(logs.list, forbidden)
-            assertTrue(logs.list.any { it.formattedMessage.contains("install_prefix=${id.take(8)}") })
+            // #79: the request log carries no install key of any length.
+            assertTrue(logs.list.any { it.formattedMessage.startsWith("method=DELETE path=/v1/installs/me status=202") })
+            assertFalse(logs.list.any { it.formattedMessage.contains(id.take(8)) || it.formattedMessage.contains("install_prefix") })
         } finally {
             logger.detachAppender(logs)
             logs.stop()

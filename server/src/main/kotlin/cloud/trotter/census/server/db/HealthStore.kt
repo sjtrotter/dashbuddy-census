@@ -119,11 +119,10 @@ class HealthStore(private val db: Database, private val clock: Clock) {
         if (!current || reports.isEmpty()) return@query null
         val firstDay = reports.minOf { it.day }.minusDays(28)
         val lastDay = reports.maxOf { it.day }
-        val prefix = installId.toString().take(8)
         val history = select(
             "SELECT * FROM health_daily WHERE install_id = ? AND day >= ? AND day <= ? ORDER BY day, platform, platform_app_version",
             installId, firstDay, lastDay,
-        ) { rows -> buildList { do { add(rows.dayReport(prefix)) } while (rows.next()) } } ?: emptyList()
+        ) { rows -> buildList { do { add(rows.dayReport()) } while (rows.next()) } } ?: emptyList()
         val touched = reports.map { FleetKey(it.day, it.platform, it.platformAppVersion) }.toSet()
         val touchedDays = reports.map { it.platform to it.day }.toSet()
         val currentReports = history.filter { (it.platform to it.day) in touchedDays }
@@ -173,9 +172,9 @@ class HealthStore(private val db: Database, private val clock: Clock) {
     }
 
     private data class FleetKey(val day: LocalDate, val platform: String, val version: String)
-    private fun ResultSet.dayReport(prefix: String): DayReport = DayReport(
+    private fun ResultSet.dayReport(): DayReport = DayReport(
         getObject("day", LocalDate::class.java), getString("platform"), getString("platform_app_version"),
-        getLong("admitted"), getLong("unknown"), getLong("trips"), Json.decodeFromString(getString("rule_counts")), prefix,
+        getLong("admitted"), getLong("unknown"), getLong("trips"), Json.decodeFromString(getString("rule_counts")),
     )
     private fun ResultSet.fleetDay(): FleetDay = FleetDay(
         getObject("day", LocalDate::class.java), getString("platform"), getString("platform_app_version"),

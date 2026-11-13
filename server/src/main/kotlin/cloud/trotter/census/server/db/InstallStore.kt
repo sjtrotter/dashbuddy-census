@@ -41,7 +41,7 @@ data class Install(
     val revokedAt: Instant?,
 ) {
     override fun toString(): String =
-        "Install(id=${id.toString().take(8)}…, keyHash=[redacted], createdDay=$createdDay, " +
+        "Install(id=[redacted], keyHash=[redacted], createdDay=$createdDay, " +
             "lastSeenDay=$lastSeenDay, trusted=$trusted, revokedAt=$revokedAt)"
 }
 

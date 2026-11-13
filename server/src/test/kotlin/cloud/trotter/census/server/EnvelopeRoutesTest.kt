@@ -184,7 +184,7 @@ class EnvelopeRoutesTest {
             assertPrivateLogs(logs.list, listOf(id.toString(), key, payloadSentinel, "PRIVATE_BALANCE_SENTINEL", "DEVICE_SENTINEL", "SIGNATURE_SENTINEL", "Looking for offers"))
             val infos = logs.list.filter { it.loggerName == "Ingest" && it.level == Level.INFO }
             assertEquals(6, infos.size)
-            assertTrue(infos.all { Regex("ingest kind=envelopes install_prefix=[0-9a-f]{8} accepted=[0-9]+ duplicate=[0-9]+ rejected=[0-9]+ bytes=[0-9]+ status=(accepted paired=[0-9]+ unpaired=[0-9]+|duplicate|batch_quality|budget_exhausted)").matches(it.formattedMessage) })
+            assertTrue(infos.all { Regex("ingest kind=envelopes accepted=[0-9]+ duplicate=[0-9]+ rejected=[0-9]+ bytes=[0-9]+ status=(accepted paired=[0-9]+ unpaired=[0-9]+|duplicate|batch_quality|budget_exhausted)").matches(it.formattedMessage) })
         } finally {
             logger.detachAppender(logs)
             logs.stop()
