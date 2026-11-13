@@ -304,7 +304,8 @@ class IdentityRoutesTest {
                 application { module(config().copy(notificationsEnabled = enabled), db, clock) }
                 val published = Json.parseToJsonElement(client.get("/v1/policy").bodyAsText()).jsonObject
                 assertEquals(
-                    if (enabled) both else listOf(SkeletonSchema.SCHEMA_ID),
+                    // #78: v2 is listed beside v1, in the contract's oldest-first order.
+                    if (enabled) CensusSkeletonSchema.SUPPORTED_SCHEMA_IDS else listOf(SkeletonSchema.SCHEMA_ID, SkeletonSchema.SCHEMA_ID_V2),
                     published.getValue("acceptedSchemaIds").jsonArray.map { it.jsonPrimitive.content },
                 )
                 // Phase 0 enrols a fresh install while off; phases 1 and 2 enrol the same install while on, then off.

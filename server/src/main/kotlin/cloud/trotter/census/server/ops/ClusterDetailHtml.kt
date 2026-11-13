@@ -107,7 +107,9 @@ object ClusterDetailHtml {
                 }
             }
             panel("samples", "Skeleton samples") {
-                if (cluster.kind == SkeletonKind.SCREEN) p("muted") { +"Dashed labels are privacy-redacted class or ID values. Text slots show kind only." }
+                if (cluster.kind == SkeletonKind.SCREEN) p("muted") {
+                    +"Dashed labels are privacy-redacted class or ID values. Text slots show kind only, or the value format for a shape. Click-action and hidden flags appear on v2 samples only."
+                }
                 if (cluster.samples.isNullOrEmpty()) emptyState("No skeleton samples retained for this cluster.")
                 cluster.samples.orEmpty().forEachIndexed { index, sample ->
                     article("sample") {
@@ -115,7 +117,10 @@ object ClusterDetailHtml {
                         p { +"Received "; date(sample.receivedDay); +" UTC" }
                         sample.notification?.let { notification ->
                             p { +"Channel: "; +(notification.channelId?.let { safe(it) } ?: "Withheld below privacy gate") }
-                            ul { notification.slots.forEach { (field, kind) -> li { +"${field.wire}: "; chip(safe(kind), "neutral") } } }
+                            ul {
+                                notification.slots.forEach { (field, kind) -> li { +"${field.wire}: "; slotChip(kind) } }
+                                notification.actions.forEachIndexed { position, kind -> li { +"action ${position + 1}: "; slotChip(kind) } }
+                            }
                         }
                         sample.skeleton?.let { skeleton -> div("tree-wrap") {
                             attributes["role"] = "region"
@@ -139,9 +144,18 @@ object ClusterDetailHtml {
             nodeField("Class", node.className)
             nodeField("ID", node.id)
             if (node.kinds.isEmpty()) span("muted") { +"No text slots." }
-            node.kinds.forEach { chip("kind: ${safe(it)}", "neutral") }
+            node.kinds.forEach { slotChip(it, prefix = "kind: ") }
+            if (node.clickable) chip("clickable", "neutral")
+            if (node.clickAction) chip("click action", "neutral")
+            if (node.hidden) chip("hidden", "neutral")
         }
         if (node.children.isNotEmpty()) ul { node.children.forEach { li { tree(it) } } }
+    }
+
+    /** #78: a shape slot shows its format template; any other slot its kind. */
+    private fun FlowContent.slotChip(kind: String, prefix: String = "") {
+        val template = kind.removePrefix("shape:").takeIf { kind.startsWith("shape:") }
+        if (template != null) chip("shape: ${safe(template)}", "neutral") else chip(prefix + safe(kind), "neutral")
     }
 
     private fun FlowContent.nodeField(label: String, value: String?) {

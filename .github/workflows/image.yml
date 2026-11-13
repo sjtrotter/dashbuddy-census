@@ -4,7 +4,7 @@ on:
         tags: ['v*']
 permissions: {}
 env:
-    DASHBUDDY_CONTRACT_SHA: 3943c39d44a80eaecd93b8caa36147c6056ee168
+    DASHBUDDY_CONTRACT_SHA: cb175f9ec58f7186ea6efe811766a3042be45550
 jobs:
     test:
         permissions:

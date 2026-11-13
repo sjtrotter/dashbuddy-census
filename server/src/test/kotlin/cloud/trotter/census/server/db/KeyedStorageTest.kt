@@ -16,7 +16,9 @@ import org.junit.jupiter.api.Test
 class KeyedStorageTest : LifecycleTestDatabase() {
     private val screenWords = listOf("Ready now", "Elm Street", "Corner Market", "Jordan")
     private val notificationWord = "Order ready"
-    private val candidates = screenWords + notificationWord
+    // #78: a v2 notification's action label is a slot hash like any other, so it must be keyed the same way.
+    private val actionWord = "Accept order"
+    private val candidates = screenWords + notificationWord + actionWord
 
     private fun screen(): ItemVerdict.Accepted {
         val children = screenWords.drop(1).map { word ->
@@ -41,7 +43,11 @@ class KeyedStorageTest : LifecycleTestDatabase() {
         cloud.trotter.census.server.auth.sha256Hex(fingerprints.sorted().joinToString("\n").toByteArray(Charsets.UTF_8)).take(32)
 
     private fun notification(): ItemVerdict.Accepted = SkeletonValidator.validate(
-        notificationFixture(day, hash = requireNotNull(CensusHash.of(notificationWord))), policy, day,
+        notificationV2Fixture(
+            day, hash = requireNotNull(CensusHash.of(notificationWord)),
+            actions = listOf(TextSlot(CensusHash.of(actionWord), "words:2"), TextSlot.WITHHELD),
+        ),
+        policy, day,
     ) as ItemVerdict.Accepted
 
     @Test fun `a dump without the pepper matches none of the candidate words the live server matches`() = runBlocking {

@@ -45,6 +45,31 @@ class SkeletonRenderTest {
         }
     }
 
+    @Test
+    fun `v2 shapes render as their template, flags and actions show, and a stored template off the list never does (#78)`() {
+        val screen = SkeletonRender.render(cloud.trotter.census.server.screenV2Fixture().toString(), false)
+        org.junit.jupiter.api.Assertions.assertTrue(screen.clickable)
+        org.junit.jupiter.api.Assertions.assertEquals(listOf("shape:\$#.##"), screen.children[0].kinds)
+        org.junit.jupiter.api.Assertions.assertTrue(screen.children[1].clickAction)
+        org.junit.jupiter.api.Assertions.assertTrue(screen.children[2].hidden)
+        val tampered = """{"root":{"text":{"text":{"kind":"shape","shape":"Jordan"}}}}"""
+        org.junit.jupiter.api.Assertions.assertEquals(listOf("shape"), SkeletonRender.render(tampered, true).kinds)
+
+        val notification = cloud.trotter.census.server.notificationV2Fixture().toString()
+        val rendered = SkeletonRender.renderNotification(notification, false)
+        org.junit.jupiter.api.Assertions.assertEquals(listOf("words:2", "withheld"), rendered.actions)
+        org.junit.jupiter.api.Assertions.assertEquals("shape:\$#.##", rendered.slots.getValue(cloud.trotter.census.contract.NotifTextField.SUB_TEXT))
+        val output = Json.encodeToString(rendered)
+        assertFalse(output.contains("fedcba9876543210"))
+        assertFalse(output.contains("\"h\""))
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalStateException::class.java) {
+            SkeletonRender.renderNotification(notification.replace("words:2", "PRIVATE_TEXT"), true)
+        }
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalStateException::class.java) {
+            SkeletonRender.renderNotification(notification.replace("\"words:2\"", "\"shape:PRIVATE_TEXT\""), true)
+        }
+    }
+
     companion object {
         val sample = """{"windowTitle":{"h":"fedcba9876543210","kind":"words:2"},"root":{
             "class":"android.widget.FrameLayout","text":{"text":{"h":"0123456789abcdef","kind":"words:2"}},

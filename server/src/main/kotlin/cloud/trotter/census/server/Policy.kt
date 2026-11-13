@@ -1,6 +1,6 @@
 package cloud.trotter.census.server
 
-import cloud.trotter.census.contract.SkeletonSchema
+import cloud.trotter.census.contract.SkeletonVersion
 import kotlinx.serialization.Serializable
 
 /** One effective policy is constructed after durable floor replay, before HTTP starts. */
@@ -21,7 +21,7 @@ data class Policy(
     val maxBatchItems: Int = 100,
     val maxBatchBytes: Int = 1_048_576,
     // Notification wire support is opt-in until the separate ADR lifecycle prerequisite is repaired.
-    val acceptedSchemaIds: List<String> = listOf(SkeletonSchema.SCHEMA_ID),
+    val acceptedSchemaIds: List<String> = acceptedSchemaIds(notificationsEnabled = false),
     val acceptedPlatforms: List<String> = listOf("doordash", "uber", "_unknown"),
     val acceptedTextKeys: List<String> = listOf("text", "desc", "state", "pane", "role", "hint", "tooltip", "error", "clickLabel", "uid"),
     val acceptedHashDomains: List<Int> = listOf(1),
@@ -54,7 +54,21 @@ fun Policy.budget(): cloud.trotter.census.server.ingest.BudgetPolicy = cloud.tro
 fun Config.policy(effectiveFloor: Int = minimumFilterRev): Policy = Policy(
     serverVersion = serverVersion, imageDigest = imageDigest,
     minimumFilterRev = maxOf(minimumFilterRev, effectiveFloor),
-    acceptedSchemaIds = if (notificationsEnabled) listOf(
-        SkeletonSchema.SCHEMA_ID, cloud.trotter.census.contract.NotificationSkeletonSchema.SCHEMA_ID,
-    ) else listOf(SkeletonSchema.SCHEMA_ID),
+    acceptedSchemaIds = acceptedSchemaIds(notificationsEnabled),
 )
+
+/**
+ * The skeleton versions this server validates and stores (#78): v1 for apps that predate it, v2 for shape slots,
+ * click flags and notification actions. Listed by hand, not read from the contract, because the validator knows each
+ * version's keys: a contract bump that adds a version must not start accepting it before the server does.
+ */
+internal val SERVED_SKELETON_VERSIONS: List<SkeletonVersion> = listOf(SkeletonVersion.V1, SkeletonVersion.V2)
+
+/**
+ * The advertised schema ids (#78), oldest version first and screen before notification, the contract's own order
+ * (`CensusSkeletonSchema.SUPPORTED_SCHEMA_IDS`). The app sends the newest version listed; notification ids appear
+ * only while notifications are enabled.
+ */
+fun acceptedSchemaIds(notificationsEnabled: Boolean): List<String> = SERVED_SKELETON_VERSIONS.flatMap {
+    listOfNotNull(it.screenSchemaId, it.notificationSchemaId.takeIf { notificationsEnabled })
+}

@@ -74,7 +74,7 @@ class ClusterDetailRenderTest {
         assertEquals(3, Regex("<ul\\b").findAll(samples).count()) // Two roots and one nonempty child list.
         assertFalse(Regex("<ul[^>]*>\\s*</ul>").containsMatchIn(page))
         assertTrue(page.contains("datetime=\"2026-10-02\""))
-        assertTrue(page.contains("Dashed labels are privacy-redacted class or ID values. Text slots show kind only."))
+        assertTrue(page.contains("Dashed labels are privacy-redacted class or ID values. Text slots show kind only, or the value format for a shape."))
         assertShellAndPrivacy(page)
     }
 

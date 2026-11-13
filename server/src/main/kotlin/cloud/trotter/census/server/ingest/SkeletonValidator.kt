@@ -8,10 +8,11 @@ import cloud.trotter.census.contract.ResourceIdGrammar
 import cloud.trotter.census.contract.CensusSkeletonDto
 import cloud.trotter.census.contract.CensusSkeletonSchema
 import cloud.trotter.census.contract.NotificationSkeletonDto
-import cloud.trotter.census.contract.NotificationSkeletonSchema
 import cloud.trotter.census.contract.NotifTextField
+import cloud.trotter.census.contract.ShapeTemplate
 import cloud.trotter.census.contract.SkeletonKind
 import cloud.trotter.census.contract.SkeletonRejectionReason
+import cloud.trotter.census.contract.SkeletonVersion
 import cloud.trotter.census.contract.WireStrings
 import cloud.trotter.census.server.Policy
 import kotlinx.serialization.SerializationException
@@ -39,18 +40,26 @@ enum class AdmissionReason(val wire: String) { FILTER_REV_TOO_OLD("filter_rev_to
 /**
  * Pure admission checks. Structural inspection never recurses, even through incorrectly typed values.
  * The residual free-text channel in an id NAME / class is handled by the M4 operator unblinding design, NOT here.
+ *
+ * #78: the key allowlist is per version. A v1 item keeps exactly the v1 keys, so one carrying a v2 key is
+ * `unknown_field` as before (the contract's strict v1 decode would refuse it too). A v2 item may add the node flags
+ * `hasClickAction` and `isVisibleToUser`, a slot's `shape` (only a template of the closed list, else `bad_shape`)
+ * and a notification's `actions`, whose slots are hashed, counted and keyed like every other slot.
  */
 object SkeletonValidator {
     fun validate(element: JsonElement, policy: Policy, today: LocalDate): ItemVerdict {
         if (element !is JsonObject) return reject("bad_item")
         val schema = element.string("schemaId")
         if (schema == null || schema !in policy.acceptedSchemaIds) return reject("unknown_schema")
-        val notification = schema == NotificationSkeletonSchema.SCHEMA_ID
+        val notificationVersion = SkeletonVersion.ofNotificationSchema(schema)
+        val version = notificationVersion ?: SkeletonVersion.ofScreenSchema(schema) ?: return reject("unknown_schema")
+        val notification = notificationVersion != null
+        val v2 = version == SkeletonVersion.V2
         val kind = element.string("kind")
         if ("kind" in element && SkeletonKind.fromWire(kind ?: "") == null) return reject("unknown_skeleton_kind")
         if ((notification && kind != SkeletonKind.NOTIFICATION.wire) ||
             (!notification && kind != null && kind != SkeletonKind.SCREEN.wire)) return reject("kind_schema_mismatch")
-        val structure = inspect(element, notification)
+        val structure = inspect(element, notification, v2)
         if (structure.unknownField || structure.textKeys.any { it !in policy.acceptedTextKeys }) return reject("unknown_field")
         if (structure.plaintext) return reject("plaintext_field")
         if (structure.badType) return reject("bad_item")
@@ -68,7 +77,11 @@ object SkeletonValidator {
         for (slot in structure.slots) {
             val kind = requireNotNull(slot.string("kind"))
             val hash = slot.string("h")
-            if (!KindClassifier.isWireKind(kind)) return reject("bad_kind")
+            // v1 never had the shape kind; it stays the bad kind it always was there.
+            if (!KindClassifier.isWireKind(kind) || (kind == KindClassifier.SHAPE && !v2)) return reject("bad_kind")
+            val shape = slot.string("shape")
+            if ((kind == KindClassifier.SHAPE) != (shape != null)) return reject("bad_shape")
+            if (shape != null && !ShapeTemplate.isWire(shape)) return reject("bad_shape")
             if (hash != null && !CensusHash.isWellFormed(hash)) return reject("bad_hash")
             if (hash != null && !KindClassifier.isHashableKind(kind)) return reject("hash_on_withheld_kind")
             if (hash == null && KindClassifier.isHashableKind(kind)) return reject("missing_hash")
@@ -127,7 +140,7 @@ object SkeletonValidator {
         (this[key] as? JsonPrimitive)?.takeIf { it.isString }?.content
 
     private enum class Shape {
-        ITEM, NOTIFICATION, NOTIF_SLOTS, NODE, SLOT, OPTIONAL_SLOT, TEXT_MAP, CHILDREN, STRING, OPTIONAL_STRING, INTEGER, OPTIONAL_INTEGER, BOOLEAN, INVALID,
+        ITEM, NOTIFICATION, NOTIF_SLOTS, NODE, SLOT, OPTIONAL_SLOT, TEXT_MAP, CHILDREN, ACTIONS, STRING, OPTIONAL_STRING, INTEGER, OPTIONAL_INTEGER, BOOLEAN, INVALID,
     }
 
     private data class Visit(val value: JsonElement, val shape: Shape, val depth: Int)
@@ -142,7 +155,7 @@ object SkeletonValidator {
         val textKeys = mutableListOf<String>()
     }
 
-    private fun inspect(item: JsonObject, notification: Boolean): Structure {
+    private fun inspect(item: JsonObject, notification: Boolean, v2: Boolean): Structure {
         val result = Structure()
         val pending = ArrayDeque<Visit>()
         pending.addLast(Visit(item, if (notification) Shape.NOTIFICATION else Shape.ITEM, 0))
@@ -154,7 +167,7 @@ object SkeletonValidator {
             val validType = when (shape) {
                 Shape.ITEM, Shape.NOTIFICATION, Shape.NOTIF_SLOTS, Shape.NODE, Shape.SLOT, Shape.TEXT_MAP -> value is JsonObject
                 Shape.OPTIONAL_SLOT -> value is JsonObject || value == JsonNull
-                Shape.CHILDREN -> value is JsonArray
+                Shape.CHILDREN, Shape.ACTIONS -> value is JsonArray
                 Shape.STRING -> value is JsonPrimitive && value.isString
                 Shape.OPTIONAL_STRING -> value == JsonNull || value is JsonPrimitive && value.isString
                 Shape.INTEGER -> value is JsonPrimitive && !value.isString && value.intOrNull != null
@@ -167,10 +180,10 @@ object SkeletonValidator {
                 is JsonObject -> {
                     val fields = when (shape) {
                         Shape.ITEM -> itemFields
-                        Shape.NOTIFICATION -> notificationFields
+                        Shape.NOTIFICATION -> if (v2) notificationFieldsV2 else notificationFields
                         Shape.NOTIF_SLOTS -> NotifTextField.entries.associate { it.wire to Shape.SLOT }
-                        Shape.NODE -> nodeFields
-                        Shape.SLOT, Shape.OPTIONAL_SLOT -> slotFields
+                        Shape.NODE -> if (v2) nodeFieldsV2 else nodeFields
+                        Shape.SLOT, Shape.OPTIONAL_SLOT -> if (v2) slotFieldsV2 else slotFields
                         else -> null
                     }
                     if (fields != null && value.keys.any { it !in fields }) result.unknownField = true
@@ -196,7 +209,11 @@ object SkeletonValidator {
                     }
                 }
                 is JsonArray -> for (child in value.asReversed()) {
-                    val childShape = if (shape == Shape.CHILDREN) Shape.NODE else Shape.INVALID
+                    val childShape = when (shape) {
+                        Shape.CHILDREN -> Shape.NODE
+                        Shape.ACTIONS -> Shape.SLOT
+                        else -> Shape.INVALID
+                    }
                     pending.addLast(Visit(child, childShape, if (childShape == Shape.NODE) depth + 1 else depth))
                 }
                 is JsonPrimitive -> Unit
@@ -223,6 +240,11 @@ object SkeletonValidator {
         "isEnabled" to Shape.BOOLEAN, "isChecked" to Shape.INTEGER, "text" to Shape.TEXT_MAP, "children" to Shape.CHILDREN,
     )
     private val slotFields = mapOf("h" to Shape.OPTIONAL_STRING, "kind" to Shape.STRING)
+
+    // #78: the v2 additions. Each slot's `shape` is a template string from the closed list, checked after inspection.
+    private val notificationFieldsV2 = notificationFields + ("actions" to Shape.ACTIONS)
+    private val nodeFieldsV2 = nodeFields + mapOf("hasClickAction" to Shape.BOOLEAN, "isVisibleToUser" to Shape.BOOLEAN)
+    private val slotFieldsV2 = slotFields + ("shape" to Shape.OPTIONAL_STRING)
     // The app's wire token for a platform it could not resolve is `_unknown` (the conformance golden carries 471 of
     // them), so a leading underscore is part of the grammar; everything else is lowercase ASCII, ≤ 32 chars.
     private val platformPattern = WireGrammars.platform

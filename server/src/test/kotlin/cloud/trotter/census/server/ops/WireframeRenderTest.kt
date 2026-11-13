@@ -76,6 +76,14 @@ class WireframeRenderTest {
     }
 
     @Test
+    fun `a node advertising the click action draws as clickable like the authoring walk (#78)`() {
+        assertTrue(render(JsonObject(node() + ("clickAction" to JsonPrimitive(true)))).boxes.single().clickable)
+        assertFalse(render(JsonObject(node() + ("clickAction" to JsonPrimitive(false)))).boxes.single().clickable)
+        assertFalse(render(JsonObject(node() + ("clickAction" to JsonPrimitive("true")))).boxes.single().clickable)
+        assertFalse(render(node()).boxes.single().clickable)
+    }
+
+    @Test
     fun `class and id are bounded after shortening and empty suffixes become null`() {
         val long = render(JsonObject(node() + mapOf(
             "class" to JsonPrimitive("android.widget.${"x".repeat(200)}"),

@@ -153,6 +153,7 @@ class ConformanceReplayTest {
         val vectorFiles = vectors.map { it.getValue("file").jsonPrimitive.content }.toSet()
         val golden = records.filter { it.getValue("file").jsonPrimitive.content !in vectorFiles }
         val items = golden.map { it.getValue("skeleton").jsonObject }
+        val chunks = items.chunked(100)
         val day = LocalDate.parse(items.first().getValue("day").jsonPrimitive.content)
         val clock = object : Clock {
             override fun now(): Instant = day.atTime(12, 0).toInstant(ZoneOffset.UTC)
@@ -169,7 +170,6 @@ class ConformanceReplayTest {
                     environment { log = LoggerFactory.getLogger("io.ktor.server.Application") }
                     application { module(config(), db, clock, policy = notificationPolicy) }
                     assertEquals(HttpStatusCode.OK, client.enrol(id, key).status)
-                    val chunks = items.chunked(100)
                     var duplicates = 0
                     for ((index, chunk) in chunks.withIndex()) {
                         val before = tableCounts()
@@ -404,7 +404,10 @@ class ConformanceReplayTest {
                 }
             }
             val ingestInfo = logs.list.filter { it.loggerName == "Ingest" && it.level == Level.INFO }
-            assertEquals(16, ingestInfo.size)
+            // One line per golden chunk (three accepted, the rest budget_exhausted: the count follows the corpus size),
+            // then seven from the steps above: the duplicate replay, two batch_quality refusals, the corrected batch,
+            // the race's accepted and duplicate, and the version probe. Auth, size and shape refusals log nothing here.
+            assertEquals(chunks.size + 7, ingestInfo.size)
             val linePattern = Regex("ingest accepted=[0-9]+ duplicate=[0-9]+ rejected=[0-9]+ bytes=[0-9]+ status=(accepted|duplicate|batch_quality|budget_exhausted)")
             val forbiddenHex = Regex("(?<![0-9a-fA-F])(?:[0-9a-fA-F]{64}|[0-9a-fA-F]{16})(?![0-9a-fA-F])")
             for (event in ingestInfo) {
