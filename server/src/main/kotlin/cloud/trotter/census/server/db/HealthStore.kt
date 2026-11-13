@@ -3,6 +3,7 @@ package cloud.trotter.census.server.db
 import cloud.trotter.census.server.Clock
 import cloud.trotter.census.server.Database
 import cloud.trotter.census.server.Retention
+import cloud.trotter.census.server.TagPurpose
 import cloud.trotter.census.server.today
 import cloud.trotter.census.server.ingest.BudgetPolicy
 import cloud.trotter.census.server.ingest.ConsumeOutcome
@@ -39,8 +40,9 @@ data class HealthAlarmInputs(
 data class SilenceInput(val id: UUID, val lastReportDay: LocalDate?, val platform: String, val version: String)
 
 /**
- * Per-install health storage. Every per-install read applies the half-open retention deadline (`day + days > today`,
- * #79, Sol S5) itself, so an overdue or failing sweep never extends what reads return.
+ * Per-install health storage, keyed by the install's health tag in each epoch (#86), never its id. Every per-install
+ * read applies the half-open retention deadline (`day + days > today`, #79, Sol S5) itself, so an overdue or failing
+ * sweep never extends what reads return.
  */
 class HealthStore(
     private val db: Database,
@@ -91,16 +93,20 @@ class HealthStore(
         val touched = reports.map { FleetKey(it.day, it.platform, it.platformAppVersion) }
         // Claim and lock each fleet row BEFORE the daily writes; recompute after them.
         lockFleet(touched)
+        // #86: keyed by the install's health tag under the report day's epoch, so a re-report of one day always
+        // lands on the same row and the fleet fold counts the install once.
+        val tagger = Tagger(this, db.keying, day)
         for (report in reports) {
+            val tag = tagger.tag(TagPurpose.HEALTH, installId, "", report.day)
             update(
-                """INSERT INTO health_daily (install_id, day, platform, platform_app_version, admitted, unknown, trips, rule_counts, ruleset_version)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?)
-                    ON CONFLICT (install_id, day, platform, platform_app_version) DO UPDATE SET
+                """INSERT INTO health_daily (epoch, install_tag, day, platform, platform_app_version, admitted, unknown, trips, rule_counts, ruleset_version)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?)
+                    ON CONFLICT (install_tag, day, platform, platform_app_version) DO UPDATE SET
                         admitted = GREATEST(health_daily.admitted, EXCLUDED.admitted),
                         unknown = GREATEST(health_daily.unknown, EXCLUDED.unknown),
                         trips = GREATEST(health_daily.trips, EXCLUDED.trips),
                         rule_counts = EXCLUDED.rule_counts, ruleset_version = EXCLUDED.ruleset_version""",
-                installId, report.day, report.platform, report.platformAppVersion, report.admitted, report.unknown,
+                tag.epoch, tag.tag, report.day, report.platform, report.platformAppVersion, report.admitted, report.unknown,
                 report.trips, Json.encodeToString(report.ruleCounts), report.rulesetVersion,
             )
         }
@@ -117,11 +123,14 @@ class HealthStore(
         if (!current || reports.isEmpty()) return@query null
         val firstDay = reports.minOf { it.day }.minusDays(28)
         val lastDay = reports.maxOf { it.day }
-        val history = select(
-            """SELECT * FROM health_daily WHERE install_id = ? AND day >= ? AND day <= ? AND day + ? > ?
-                ORDER BY day, platform, platform_app_version""",
-            installId, firstDay, lastDay, healthDailyDays, today,
-        ) { rows -> buildList { do { add(rows.dayReport()) } while (rows.next()) } } ?: emptyList()
+        // #86: the install's own rows are its health tags under the live epoch keys; older ones are past retention.
+        val history = healthTags(installId, today).flatMap { (epoch, tag) ->
+            select(
+                """SELECT * FROM health_daily WHERE epoch = ? AND install_tag = ? AND day >= ? AND day <= ? AND day + ? > ?
+                    ORDER BY day, platform, platform_app_version""",
+                epoch, tag, firstDay, lastDay, healthDailyDays, today,
+            ) { rows -> buildList { do { add(rows.dayReport()) } while (rows.next()) } } ?: emptyList()
+        }.sortedWith(compareBy({ it.day }, { it.platform }, { it.platformAppVersion }))
         val touched = reports.map { FleetKey(it.day, it.platform, it.platformAppVersion) }.toSet()
         val touchedDays = reports.map { it.platform to it.day }.toSet()
         val currentReports = history.filter { (it.platform to it.day) in touchedDays }
@@ -153,24 +162,26 @@ class HealthStore(
         HealthAlarmInputs(history, currentReports, fleet, comparisons, newClusters)
     }
 
+    /** Trusted installs only (the operator's own devices): each one's newest health row, found through its tags (#86). */
     suspend fun silenceInputs(): List<SilenceInput> = query {
-        select(
-            """SELECT i.install_id, h.day, h.platform, h.platform_app_version FROM installs i
-                LEFT JOIN LATERAL (
-                    SELECT day, platform, platform_app_version FROM health_daily WHERE install_id = i.install_id
-                        AND day + ? > ?
-                    ORDER BY day DESC, platform, platform_app_version LIMIT 1
-                ) h ON true WHERE i.trusted = true AND i.revoked_at IS NULL""",
-            healthDailyDays, clock.today(),
-        ) { rows -> buildList {
-            do {
-                add(SilenceInput(
-                    rows.getObject("install_id", UUID::class.java), rows.getObject("day", LocalDate::class.java),
-                    rows.getString("platform") ?: "_unknown", rows.getString("platform_app_version") ?: "unknown",
-                ))
-            } while (rows.next())
-        } } ?: emptyList()
+        val today = clock.today()
+        val trusted = select("SELECT install_id FROM installs WHERE trusted = true AND revoked_at IS NULL ORDER BY install_id") { rows ->
+            buildList { do { add(rows.getObject(1, UUID::class.java)) } while (rows.next()) }
+        } ?: emptyList()
+        trusted.map { id ->
+            val latest = healthTags(id, today).mapNotNull { (epoch, tag) ->
+                select(
+                    """SELECT day, platform, platform_app_version FROM health_daily WHERE epoch = ? AND install_tag = ? AND day + ? > ?
+                        ORDER BY day DESC, platform, platform_app_version LIMIT 1""",
+                    epoch, tag, healthDailyDays, today,
+                ) { Triple(it.getObject(1, LocalDate::class.java), it.getString(2), it.getString(3)) }
+            }.maxWithOrNull(compareBy<Triple<LocalDate, String, String>> { it.first }.thenByDescending { it.second }.thenByDescending { it.third })
+            SilenceInput(id, latest?.first, latest?.second ?: "_unknown", latest?.third ?: "unknown")
+        }
     }
+
+    private fun Connection.healthTags(installId: UUID, today: LocalDate): List<EpochTag> =
+        with(EpochKeyStore) { liveKeys(db.keying, today) }.map { EpochTag(it.epoch, it.tag(TagPurpose.HEALTH, installId, "")) }
 
     private fun ResultSet.dayReport(): DayReport = DayReport(
         getObject("day", LocalDate::class.java), getString("platform"), getString("platform_app_version"),

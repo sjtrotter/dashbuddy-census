@@ -1,5 +1,6 @@
 package cloud.trotter.census.server
 
+import cloud.trotter.census.server.db.EpochPseudonymMigration
 import cloud.trotter.census.server.db.KeyedHashStorageMigration
 import com.zaxxer.hikari.HikariConfig
 import com.zaxxer.hikari.HikariDataSource
@@ -35,14 +36,15 @@ class Database private constructor(
         }
 
         /**
-         * The one migration set: the SQL scripts plus V7, the Java migration that rewrites stored word hashes under
-         * the pepper (#85). A Flyway built without V7 stops at V6 and refuses a database V7 has already migrated.
+         * The one migration set: the SQL scripts plus the Java migrations V7, which rewrites stored word hashes under
+         * the pepper (#85), and V8, which re-keys content rows to epoch pseudonyms (#86). A Flyway built without them
+         * stops at V6 and refuses a database they have already migrated.
          */
         fun flyway(url: String, user: String, password: String, keying: HashKeying, clock: Clock = SystemClock): FluentConfiguration =
             Flyway.configure()
                 .dataSource(url, user, password)
                 .locations("classpath:db/migration")
-                .javaMigrations(KeyedHashStorageMigration(keying, clock))
+                .javaMigrations(KeyedHashStorageMigration(keying, clock), EpochPseudonymMigration(keying, clock))
 
         fun connect(config: Config): Database {
             val dataSource = HikariDataSource(

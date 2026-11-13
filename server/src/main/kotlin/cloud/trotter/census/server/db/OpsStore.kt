@@ -241,12 +241,15 @@ class OpsStore(private val db: Database, private val clock: Clock, private val p
                     AND cs.purge_after > DATE '$today') AND NOT EXISTS (SELECT 1 FROM cluster_samples expired
                     WHERE expired.fingerprint=c.fingerprint AND (expired.purge_after IS NULL OR expired.purge_after <= DATE '$today')) THEN c.notes ELSE NULL END AS notes,
                 c.screen_class, c.draft IS NOT NULL AND EXISTS (SELECT 1 FROM trusted_envelopes e
-                    WHERE e.id::text=c.draft->>'envelopeId' AND e.purge_after > DATE '$today') AS has_draft, c.draft_day, count(DISTINCT s.install_id) FILTER (WHERE NOT i.trusted AND s.day >= ? AND s.day <= ?) AS installs,
-                COALESCE(bool_or(i.trusted AND s.day + 30 > DATE '$today'), false) AS trusted,
+                    WHERE e.id::text=c.draft->>'envelopeId' AND e.purge_after > DATE '$today') AS has_draft, c.draft_day,
+                COALESCE((SELECT max(per_epoch.installs) FROM (SELECT count(DISTINCT x.install_tag) AS installs
+                    FROM cluster_sightings_v5 x WHERE x.fingerprint = c.fingerprint AND NOT x.trusted AND x.day >= ? AND x.day <= ?
+                    AND x.day + ${policy.retention.clusterSightingsDays} > DATE '$today' AND x.hash_domain IN (${policy.acceptedHashDomains.joinToString(",")})
+                    AND x.filter_rev >= ${policy.minimumFilterRev} GROUP BY x.epoch) per_epoch), 0) AS installs,
+                COALESCE(bool_or(s.trusted AND s.day + 30 > DATE '$today'), false) AS trusted,
                 count(s.fingerprint) FILTER (WHERE s.day >= ? AND s.day <= ?) AS sightings,
                 COALESCE(jsonb_agg(DISTINCT s.platform_app_version) FILTER (WHERE s.platform_app_version IS NOT NULL), '[]'::jsonb) AS versions
                 FROM clusters c LEFT JOIN cluster_sightings_v5 s ON s.fingerprint = c.fingerprint AND s.day + ${policy.retention.clusterSightingsDays} > DATE '$today' AND s.hash_domain IN (${policy.acceptedHashDomains.joinToString(",")}) AND s.filter_rev >= ${policy.minimumFilterRev}
-                LEFT JOIN installs i ON i.install_id = s.install_id AND i.revoked_at IS NULL
                 WHERE (?::text IS NULL OR c.status = ?) AND (?::text IS NULL OR c.fingerprint = ?)
                 GROUP BY c.fingerprint""",
             today.minusDays(27), today, today.minusDays(27), today, status, status, fingerprint, fingerprint,
@@ -320,13 +323,22 @@ class OpsStore(private val db: Database, private val clock: Clock, private val p
         } }
     }
 
+    /** #86: the install's stored sightings carry its trust, so they change with the installs row, under its lock. */
     suspend fun trust(id: UUID, trusted: Boolean): Boolean = query {
-        update("UPDATE installs SET trusted = ? WHERE install_id = ?", trusted, id) == 1
+        val changed = update("UPDATE installs SET trusted = ? WHERE install_id = ?", trusted, id) == 1
+        if (changed) markSightingsTrusted(storedKeys(), id, trusted)
+        changed
     }
 
+    /** #86: revocation deletes the install's stored sightings, as [InstallStore.revoke] does. */
     suspend fun revoke(id: UUID): Boolean = query {
-        update("UPDATE installs SET revoked_at = COALESCE(revoked_at, ?) WHERE install_id = ?", clock.now().atOffset(ZoneOffset.UTC), id) == 1
+        val changed = update("UPDATE installs SET revoked_at = COALESCE(revoked_at, ?) WHERE install_id = ?", clock.now().atOffset(ZoneOffset.UTC), id) == 1
+        if (changed) deleteSightings(storedKeys(), id)
+        changed
     }
+
+    /** #86: every stored key, as erasure uses: an expired, not yet destroyed key's rows are still the install's. */
+    private fun Connection.storedKeys() = with(EpochKeyStore) { storedKeys(db.keying) }
 
     suspend fun health(days: Int = 7): JsonObject = query {
         val today = clock.today()
@@ -337,10 +349,11 @@ class OpsStore(private val db: Database, private val clock: Clock, private val p
             put("ruleCounts", Json.parseToJsonElement(row.getString("rule_counts")))
         } }
         // #79 (Sol S5): per-install rows honour the retention deadline here, not only when the sweep has run.
-        val installs = array("""SELECT left(install_id::text, 8) AS prefix, day, platform, platform_app_version, admitted, unknown, trips
+        // #86: a row names its epoch pseudonym, never the install; the same phone shows a new one each epoch.
+        val installs = array("""SELECT left(install_tag, 8) AS prefix, day, platform, platform_app_version, admitted, unknown, trips
             FROM health_daily WHERE day >= ? AND day <= ? AND day + ? > ?
-            ORDER BY day DESC, install_id, platform, platform_app_version""", first, today, policy.retention.healthDailyDays, today) { row -> buildJsonObject {
-            put("installIdPrefix", row.getString("prefix")); put("day", row.getString("day")); put("platform", row.getString("platform"))
+            ORDER BY day DESC, install_tag, platform, platform_app_version""", first, today, policy.retention.healthDailyDays, today) { row -> buildJsonObject {
+            put("pseudonymPrefix", row.getString("prefix")); put("day", row.getString("day")); put("platform", row.getString("platform"))
             put("version", row.getString("platform_app_version")); put("admitted", row.getLong("admitted"))
             put("unknown", row.getLong("unknown")); put("trips", row.getLong("trips"))
         } }
@@ -400,25 +413,38 @@ class OpsStore(private val db: Database, private val clock: Clock, private val p
         put("firstDay", row.getString("first_day")); put("lastDay", row.getString("last_day"))
     } }
 
-    /** Parent locks serialize against trust/revocation/withdrawal; the insertion uses a fresh snapshot. */
+    /**
+     * Promotion counts exactly the cohort it locked (#86, Sol S5). The token's sighting rows are share-locked first, so
+     * a withdrawal, revocation or trust change (which delete or update those rows under the install lock) either
+     * committed before or waits for this promotion; and the eligibility query is restricted to those locked
+     * `(epoch, install_tag)` rows, so a sighting inserted after the lock never adds to the count. The sweep later drops
+     * an entry whose evidence fell below k.
+     */
     suspend fun resolve(tokenHash: String, clearText: String?, source: String, reject: Boolean,
         hashDomain: Int = 1, filterRev: Int = policy.minimumFilterRev): Boolean = query {
-        val locked = select("""SELECT i.install_id FROM installs i WHERE EXISTS (SELECT 1 FROM token_sightings_v5 t
-            WHERE t.install_id=i.install_id AND t.token_hash=? AND t.hash_domain=? AND t.filter_rev=?)
-            ORDER BY i.install_id FOR SHARE OF i""", tokenHash, hashDomain, filterRev) { rows -> buildList { do { add(rows.getObject(1, UUID::class.java)) } while (rows.next()) } } ?: emptyList()
-        if (locked.size < policy.k) return@query false
-        val lockedIds = locked.joinToString(",") { "'$it'::uuid" }
-        val resolutionQueue = queueSql.replace("WHERE NOT i.trusted", "WHERE i.install_id IN ($lockedIds) AND NOT i.trusted")
+        val cohort = select("""SELECT epoch, install_tag FROM token_sightings_v5 WHERE token_hash=? AND hash_domain=? AND filter_rev=?
+            ORDER BY epoch, install_tag FOR SHARE""", tokenHash, hashDomain, filterRev) { rows ->
+            buildList { do { add("${rows.getInt(1)}:${rows.getString(2)}") } while (rows.next()) }
+        } ?: emptyList()
+        afterResolveLock?.invoke()
         val today = clock.today()
-        update(
-            """INSERT INTO vocabulary_v5 (token_hash, kind, distinct_installs_at_promotion, promoted_day, clear_text, unblinded_day, source, status, hash_domain, filter_rev)
-                SELECT token_hash, kind, installs, ?, ?, ?, ?, ?, hash_domain, filter_rev FROM ($resolutionQueue) queue
-                WHERE token_hash = ? AND hash_domain=? AND filter_rev=?
-                ON CONFLICT (hash_domain, token_hash, filter_rev) DO NOTHING""",
-            today, if (reject) null else clearText, if (reject) null else today, source,
-            if (reject) "rejected" else "unblinded", *queueArgs(), tokenHash, hashDomain, filterRev,
-        ) == 1
+        val locked = createArrayOf("text", cohort.toTypedArray())
+        try {
+            update(
+                """INSERT INTO vocabulary_v5 (token_hash, kind, distinct_installs_at_promotion, promoted_day, clear_text, unblinded_day, source, status, hash_domain, filter_rev)
+                    SELECT token_hash, kind, installs, ?, ?, ?, ?, ?, hash_domain, filter_rev FROM (${VocabularyEligibility.queue(policy, cohort = true)}) queue
+                    WHERE token_hash = ? AND hash_domain=? AND filter_rev=?
+                    ON CONFLICT (hash_domain, token_hash, filter_rev) DO NOTHING""",
+                today, if (reject) null else clearText, if (reject) null else today, source,
+                if (reject) "rejected" else "unblinded", *queueArgs(), locked, tokenHash, hashDomain, filterRev,
+            ) == 1
+        } finally {
+            locked.free()
+        }
     }
+
+    /** Test seam: runs inside [resolve]'s transaction after the cohort is locked and before it is counted. */
+    internal var afterResolveLock: (() -> Unit)? = null
 
     private fun Connection.array(sql: String, vararg args: Any?, read: (ResultSet) -> JsonObject): JsonArray =
         JsonArray(select(sql, *args) { rows -> buildList { do { add(read(rows)) } while (rows.next()) } } ?: emptyList())

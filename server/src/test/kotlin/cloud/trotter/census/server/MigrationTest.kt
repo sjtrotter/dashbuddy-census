@@ -9,6 +9,8 @@ import cloud.trotter.census.contract.UiSkeletonDto
 import cloud.trotter.census.contract.UiSkeletonNodeDto
 import cloud.trotter.census.server.db.HashPepperMismatchException
 import cloud.trotter.census.server.db.KeyedHashStorageMigration
+import cloud.trotter.census.server.db.installRows
+import cloud.trotter.census.server.db.select
 import cloud.trotter.census.server.ingest.ItemVerdict
 import cloud.trotter.census.server.ingest.atRest
 import io.ktor.client.request.get
@@ -92,7 +94,7 @@ class MigrationTest {
     fun `populated V6 upgrades to V7 with every word hash and notification fingerprint keyed`() {
         val schema = "keyed_upgrade"
         fun flyway() = Database.flyway(postgres.jdbcUrl, postgres.username, postgres.password, testKeying)
-            .schemas(schema).defaultSchema(schema)
+            .schemas(schema).defaultSchema(schema).target("7")
         flyway().target("6").load().migrate()
         val day = java.time.LocalDate.of(2026, 10, 1)
         val words = listOf("Ready now", "Elm Street", "Order ready")
@@ -157,6 +159,121 @@ class MigrationTest {
             assertThrows(HashPepperMismatchException::class.java) {
                 KeyedHashStorageMigration.verify(connection, HashKeying.fromHex("0".repeat(63) + "1"))
             }
+        }
+    }
+
+    @Test
+    fun `populated V7 upgrades to V8 with every content row under an epoch tag and no install id`() {
+        val schema = "epoch_upgrade"
+        val today = java.time.LocalDate.of(2026, 10, 6)
+        val clock = object : Clock { override fun now(): java.time.Instant = today.atTime(12, 0).toInstant(java.time.ZoneOffset.UTC) }
+        fun flyway() = Database.flyway(postgres.jdbcUrl, postgres.username, postgres.password, testKeying, clock)
+            .schemas(schema).defaultSchema(schema)
+        flyway().target("7").load().migrate()
+        val current = Epochs.of(today)
+        val recent = today.minusDays(1)
+        val previous = Epochs.firstDay(current).minusDays(2)
+        val overdue = Epochs.firstDay(current - 1).minusDays(10)
+        assertEquals(current - 1, Epochs.of(previous))
+        val (plain, trusted, revoked, quarantined) = (1..4).map { java.util.UUID.fromString("00000000-0000-4000-8000-00000000008$it") }
+        val tokens = listOf("1111111111111111", "2222222222222222", "3333333333333333")
+        val fingerprint = "c".repeat(64)
+        DriverManager.getConnection(postgres.jdbcUrl, postgres.username, postgres.password).use { connection ->
+            connection.createStatement().use { it.execute("SET search_path TO $schema") }
+            fun run(sql: String, vararg args: Any?) = connection.prepareStatement(sql).use { statement ->
+                args.forEachIndexed { index, value -> statement.setObject(index + 1, value) }
+                statement.executeUpdate()
+            }
+            for ((id, created) in listOf(plain to today.minusDays(40), trusted to today.minusDays(40), revoked to today.minusDays(40), quarantined to today.minusDays(5))) {
+                run("INSERT INTO installs (install_id, key_hash, created_day, last_seen_day) VALUES (?, repeat('a',64), ?, ?)", id, created, recent)
+            }
+            run("UPDATE installs SET trusted = true WHERE install_id = ?", trusted)
+            run("UPDATE installs SET revoked_at = now() WHERE install_id = ?", revoked)
+            run("INSERT INTO clusters (fingerprint, platform, first_seen_day, last_seen_day) VALUES (?, 'doordash', ?, ?)", fingerprint, previous, recent)
+            fun token(id: java.util.UUID, token: String, last: java.time.LocalDate) =
+                run("INSERT INTO token_sightings_v5 VALUES (?, ?, ?, ?, 'words:1', 1, 1)", token, id, last, last)
+            token(plain, tokens[0], recent); token(plain, tokens[1], previous); token(plain, tokens[2], overdue)
+            for (id in listOf(trusted, revoked, quarantined)) token(id, tokens[0], recent)
+            for (day in listOf(recent, previous)) run("INSERT INTO cluster_sightings_v5 VALUES (?, ?, ?, '8.0', 1, 1, 1)", fingerprint, plain, day)
+            for (id in listOf(trusted, revoked)) run("INSERT INTO cluster_sightings_v5 VALUES (?, ?, ?, '8.0', 1, 1, 1)", fingerprint, id, recent)
+            for ((id, day) in listOf(plain to recent, plain to previous, revoked to recent)) {
+                run("INSERT INTO health_daily (install_id, day, platform, platform_app_version, admitted, unknown, trips, rule_counts) VALUES (?, ?, 'doordash', '8.0', 1, 0, 0, '{}')", id, day)
+            }
+
+            assertEquals(1, flyway().load().migrate().migrationsExecuted)
+            assertEquals(0, flyway().load().migrate().migrationsExecuted)
+
+            fun strings(sql: String) = connection.createStatement().use { statement ->
+                statement.executeQuery(sql).use { rows -> buildList { while (rows.next()) add(rows.getString(1)) } }
+            }
+            // Keys for the previous and current epoch only; the pre-V5 tables are gone; no content table names an install.
+            assertEquals(listOf("${current - 1}", "$current"), strings("SELECT epoch::text FROM epoch_keys ORDER BY epoch"))
+            assertEquals(emptyList<String>(), strings("""SELECT table_name FROM information_schema.tables WHERE table_schema = '$schema'
+                AND table_name IN ('token_sightings', 'cluster_sightings', 'vocabulary')"""))
+            assertEquals(listOf("ingest_ledger", "installs", "nonces", "trusted_envelopes"), strings("""SELECT table_name FROM information_schema.columns
+                WHERE table_schema = '$schema' AND column_name = 'install_id' ORDER BY table_name"""))
+            val content = listOf("token_sightings_v5", "cluster_sightings_v5", "health_daily").flatMap { strings("SELECT row_to_json(t)::text FROM $it t") }
+            assertEquals(emptySet<String>(), matches(content, listOf(plain, trusted, revoked, quarantined).map { it.toString() }))
+
+            // Each install's rows are found again through its tags under the live keys, exactly as erasure finds them;
+            // a revoked install's sightings are gone (k counting no longer joins installs), its health row is kept.
+            fun rows(table: String, id: java.util.UUID) = connection.installRows(table, id, today)
+            assertEquals(listOf(3L, 1L, 0L, 1L), listOf(plain, trusted, revoked, quarantined).map { rows("token_sightings_v5", it) })
+            assertEquals(listOf(2L, 1L, 0L, 0L), listOf(plain, trusted, revoked, quarantined).map { rows("cluster_sightings_v5", it) })
+            assertEquals(listOf(2L, 0L, 1L, 0L), listOf(plain, trusted, revoked, quarantined).map { rows("health_daily", it) })
+            assertEquals(5L, connection.select("SELECT count(*) FROM token_sightings_v5") { it.getLong(1) })
+            // Tagged under the epoch of the day each row describes; a row already due for retention, under the previous one.
+            assertEquals(listOf("$current", "${current - 1}", "${current - 1}"), tokens.map { token ->
+                strings("SELECT epoch::text FROM token_sightings_v5 WHERE token_hash = '$token' AND NOT trusted AND counts_from IS NULL ORDER BY epoch DESC").first()
+            })
+            // One install's sightings of one cluster carry unrelated tags in the two epochs.
+            assertEquals(2, strings("SELECT DISTINCT install_tag FROM cluster_sightings_v5 WHERE NOT trusted").size)
+            // Trust and the quarantine moved onto the rows.
+            assertEquals(listOf("true", "true"), strings("SELECT trusted::text FROM token_sightings_v5 WHERE trusted UNION ALL SELECT trusted::text FROM cluster_sightings_v5 WHERE trusted"))
+            assertEquals(listOf(today.minusDays(5).plusDays(8).toString()), strings("SELECT counts_from::text FROM token_sightings_v5 WHERE counts_from IS NOT NULL"))
+            // The stored keys open only under this pepper.
+            val wrapped = connection.select("SELECT wrapped FROM epoch_keys WHERE epoch = ?", current) { it.getBytes(1) }!!
+            EpochKey.unwrap(testKeying, current, wrapped)
+            assertThrows(EpochKeyUnwrapException::class.java) { EpochKey.unwrap(HashKeying.fromHex("0".repeat(63) + "1"), current, wrapped) }
+            assertThrows(EpochKeyUnwrapException::class.java) { EpochKey.unwrap(testKeying, current - 1, wrapped) }
+        }
+    }
+
+    @Test
+    fun `a populated V7 database under another pepper refuses V8 and stays exactly as it was`() {
+        val schema = "epoch_wrong_pepper"
+        val today = java.time.LocalDate.of(2026, 10, 6)
+        val clock = object : Clock { override fun now(): java.time.Instant = today.atTime(12, 0).toInstant(java.time.ZoneOffset.UTC) }
+        fun flyway(keying: HashKeying) = Database.flyway(postgres.jdbcUrl, postgres.username, postgres.password, keying, clock)
+            .schemas(schema).defaultSchema(schema)
+        flyway(testKeying).target("7").load().migrate()
+        val install = java.util.UUID.fromString("00000000-0000-4000-8000-000000000091")
+        DriverManager.getConnection(postgres.jdbcUrl, postgres.username, postgres.password).use { connection ->
+            connection.createStatement().use { it.execute("SET search_path TO $schema") }
+            fun run(sql: String, vararg args: Any?) = connection.prepareStatement(sql).use { statement ->
+                args.forEachIndexed { index, value -> statement.setObject(index + 1, value) }
+                statement.executeUpdate()
+            }
+            run("INSERT INTO installs (install_id, key_hash, created_day, last_seen_day) VALUES (?, repeat('a',64), ?, ?)", install, today, today)
+            run("INSERT INTO token_sightings_v5 VALUES ('1111111111111111', ?, ?, ?, 'words:1', 1, 1)", install, today, today)
+            run("INSERT INTO health_daily (install_id, day, platform, platform_app_version, admitted, unknown, trips, rule_counts) VALUES (?, ?, 'doordash', '8.0', 1, 0, 0, '{}')", install, today)
+            val before = connection.dumpRows(schema).toSet()
+
+            // #86 (Sol S1): V8 checks the pepper V7 recorded before changing anything, so a wrong one rolls it all back.
+            val failure = runCatching { flyway(HashKeying.fromHex("ab".repeat(32))).load().migrate() }.exceptionOrNull()
+            assertTrue(generateSequence(failure) { it.cause }.any { it is HashPepperMismatchException })
+            fun strings(sql: String) = connection.createStatement().use { statement ->
+                statement.executeQuery(sql).use { rows -> buildList { while (rows.next()) add(rows.getString(1)) } }
+            }
+            assertEquals(listOf("7"), strings("SELECT max(version::int)::text FROM flyway_schema_history WHERE success"))
+            assertEquals(listOf("0"), strings("SELECT count(*)::text FROM flyway_schema_history WHERE version = '8'"))
+            assertEquals(emptyList<String>(), strings("SELECT table_name FROM information_schema.tables WHERE table_schema = '$schema' AND table_name = 'epoch_keys'"))
+            assertEquals(listOf("health_daily", "token_sightings_v5"), strings("""SELECT table_name FROM information_schema.columns
+                WHERE table_schema = '$schema' AND column_name = 'install_id' AND table_name IN ('token_sightings_v5', 'health_daily') ORDER BY table_name"""))
+            assertEquals(before, connection.dumpRows(schema).toSet())
+
+            assertEquals(1, flyway(testKeying).load().migrate().migrationsExecuted)
+            assertEquals(1L, connection.installRows("token_sightings_v5", install, today))
         }
     }
 
@@ -313,14 +430,15 @@ class MigrationTest {
     }
 
     @Test
-    fun `empty database applies every migration and contains exactly eighteen application tables`() {
+    fun `empty database applies every migration and contains exactly sixteen application tables`() {
         val flyway = Database.flyway(postgres.jdbcUrl, postgres.username, postgres.password, testKeying).load()
-        // V1 schema, V2 classification, V3 tombstones, V4 notifications, V5 lifecycle, V6 keep less (#79), V7 keyed (#85).
-        assertEquals(7, flyway.migrate().migrationsExecuted)
+        // V1 schema, V2 classification, V3 tombstones, V4 notifications, V5 lifecycle, V6 keep less (#79), V7 keyed (#85),
+        // V8 epoch pseudonyms (#86, which drops the three pre-V5 tables).
+        assertEquals(8, flyway.migrate().migrationsExecuted)
         val expected = setOf(
-            "installs", "clusters", "cluster_samples", "cluster_sightings", "token_sightings",
-            "vocabulary", "trusted_envelopes", "health_daily", "health_fleet_daily", "ingest_ledger", "nonces", "withdrawals", "token_sightings_v5", "cluster_sightings_v5", "vocabulary_v5", "filter_floor", "ingest_pause",
-            "hash_keying",
+            "installs", "clusters", "cluster_samples", "trusted_envelopes", "health_daily", "health_fleet_daily", "ingest_ledger",
+            "nonces", "withdrawals", "token_sightings_v5", "cluster_sightings_v5", "vocabulary_v5", "filter_floor", "ingest_pause",
+            "hash_keying", "epoch_keys",
         )
         DriverManager.getConnection(postgres.jdbcUrl, postgres.username, postgres.password).use { connection ->
             connection.createStatement().use { statement ->
@@ -363,8 +481,7 @@ class MigrationTest {
                         }
                     }
                     assertEquals(listOf("character", "64", "NO", null), columns["installs.key_hash"])
-                    assertEquals(listOf("character", "16", "NO", null), columns["token_sightings.token_hash"])
-                    assertEquals(listOf("integer", null, "NO", "1"), columns["cluster_sightings.count"])
+                    assertEquals(listOf("character", "16", "NO", null), columns["token_sightings_v5.token_hash"])
                     assertEquals(listOf("timestamp with time zone", null, "NO", null), columns["nonces.issued_at"])
                     assertEquals(listOf("text", null, "NO", null), columns["withdrawals.install_id_hash"])
                     assertEquals(listOf("timestamp with time zone", null, "NO", null), columns["withdrawals.withdrawn_at"])
@@ -374,6 +491,15 @@ class MigrationTest {
                     assertEquals(listOf("timestamp with time zone", null, "YES", null), columns["installs.erased_through"])
                     assertEquals(listOf("integer", null, "NO", "1"), columns["cluster_sightings_v5.count"])
                     assertEquals(listOf("character", "64", "NO", null), columns["hash_keying.key_check"])
+                    // #86: content rows carry an epoch and an epoch tag; no content table carries an install id.
+                    for (table in listOf("token_sightings_v5", "cluster_sightings_v5", "health_daily")) {
+                        assertEquals(listOf("integer", null, "NO", null), columns["$table.epoch"], table)
+                        assertEquals(listOf("character", "64", "NO", null), columns["$table.install_tag"], table)
+                        assertEquals(null, columns["$table.install_id"], table)
+                    }
+                    assertEquals(listOf("bytea", null, "NO", null), columns["epoch_keys.wrapped"])
+                    assertEquals(setOf("installs", "nonces", "ingest_ledger", "trusted_envelopes"),
+                        columns.keys.filter { it.endsWith(".install_id") }.map { it.substringBefore('.') }.toSet())
                 }
                 // #85: a fresh database records the pepper's check value, so a later boot with another pepper refuses.
                 statement.executeQuery("SELECT key_check FROM hash_keying").use { rows ->

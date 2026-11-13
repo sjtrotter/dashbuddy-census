@@ -3,6 +3,7 @@ package cloud.trotter.census.server.db
 import cloud.trotter.census.server.Clock
 import cloud.trotter.census.server.Config
 import cloud.trotter.census.server.Database
+import cloud.trotter.census.server.TagPurpose
 import cloud.trotter.census.server.auth.hashSecret
 import cloud.trotter.census.server.secret
 import cloud.trotter.census.server.testEnvironment
@@ -47,7 +48,7 @@ class WithdrawalReplayTest {
 
     @BeforeEach
     fun clear() {
-        sql { it.update("TRUNCATE installs, clusters, withdrawals CASCADE") }
+        sql { it.update("TRUNCATE installs, clusters, withdrawals, health_daily, token_sightings_v5, epoch_keys CASCADE") }
     }
 
     @Test
@@ -92,7 +93,7 @@ class WithdrawalReplayTest {
                 assertTrue(journal().isEmpty())
                 sql { connection ->
                     for (table in InstallStore.WITHDRAWAL_TABLES) {
-                        assertEquals(1, connection.select("SELECT count(*) FROM $table WHERE install_id = ?", id) { it.getInt(1) }, table)
+                        assertEquals(1L, connection.installRows(table, id, day), table)
                     }
                 }
                 store.mergeWithdrawalJournal(listOf(InstallStore.installIdHash(id) to now))
@@ -255,16 +256,23 @@ class WithdrawalReplayTest {
             id, day, day.plusDays(1),
         ) { it.getLong(1) }!!
         connection.update("UPDATE clusters SET draft = jsonb_build_object('envelopeId', ?::text), draft_day = ?, screen_class = 'offer' WHERE fingerprint = ?", envelope.toString(), day, fingerprint)
-        connection.update("INSERT INTO health_daily (install_id, day, platform, platform_app_version, admitted, unknown, trips, rule_counts) VALUES (?, ?, 'android', '1.0', 1, 0, 0, '{}')", id, day)
-        connection.update("INSERT INTO token_sightings_v5 VALUES ('1234567890abcdef', ?, ?, ?, 'test', 1, 1)", id, day, day)
-        connection.update("INSERT INTO cluster_sightings_v5 VALUES (?, ?, ?, '1.0', 1, 1, 1)", fingerprint, id, day)
+        // #86: content rows carry the install's epoch tags, as ingest writes them.
+        val health = connection.testTag(TagPurpose.HEALTH, id, "", day)
+        connection.update("INSERT INTO health_daily (epoch, install_tag, day, platform, platform_app_version, admitted, unknown, trips, rule_counts) VALUES (?, ?, ?, 'android', '1.0', 1, 0, 0, '{}')",
+            health.epoch, health.tag, day)
+        val token = connection.testTag(TagPurpose.TOKEN, id, TokenObject.of(1, 1, "1234567890abcdef"), day)
+        connection.update("INSERT INTO token_sightings_v5 (token_hash, epoch, install_tag, trusted, first_day, last_day, kind, hash_domain, filter_rev) VALUES ('1234567890abcdef', ?, ?, false, ?, ?, 'test', 1, 1)",
+            token.epoch, token.tag, day, day)
+        val cluster = connection.testTag(TagPurpose.CLUSTER, id, fingerprint, day)
+        connection.update("INSERT INTO cluster_sightings_v5 (fingerprint, epoch, install_tag, trusted, day, platform_app_version, hash_domain, filter_rev) VALUES (?, ?, ?, false, ?, '1.0', 1, 1)",
+            fingerprint, cluster.epoch, cluster.tag, day)
         connection.update("INSERT INTO ingest_ledger (install_id, day) VALUES (?, ?)", id, day)
         connection.update("INSERT INTO nonces (nonce, install_id, issued_at) VALUES (?, ?, ?)", UUID.randomUUID().toString().replace("-", ""), id, t0.atOffset(ZoneOffset.UTC))
     }
 
     private fun assertErased(id: UUID) = sql { connection ->
         for (table in InstallStore.WITHDRAWAL_TABLES) {
-            assertEquals(0, connection.select("SELECT count(*) FROM $table WHERE install_id = ?", id) { it.getInt(1) }, table)
+            assertEquals(0L, connection.installRows(table, id, null), table)
         }
     }
 

@@ -7,6 +7,7 @@ import ch.qos.logback.core.read.ListAppender
 import cloud.trotter.census.server.Clock
 import cloud.trotter.census.server.Config
 import cloud.trotter.census.server.Database
+import cloud.trotter.census.server.TagPurpose
 import cloud.trotter.census.server.Policy
 import cloud.trotter.census.server.assertError
 import cloud.trotter.census.server.assertPrivateLogs
@@ -84,18 +85,22 @@ class HealthStoreTest {
                 """INSERT INTO trusted_envelopes (install_id, envelope, received_day, purge_after)
                     SELECT ?, '{}'::jsonb, ?::date, ?::date FROM generate_series(1, ?)""", id, day.minusDays(31), day.minusDays(1), rows,
             )
+            // #86: old days under the install's current health tag, as a stand-in for rows the fold has not reached.
+            val tag = connection.testTag(TagPurpose.HEALTH, id, "", instant.atOffset(ZoneOffset.UTC).toLocalDate())
             connection.update(
-                """INSERT INTO health_daily (install_id, day, platform, platform_app_version, admitted, unknown, trips, rule_counts)
-                    SELECT ?, ?::date - n, 'doordash', '1.0.0', 0, 0, 0, '{}'::jsonb FROM generate_series(1, ?) n""", id, day.minusDays(180), rows,
+                """INSERT INTO health_daily (epoch, install_tag, day, platform, platform_app_version, admitted, unknown, trips, rule_counts)
+                    SELECT ?, ?, ?::date - n, 'doordash', '1.0.0', 0, 0, 0, '{}'::jsonb FROM generate_series(1, ?) n""", tag.epoch, tag.tag, day.minusDays(180), rows,
             )
         }
         // #79 (Sol S5): silence reads only health inside retention, so the trusted install needs a recent report day.
         fun recentReport() = sql { connection ->
-            connection.update("DELETE FROM health_daily WHERE install_id = ? AND platform_app_version = '9.9.9'", id)
+            val today = instant.atOffset(ZoneOffset.UTC).toLocalDate()
+            val tag = connection.testTag(TagPurpose.HEALTH, id, "", today, today.minusDays(2))
+            connection.update("DELETE FROM health_daily WHERE install_tag = ? AND platform_app_version = '9.9.9'", tag.tag)
             connection.update(
-                """INSERT INTO health_daily (install_id, day, platform, platform_app_version, admitted, unknown, trips, rule_counts)
-                    VALUES (?, ?, 'doordash', '9.9.9', 0, 0, 0, '{}'::jsonb)""",
-                id, instant.atOffset(ZoneOffset.UTC).toLocalDate().minusDays(2),
+                """INSERT INTO health_daily (epoch, install_tag, day, platform, platform_app_version, admitted, unknown, trips, rule_counts)
+                    VALUES (?, ?, ?, 'doordash', '9.9.9', 0, 0, 0, '{}'::jsonb)""",
+                tag.epoch, tag.tag, today.minusDays(2),
             )
         }
         try {
@@ -134,7 +139,7 @@ class HealthStoreTest {
                             } finally {
                                 sql { connection ->
                                     connection.update("DROP TRIGGER census_test_purge_failure ON $table")
-                                    connection.update("DELETE FROM $table WHERE install_id = ?", id)
+                                    connection.deleteInstallRows(table, id, null)
                                 }
                             }
                         }
@@ -304,8 +309,8 @@ class HealthStoreTest {
                 assertEquals(HealthOutcome.Stored, write(first, initial.copy(admitted = 80, unknown = 20, trips = 0, rulesetVersion = "v2", ruleCounts = mapOf("a.b" to 10))))
                 assertEquals(listOf(1L, 100L, 40L, 10L), fleet(day))
                 sql { connection ->
-                    connection.prepareStatement("SELECT admitted, unknown, trips, ruleset_version, rule_counts FROM health_daily WHERE install_id = ?").use { statement ->
-                        statement.setObject(1, first)
+                    connection.prepareStatement("SELECT admitted, unknown, trips, ruleset_version, rule_counts FROM health_daily WHERE install_tag = ?").use { statement ->
+                        statement.setObject(1, connection.testTag(TagPurpose.HEALTH, first, "", day).tag)
                         statement.executeQuery().use { rows ->
                             assertTrue(rows.next())
                             assertEquals(100, rows.getInt("admitted"))
@@ -347,7 +352,8 @@ class HealthStoreTest {
                     for (index in 1..5) {
                         val fingerprint = index.toString(16).padStart(64, '0')
                         connection.update("INSERT INTO clusters (fingerprint, platform, first_seen_day, last_seen_day) VALUES (?, ?, ?, ?)", fingerprint, "doordash", day, day)
-                        connection.update("INSERT INTO cluster_sightings_v5 (fingerprint, install_id, day, platform_app_version, hash_domain, filter_rev) VALUES (?, ?, ?, ?, 1, 1)", fingerprint, first, day, "8.0.0")
+                        val tag = connection.testTag(TagPurpose.CLUSTER, first, fingerprint, day)
+                        connection.update("INSERT INTO cluster_sightings_v5 (fingerprint, epoch, install_tag, trusted, day, platform_app_version, hash_domain, filter_rev) VALUES (?, ?, ?, false, ?, ?, 1, 1)", fingerprint, tag.epoch, tag.tag, day, "8.0.0")
                     }
                     connection.update("UPDATE installs SET trusted = true WHERE install_id = ?", first)
                 }
@@ -390,10 +396,13 @@ class HealthStoreTest {
 
                 val cutoff = day.plusDays(2).minusDays(Policy().retention.healthDailyDays.toLong())
                 sql { connection ->
-                    for (oldDay in listOf(cutoff.minusDays(1), cutoff)) connection.update(
-                        """INSERT INTO health_daily (install_id, day, platform, platform_app_version, admitted, unknown, trips, rule_counts)
-                            VALUES (?, ?, 'doordash', 'old', 0, 0, 0, '{}'::jsonb)""", first, oldDay,
-                    )
+                    for (oldDay in listOf(cutoff.minusDays(1), cutoff)) {
+                        val tag = connection.testTag(TagPurpose.HEALTH, first, "", day.plusDays(2), oldDay)
+                        connection.update(
+                            """INSERT INTO health_daily (epoch, install_tag, day, platform, platform_app_version, admitted, unknown, trips, rule_counts)
+                                VALUES (?, ?, ?, 'doordash', 'old', 0, 0, 0, '{}'::jsonb)""", tag.epoch, tag.tag, oldDay,
+                        )
+                    }
                 }
                 assertEquals(2, purge.runOnce().healthRows)
                 assertEquals(1, count("health_daily", first))
@@ -447,12 +456,7 @@ class HealthStoreTest {
             statement.executeQuery().use { rows -> assertTrue(rows.next()); (1..4).map { rows.getLong(it) } }
         }
     }
-    private fun count(table: String, id: UUID): Int = sql { connection ->
-        connection.prepareStatement("SELECT count(*) FROM $table WHERE install_id = ?").use { statement ->
-            statement.setObject(1, id)
-            statement.executeQuery().use { rows -> rows.next(); rows.getInt(1) }
-        }
-    }
+    private fun count(table: String, id: UUID): Int = sql { it.installRows(table, id, null).toInt() }
     private fun <T> sql(block: (Connection) -> T): T = DriverManager.getConnection(postgres.jdbcUrl, postgres.username, postgres.password).use(block)
 
     companion object {

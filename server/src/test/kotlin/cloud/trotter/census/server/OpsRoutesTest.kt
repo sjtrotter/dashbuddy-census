@@ -9,6 +9,7 @@ import cloud.trotter.census.contract.CensusHash
 import cloud.trotter.census.contract.SkeletonSchema
 import cloud.trotter.census.server.auth.hashSecret
 import cloud.trotter.census.server.db.CLUSTER_STATUSES
+import cloud.trotter.census.server.db.testTag
 import cloud.trotter.census.server.db.EnvelopeOutcome
 import cloud.trotter.census.server.db.EnvelopeStore
 import cloud.trotter.census.server.db.HealthStore
@@ -120,7 +121,8 @@ class OpsRoutesTest {
                     connection.update("INSERT INTO clusters (fingerprint, platform, kind, first_seen_day, last_seen_day) VALUES (?, 'doordash', 'notification', ?, ?)", (index + 1).toString(16).padStart(64, '0'), day, day)
                 }
                 connection.update("INSERT INTO clusters (fingerprint, platform, first_seen_day, last_seen_day) VALUES (?, 'doordash', ?, ?)", "f".repeat(64), day, day)
-                connection.update("INSERT INTO cluster_sightings_v5 (fingerprint, install_id, day, platform_app_version, hash_domain, filter_rev) SELECT fingerprint, ?::uuid, ?::date, 'unknown', 1, 1 FROM clusters", reporter, day)
+                val tag = connection.testTag(TagPurpose.CLUSTER, reporter, "", day)
+                connection.update("INSERT INTO cluster_sightings_v5 (fingerprint, epoch, install_tag, trusted, day, platform_app_version, hash_domain, filter_rev) SELECT fingerprint, ?, ?, false, ?::date, 'unknown', 1, 1 FROM clusters", tag.epoch, tag.tag, day)
             }
             assertEquals(27, ops.clustersPage("doordash", null, null, 1, kind = cloud.trotter.census.contract.SkeletonKind.NOTIFICATION).total)
             assertEquals(2, ops.clustersPage("doordash", null, null, 2, kind = cloud.trotter.census.contract.SkeletonKind.NOTIFICATION).clusters.size)
@@ -175,7 +177,7 @@ class OpsRoutesTest {
 
     @BeforeEach
     fun clean() {
-        sql { it.update("TRUNCATE installs, clusters, health_fleet_daily, vocabulary_v5 CASCADE") }
+        sql { it.update("TRUNCATE installs, clusters, health_fleet_daily, vocabulary_v5, token_sightings_v5, health_daily CASCADE") }
     }
 
     @Test
@@ -387,7 +389,10 @@ class OpsRoutesTest {
                 assertEquals(200, client.signed(clock, id, key, HttpMethod.Post, "/v1/health", """{"reports":[$report]}""").status.value)
                 val health = Json.parseToJsonElement(client.ops("/ops/health").bodyAsText()).jsonObject
                 assertEquals(1, health.getValue("fleet").jsonArray.size)
-                assertEquals(id.take(8), health.getValue("installs").jsonArray.single().jsonObject.getValue("installIdPrefix").jsonPrimitive.content)
+                // #86: a per-install health row names the install's epoch pseudonym, never its id.
+                val row = health.getValue("installs").jsonArray.single().jsonObject
+                assertEquals(sql { it.testTag(TagPurpose.HEALTH, UUID.fromString(id), "", day).tag.take(8) }, row.getValue("pseudonymPrefix").jsonPrimitive.content)
+                assertFalse(row.toString().contains(id.take(8)))
                 val result = Json.parseToJsonElement(client.ops("/ops/alarms").bodyAsText()).jsonObject
                 assertEquals("trips", result.getValue("today").jsonArray.single().jsonObject.getValue("kind").jsonPrimitive.content)
                 assertEquals(1, result.getValue("counts").jsonObject.getValue("trips").jsonPrimitive.int)
@@ -452,7 +457,8 @@ class OpsRoutesTest {
                 sql { connection ->
                     connection.update("INSERT INTO clusters (fingerprint, platform, first_seen_day, last_seen_day) VALUES (?, 'doordash', ?, ?)", noVersion, day, day)
                     connection.update("INSERT INTO clusters (fingerprint, platform, first_seen_day, last_seen_day, status) VALUES (?, 'uber', ?, ?, 'ignored')", uber, day, day)
-                    connection.update("INSERT INTO cluster_sightings_v5 (fingerprint, install_id, day, platform_app_version, hash_domain, filter_rev) VALUES (?, ?, ?, '1.2', 1, 1)", uber, first, day)
+                    val tag = connection.testTag(TagPurpose.CLUSTER, first, uber, day)
+                    connection.update("INSERT INTO cluster_sightings_v5 (fingerprint, epoch, install_tag, trusted, day, platform_app_version, hash_domain, filter_rev) VALUES (?, ?, ?, false, ?, '1.2', 1, 1)", uber, tag.epoch, tag.tag, day)
                 }
                 assertTrue(ops.saveClassification(fresh.item.fingerprint, "idle"))
                 val summary = ops.clusterSummary()

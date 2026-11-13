@@ -75,11 +75,8 @@ class FilterPolicyStore(private val db: Database, private val clock: Clock) {
     suspend fun bootstrap(configured: Int, imported: FilterFloorJournal? = null): Int {
         require(configured > 0)
         require(imported == null || imported.changedDay <= clock.today()) { "Invalid filter floor journal" }
-        query {
-            val migration = requireNotNull(FilterPolicyStore::class.java.getResourceAsStream("/db/migration/V5__skeleton_lifecycle.sql"))
-                .bufferedReader().use { it.readText() }
-            createStatement().use { it.execute(migration.substring(migration.indexOf("DO \$\$"))) }
-        }
+        // #86: the post-V8 shape (V5's check pinned install_id into the sighting keys).
+        query { createStatement().use { it.execute(EpochPseudonymMigration.shapeCheck()) } }
         val first = current() == null
         val counts = linkedMapOf<String, SweepResult>()
         var legacyCaptures=0L
@@ -93,16 +90,7 @@ class FilterPolicyStore(private val db: Database, private val clock: Clock) {
             legacyCaptures+=n
         } while(n==1000)
         counts["legacy_captures"]=SweepResult(deleted=legacyCaptures,remainingDue=0)
-        for (table in listOf("token_sightings", "cluster_sightings", "vocabulary")) {
-            if (!first) check(query { select("SELECT count(*) FROM $table") { it.getLong(1) } == 0L }) { "Unexpected legacy writes" }
-            var deleted = 0L; var batches = 0
-            if (first) do {
-                currentCoroutineContext().ensureActive()
-                val changed = query { update("DELETE FROM $table WHERE ctid IN (SELECT ctid FROM $table LIMIT 1000)") }
-                deleted += changed; batches++
-            } while (changed == 1000)
-            counts["legacy_$table"] = SweepResult(deleted, batches = batches, remainingDue = 0)
-        }
+        // The pre-V5 tables (`token_sightings`, `cluster_sightings`, `vocabulary`) were dropped by V8 (#86).
         // Null provenance marks legacy copies. Canonical metadata is the only valid source for attribution.
         var removed = 0L; var rewritten = 0L; var batches = 0
         while (true) {

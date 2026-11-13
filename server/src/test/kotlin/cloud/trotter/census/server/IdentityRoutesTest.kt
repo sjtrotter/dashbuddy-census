@@ -17,6 +17,10 @@ import cloud.trotter.census.server.db.InstallStore
 import cloud.trotter.census.server.db.HealthStore
 import cloud.trotter.census.server.db.LedgerRow
 import cloud.trotter.census.server.db.MutationOutcome
+import cloud.trotter.census.server.db.TokenObject
+import cloud.trotter.census.server.db.installRows
+import cloud.trotter.census.server.db.testTag
+import cloud.trotter.census.server.db.update
 import cloud.trotter.census.server.ingest.BudgetPolicy
 import cloud.trotter.census.server.ingest.ConsumeOutcome
 import cloud.trotter.census.server.jobs.PurgeJob
@@ -67,6 +71,7 @@ import java.sql.DriverManager
 import java.nio.file.Files
 import java.nio.file.Path
 import java.time.Instant
+import java.time.LocalDate
 import java.util.UUID
 import org.junit.jupiter.api.io.TempDir
 
@@ -747,20 +752,24 @@ class IdentityRoutesTest {
         connection.createStatement().use { statement ->
             statement.executeUpdate("INSERT INTO clusters (fingerprint, platform, first_seen_day, last_seen_day) VALUES ('$fingerprint', 'android', '2026-10-02', '2026-10-02') ON CONFLICT DO NOTHING")
             statement.executeUpdate("INSERT INTO trusted_envelopes (install_id, envelope, received_day, purge_after) VALUES ('$id', '{}', '2026-10-02', '2026-10-03')")
-            statement.executeUpdate("INSERT INTO health_daily VALUES ('$id', '2026-10-02', 'android', '1.0', 1, 0, 0, NULL, '{}')")
-            statement.executeUpdate("INSERT INTO token_sightings_v5 VALUES ('1234567890abcdef', '$id', '2026-10-02', '2026-10-02', 'test', 1, 1)")
-            statement.executeUpdate("INSERT INTO cluster_sightings_v5 VALUES ('$fingerprint', '$id', '2026-10-02', '1.0', 1, 1, 1)")
             statement.executeUpdate("INSERT INTO ingest_ledger (install_id, day) VALUES ('$id', '2026-10-02') ON CONFLICT DO NOTHING")
         }
+        // #86: the content rows carry the install's epoch tags, as ingest writes them.
+        val install = UUID.fromString(id)
+        val day = LocalDate.parse("2026-10-02")
+        val health = connection.testTag(TagPurpose.HEALTH, install, "", day)
+        connection.update("INSERT INTO health_daily (epoch, install_tag, day, platform, platform_app_version, admitted, unknown, trips, rule_counts) VALUES (?, ?, ?, 'android', '1.0', 1, 0, 0, '{}')",
+            health.epoch, health.tag, day)
+        val token = connection.testTag(TagPurpose.TOKEN, install, TokenObject.of(1, 1, "1234567890abcdef"), day)
+        connection.update("INSERT INTO token_sightings_v5 (token_hash, epoch, install_tag, trusted, first_day, last_day, kind, hash_domain, filter_rev) VALUES ('1234567890abcdef', ?, ?, false, ?, ?, 'test', 1, 1)",
+            token.epoch, token.tag, day, day)
+        val cluster = connection.testTag(TagPurpose.CLUSTER, install, fingerprint, day)
+        connection.update("INSERT INTO cluster_sightings_v5 (fingerprint, epoch, install_tag, trusted, day, platform_app_version, hash_domain, filter_rev) VALUES (?, ?, ?, false, ?, '1.0', 1, 1)",
+            fingerprint, cluster.epoch, cluster.tag, day)
     }
 
     private fun tableCounts(id: String): Map<String, Int> = sql { connection ->
-        InstallStore.WITHDRAWAL_TABLES.associateWith { table ->
-            connection.prepareStatement("SELECT count(*) FROM $table WHERE install_id = ?::uuid").use { statement ->
-                statement.setString(1, id)
-                statement.executeQuery().use { rows -> rows.next(); rows.getInt(1) }
-            }
-        }
+        InstallStore.WITHDRAWAL_TABLES.associateWith { table -> connection.installRows(table, UUID.fromString(id), null).toInt() }
     }
 
     private fun <T> sql(block: (java.sql.Connection) -> T): T =

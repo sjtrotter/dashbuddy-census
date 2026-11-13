@@ -26,7 +26,7 @@ The stack uses an `edge` network for Caddy and census, allowing ACME egress, and
 sed -i "s/^CENSUS_HASH_PEPPER=\$/CENSUS_HASH_PEPPER=$(openssl rand -hex 32)/" .env
 ```
 
-It never enters the database, backups or logs. Startup refuses a missing or malformed pepper, and refuses a pepper other than the one the database was first keyed under. Never change it: a new pepper is a new hash domain and needs a migration plan. A restore runs with the current `.env`, so keep the pepper with your backups' recovery material; without it, a dump cannot be brought back up.
+It never enters the database, backups or logs. Startup refuses a missing or malformed pepper, and refuses a pepper other than the one the database was first keyed under. Never change it: a new pepper is a new hash domain and needs a migration plan. A restore runs with the current `.env`, so keep the pepper with your backups' recovery material; without it, a dump cannot be brought back up. The per-epoch pseudonym keys (#86) are stored in the database wrapped under it, so the pepper covers them too; they need no configuration.
 
 ## Verify and pin a release
 

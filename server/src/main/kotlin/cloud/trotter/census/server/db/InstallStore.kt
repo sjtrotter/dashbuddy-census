@@ -2,7 +2,10 @@ package cloud.trotter.census.server.db
 
 import cloud.trotter.census.server.Clock
 import cloud.trotter.census.server.Database
+import cloud.trotter.census.server.EpochKey
 import cloud.trotter.census.server.Retention
+import cloud.trotter.census.server.TagPurpose
+import cloud.trotter.census.server.today
 import cloud.trotter.census.server.auth.toLowerHex
 import cloud.trotter.census.server.ingest.BudgetPolicy
 import cloud.trotter.census.server.ingest.ConsumeOutcome
@@ -138,9 +141,18 @@ class InstallStore(private val db: Database, private val clock: Clock) {
         if (changed == 1) MutationOutcome.Applied() else MutationOutcome.StaleCredential
     }
 
+    /**
+     * #86: revocation also deletes the install's stored sightings. k counting used to drop a revoked install through a
+     * join on the installs table; the sightings no longer name it, so its evidence goes instead.
+     */
     suspend fun revoke(installId: UUID, at: Instant): Boolean = query {
-        update("UPDATE installs SET revoked_at = ? WHERE install_id = ?", at.atOffset(ZoneOffset.UTC), installId) == 1
+        val changed = update("UPDATE installs SET revoked_at = ? WHERE install_id = ?", at.atOffset(ZoneOffset.UTC), installId) == 1
+        if (changed) deleteSightings(erasureKeys(), installId)
+        changed
     }
+
+    /** #86: erasure uses every stored key, expired ones included until the sweep destroys them. */
+    private fun Connection.erasureKeys() = with(EpochKeyStore) { storedKeys(db.keying) }
 
     suspend fun withdraw(installId: UUID, expectedCurrentKeyHash: String): MutationOutcome = query {
         // Lock the parent first: concurrent child inserts must finish before this lock or wait for deletion.
@@ -187,19 +199,28 @@ class InstallStore(private val db: Database, private val clock: Clock) {
     /**
      * The one per-install erasure. [keepInstallFrom] null = withdrawal: everything, the install row last. Non-null =
      * data deletion: the install row and the ledger rows from that day on stay ([deleteData]).
+     *
+     * #86: the content tables are found through the install's epoch tags under every stored key, an expired one the
+     * sweep has not yet destroyed included. Rows under a destroyed key are not found and need not be: nobody can tie
+     * them to this install any more. [tagged] false skips them for
+     * an install inactive for a year ([purgeInactive]), which cannot have written a row under a live key.
      */
-    private fun Connection.deleteInstallRows(installId: UUID, keepInstallFrom: LocalDate? = null): Map<String, Int> =
-        (if (keepInstallFrom == null) WITHDRAWAL_TABLES else DATA_TABLES).associateWith { table ->
+    private fun Connection.deleteInstallRows(installId: UUID, keepInstallFrom: LocalDate? = null, tagged: Boolean = true): Map<String, Int> {
+        val keys = if (tagged) erasureKeys() else emptyList()
+        return (if (keepInstallFrom == null) WITHDRAWAL_TABLES else DATA_TABLES).associateWith { table ->
             when (table) {
                 "ingest_ledger" -> if (keepInstallFrom == null) {
                     update("DELETE FROM ingest_ledger WHERE install_id = ?", installId)
                 } else update("DELETE FROM ingest_ledger WHERE install_id = ? AND day < ?", installId, keepInstallFrom)
                 // Delete/lock envelopes before clusters, the same lock order as retention and draft saves.
                 "trusted_envelopes" -> deleteEnvelopesAndClearDrafts("DELETE FROM trusted_envelopes WHERE install_id = ? RETURNING id", installId)
-                "health_daily" -> deleteHealthAndRefold(installId)
+                "health_daily" -> deleteHealthAndRefold(keys, installId)
+                in TAGGED_TABLES -> forInstallTags(keys, TaggedTable.entries.single { it.table == table }, installId,
+                    "DELETE FROM $table WHERE epoch = ? AND install_tag = ANY(?::bpchar[])")
                 else -> update("DELETE FROM $table WHERE install_id = ?", installId)
             }
         }
+    }
 
     /**
      * #79: the install's per-install health rows go, and the fleet totals they still feed are recomputed without
@@ -208,16 +229,22 @@ class InstallStore(private val db: Database, private val clock: Clock) {
      * locks, those rows are already folded and gone, and recomputing their key from an empty `health_daily` would
      * zero every install's folded total.
      */
-    private fun Connection.deleteHealthAndRefold(installId: UUID): Int {
-        val candidates = select(
-            "SELECT DISTINCT day, platform, platform_app_version FROM health_daily WHERE install_id = ?", installId,
-        ) { rows -> buildList { do { add(rows.fleetKey()) } while (rows.next()) } } ?: emptyList()
+    private fun Connection.deleteHealthAndRefold(keys: List<EpochKey>, installId: UUID): Int {
+        val tags = keys.map { EpochTag(it.epoch, it.tag(TagPurpose.HEALTH, installId, "")) }
+        val candidates = tags.flatMap { (epoch, tag) ->
+            select(
+                "SELECT DISTINCT day, platform, platform_app_version FROM health_daily WHERE epoch = ? AND install_tag = ?", epoch, tag,
+            ) { rows -> buildList { do { add(rows.fleetKey()) } while (rows.next()) } } ?: emptyList()
+        }
         lockFleet(candidates)
-        val removed = prepareStatement(
-            "DELETE FROM health_daily WHERE install_id = ? RETURNING day, platform, platform_app_version",
-        ).use { statement ->
-            statement.setObject(1, installId)
-            statement.executeQuery().use { rows -> buildList { while (rows.next()) add(rows.fleetKey()) } }
+        val removed = tags.flatMap { (epoch, tag) ->
+            prepareStatement(
+                "DELETE FROM health_daily WHERE epoch = ? AND install_tag = ? RETURNING day, platform, platform_app_version",
+            ).use { statement ->
+                statement.setInt(1, epoch)
+                statement.setString(2, tag)
+                statement.executeQuery().use { rows -> buildList { while (rows.next()) add(rows.fleetKey()) } }
+            }
         }
         // The install row is locked, so no new health row of this install can appear: removed keys were all locked.
         recomputeFleet(removed.distinct())
@@ -344,7 +371,7 @@ class InstallStore(private val db: Database, private val clock: Clock) {
         val ids = select("SELECT install_id FROM installs WHERE last_seen_day + 365 <= ? ORDER BY install_id LIMIT 1000 FOR UPDATE", today) { rows ->
             buildList { do { add(rows.getObject(1, UUID::class.java)) } while (rows.next()) }
         } ?: emptyList()
-        for (id in ids) deleteInstallRows(id)
+        for (id in ids) deleteInstallRows(id, tagged = false)
         ids.size
     }
 
@@ -514,10 +541,16 @@ class InstallStore(private val db: Database, private val clock: Clock) {
         fun installIdHash(installId: UUID): String =
             MessageDigest.getInstance("SHA-256").digest(installId.toString().toByteArray(Charsets.UTF_8)).toLowerHex()
 
-        /** Every table keyed by `install_id`, children first; `PublicInstallsTest` fails when a new one is missing (#79). */
+        /**
+         * Every table a withdrawal erases, children first (#79): the [TAGGED_TABLES] through the install's epoch tags
+         * (#86), the rest by `install_id`. `PublicInstallsTest` fails when a table that can hold the install is missing.
+         */
         val WITHDRAWAL_TABLES: List<String> = listOf(
             "trusted_envelopes", "health_daily", "token_sightings_v5", "cluster_sightings_v5", "ingest_ledger", "nonces", "installs",
         )
+
+        /** The content tables keyed by epoch tags instead of the install id (#86). */
+        val TAGGED_TABLES: Set<String> = TaggedTable.entries.map { it.table }.toSet()
 
         /** What "delete my data" erases (#79): every install-keyed table but the install row. */
         val DATA_TABLES: List<String> = WITHDRAWAL_TABLES - "installs"

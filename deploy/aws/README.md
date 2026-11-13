@@ -284,6 +284,8 @@ The server stores every word hash, and every value derived from one (a notificat
 
 **Never rotate it.** A new pepper is a new hash domain: every stored value would have to be rewritten under it, which needs its own migration plan, not a parameter change. Losing it exposes nothing, but the server then cannot start on that database or its backups: keep both copies. Restores use the current `.env`, so a dump taken after V7 restores only under the same pepper, and a dump taken before V7 is keyed by V7 during the restore's migration. Dumps taken before the V7 deployment still hold public hashes until they expire (14 days, plus 14 for S3 noncurrent versions).
 
+**Epoch keys (#86) need no new parameter.** The per-epoch pseudonym keys are random keys the server generates and stores in the database, wrapped under a key derived from this pepper; deploying the #86 image runs V8 on first start (one transaction, before HTTP opens) and needs no SSM, Terraform, renderer or host-script change. The pepper therefore also guards those keys: without it a restored dump's epoch keys cannot be opened and startup fails. Dumps taken before the V8 deployment still hold install ids beside content rows until they expire (14 days, plus 14 for S3 noncurrent versions); a deleted epoch key likewise survives in older dumps for that long ([Operator: epoch keys](../../docs/OPERATOR.md#epoch-keys)).
+
 ## 4. DNS and first start
 
 Create the DNS **A** record `census.dashbuddy.trotter.cloud` pointing to `terraform output -raw elastic_ip` (or use the configured `public_host`). Allow DNS to propagate so Caddy can complete ACME validation.

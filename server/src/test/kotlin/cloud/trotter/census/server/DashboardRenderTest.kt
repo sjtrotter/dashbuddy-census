@@ -104,7 +104,7 @@ class DashboardRenderTest {
         val health = obj("""{"fleet":[
             {"day":"2026-10-01","platform":"doordash","platformAppVersion":"8.0","installsReporting":1,"admitted":100,"unknown":0,"ruleCounts":{}},
             {"day":"2026-10-02","platform":"doordash","platformAppVersion":"8.10","installsReporting":2,"admitted":12480,"unknown":10,"ruleCounts":{"doordash.z":240,"doordash.a":1000}}],
-            "installs":[{"installIdPrefix":"abcd1234","day":"2026-10-02","platform":"doordash","version":"8.10","admitted":12480,"unknown":10,"trips":1}]}""")
+            "installs":[{"pseudonymPrefix":"abcd1234","day":"2026-10-02","platform":"doordash","version":"8.10","admitted":12480,"unknown":10,"trips":1}]}""")
         val installs = Json.parseToJsonElement("""[
             {"installIdPrefix":"abcd1234","createdDay":"2026-10-01","lastSeenDay":"2026-10-02","trusted":true,"revoked":false,"attested":true,"lastAppVersion":"1.2.3+abc1234"},
             {"installIdPrefix":"abcd1234","createdDay":"2026-10-01","lastSeenDay":"2026-10-01","trusted":false,"revoked":true,"attested":false}]""").jsonArray

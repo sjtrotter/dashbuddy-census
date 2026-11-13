@@ -106,7 +106,7 @@ class KeyedStorageTest : LifecycleTestDatabase() {
 
             // Equality survives keying: the same notification from a second install joins the same cluster.
             observe(db, install(), listOf(notification()))
-            assertEquals(2L, sql { it.select("SELECT count(DISTINCT install_id) FROM cluster_sightings_v5 WHERE fingerprint = ?", keyed) { r -> r.getLong(1) } })
+            assertEquals(2L, sql { it.select("SELECT count(DISTINCT install_tag) FROM cluster_sightings_v5 WHERE fingerprint = ?", keyed) { r -> r.getLong(1) } })
             assertEquals(2L, count("clusters"))
         }
     }

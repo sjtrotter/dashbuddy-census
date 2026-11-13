@@ -262,15 +262,17 @@ class PublicInstallsTest : LifecycleTestDatabase() {
         }
     }
 
-    @Test fun `every install-keyed table is in the erasure lists`() {
+    @Test fun `no content table carries an install id and every install-linked table is in the erasure lists`() {
         val keyed = sql { connection ->
             connection.select(
                 """SELECT string_agg(table_name, ',' ORDER BY table_name) FROM information_schema.columns
                     WHERE table_schema = current_schema() AND column_name = 'install_id'""",
             ) { it.getString(1) }!!.split(',').toSet()
         }
-        // The pre-V5 tables are empty and refused at startup if written; nothing new may join them silently.
-        assertEquals(InstallStore.WITHDRAWAL_TABLES.toSet(), keyed - setOf("token_sightings", "cluster_sightings"))
+        // #86: the install id stays only where the install itself is needed (authentication, quotas, the operator's own
+        // envelopes); every content table is keyed by epoch tags, and erasure reaches both kinds.
+        assertEquals(setOf("installs", "nonces", "ingest_ledger", "trusted_envelopes"), keyed)
+        assertEquals(InstallStore.WITHDRAWAL_TABLES.toSet(), keyed + InstallStore.TAGGED_TABLES)
         assertEquals(InstallStore.WITHDRAWAL_TABLES - "installs", InstallStore.DATA_TABLES)
     }
 
@@ -471,8 +473,7 @@ class PublicInstallsTest : LifecycleTestDatabase() {
         }
     }
 
-    private fun rowsFor(table: String, id: String): Long =
-        sql { it.select("SELECT count(*) FROM $table WHERE install_id = ?::uuid", id) { r -> r.getLong(1) }!! }
+    private fun rowsFor(table: String, id: String): Long = sql { it.installRows(table, UUID.fromString(id), day) }
 
     private fun tombstone(id: UUID): OffsetDateTime = sql {
         it.select("SELECT withdrawn_at FROM withdrawals WHERE install_id_hash = ?", InstallStore.installIdHash(id)) { r -> r.getObject(1, OffsetDateTime::class.java) }!!
