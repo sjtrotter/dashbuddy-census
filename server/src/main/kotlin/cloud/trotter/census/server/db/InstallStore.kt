@@ -142,16 +142,17 @@ class InstallStore(private val db: Database, private val clock: Clock) {
     }
 
     /**
-     * #86: revocation also deletes the install's live sightings. k counting used to drop a revoked install through a
+     * #86: revocation also deletes the install's stored sightings. k counting used to drop a revoked install through a
      * join on the installs table; the sightings no longer name it, so its evidence goes instead.
      */
     suspend fun revoke(installId: UUID, at: Instant): Boolean = query {
         val changed = update("UPDATE installs SET revoked_at = ? WHERE install_id = ?", at.atOffset(ZoneOffset.UTC), installId) == 1
-        if (changed) deleteSightings(liveKeys(), installId)
+        if (changed) deleteSightings(erasureKeys(), installId)
         changed
     }
 
-    private fun Connection.liveKeys() = with(EpochKeyStore) { liveKeys(db.keying, clock.today()) }
+    /** #86: erasure uses every stored key, expired ones included until the sweep destroys them. */
+    private fun Connection.erasureKeys() = with(EpochKeyStore) { storedKeys(db.keying) }
 
     suspend fun withdraw(installId: UUID, expectedCurrentKeyHash: String): MutationOutcome = query {
         // Lock the parent first: concurrent child inserts must finish before this lock or wait for deletion.
@@ -199,12 +200,13 @@ class InstallStore(private val db: Database, private val clock: Clock) {
      * The one per-install erasure. [keepInstallFrom] null = withdrawal: everything, the install row last. Non-null =
      * data deletion: the install row and the ledger rows from that day on stay ([deleteData]).
      *
-     * #86: the content tables are found through the install's epoch tags under the live keys. Rows under a destroyed
-     * key are not found and need not be: nobody can tie them to this install any more. [tagged] false skips them for
+     * #86: the content tables are found through the install's epoch tags under every stored key, an expired one the
+     * sweep has not yet destroyed included. Rows under a destroyed key are not found and need not be: nobody can tie
+     * them to this install any more. [tagged] false skips them for
      * an install inactive for a year ([purgeInactive]), which cannot have written a row under a live key.
      */
     private fun Connection.deleteInstallRows(installId: UUID, keepInstallFrom: LocalDate? = null, tagged: Boolean = true): Map<String, Int> {
-        val keys = if (tagged) liveKeys() else emptyList()
+        val keys = if (tagged) erasureKeys() else emptyList()
         return (if (keepInstallFrom == null) WITHDRAWAL_TABLES else DATA_TABLES).associateWith { table ->
             when (table) {
                 "ingest_ledger" -> if (keepInstallFrom == null) {

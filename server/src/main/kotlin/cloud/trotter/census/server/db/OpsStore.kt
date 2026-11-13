@@ -323,21 +323,22 @@ class OpsStore(private val db: Database, private val clock: Clock, private val p
         } }
     }
 
-    /** #86: the install's live sightings carry its trust, so they change with the installs row, under its lock. */
+    /** #86: the install's stored sightings carry its trust, so they change with the installs row, under its lock. */
     suspend fun trust(id: UUID, trusted: Boolean): Boolean = query {
         val changed = update("UPDATE installs SET trusted = ? WHERE install_id = ?", trusted, id) == 1
-        if (changed) markSightingsTrusted(liveKeys(), id, trusted)
+        if (changed) markSightingsTrusted(storedKeys(), id, trusted)
         changed
     }
 
-    /** #86: revocation deletes the install's live sightings, as [InstallStore.revoke] does. */
+    /** #86: revocation deletes the install's stored sightings, as [InstallStore.revoke] does. */
     suspend fun revoke(id: UUID): Boolean = query {
         val changed = update("UPDATE installs SET revoked_at = COALESCE(revoked_at, ?) WHERE install_id = ?", clock.now().atOffset(ZoneOffset.UTC), id) == 1
-        if (changed) deleteSightings(liveKeys(), id)
+        if (changed) deleteSightings(storedKeys(), id)
         changed
     }
 
-    private fun Connection.liveKeys() = with(EpochKeyStore) { liveKeys(db.keying, clock.today()) }
+    /** #86: every stored key, as erasure uses: an expired, not yet destroyed key's rows are still the install's. */
+    private fun Connection.storedKeys() = with(EpochKeyStore) { storedKeys(db.keying) }
 
     suspend fun health(days: Int = 7): JsonObject = query {
         val today = clock.today()

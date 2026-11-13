@@ -122,6 +122,25 @@ class EpochPseudonymTest : LifecycleTestDatabase() {
         }
     }
 
+    @Test fun `deletion after a boundary but before the sweep removes rows under a key that has expired but still exists`() = runBlocking {
+        Database.connect(config()).use { db ->
+            at(boundary)
+            val (id, other) = install(age = 40) to install(age = 40)
+            for (who in listOf(id, other)) { observe(db, who); report(db, who, day) }
+            val older = Epochs.of(boundary)
+            // Two boundaries later, no sweep has run and no new key was created: the older key is expired but stored.
+            at(Epochs.firstDay(older + 2).plusDays(1))
+            assertEquals(listOf(older), sql { it.storedKeys() }.map { it.epoch })
+            val before = dump()
+            val applied = InstallStore(db, clock).deleteData(id, key, day) as MutationOutcome.Applied
+            // #86 (Sol S4): erasure uses every stored key, so the install's rows under it go; the other install's stay.
+            assertEquals(listOf(1, 1, 1), listOf("token_sightings_v5", "cluster_sightings_v5", "health_daily").map { applied.deletedRows.getValue(it) })
+            val owned = owners(before, listOf(id, other))
+            assertEquals(before.filter { owned[it] == other }.toSet(), dump().toSet())
+            assertEquals(0L, sql { connection -> TaggedTable.entries.sumOf { connection.installRows(it.table, id, null) } })
+        }
+    }
+
     /** Re-inserts a dumped row with placeholder content, as a restore would bring it back. */
     private fun restore(connection: Connection, row: Row) {
         val day = Epochs.firstDay(row.epoch)

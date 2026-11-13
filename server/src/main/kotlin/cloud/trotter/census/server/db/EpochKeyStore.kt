@@ -21,8 +21,8 @@ import java.util.UUID
  */
 internal object EpochKeyStore {
     /**
-     * The keys that exist for the live epochs on [today], newest first. Never creates one: an epoch without a key has
-     * no rows. A key that does not open under the configured pepper fails closed ([cloud.trotter.census.server.EpochKeyUnwrapException]).
+     * The keys that exist for the live epochs on [today], newest first: what reads of an install's own recent rows
+     * use (the health alarms). Never creates one: an epoch without a key has no rows. Erasure uses [storedKeys]. A key that does not open under the configured pepper fails closed ([cloud.trotter.census.server.EpochKeyUnwrapException]).
      */
     fun Connection.liveKeys(keying: HashKeying, today: LocalDate): List<EpochKey> {
         val live = Epochs.live(today)
@@ -34,6 +34,19 @@ internal object EpochKeyStore {
             }
         }
     }
+
+    /**
+     * Every key still stored, newest first, expired or not: what erasure (withdrawal, data deletion, revocation, the
+     * restore replay) and trust changes use. Between an epoch boundary and the next successful sweep an expired key
+     * and its rows still exist and are still linkable, so they must still be found; only a key that is actually gone
+     * leaves rows nobody can tie to an install.
+     */
+    fun Connection.storedKeys(keying: HashKeying): List<EpochKey> =
+        prepareStatement("SELECT epoch, wrapped FROM epoch_keys ORDER BY epoch DESC").use { statement ->
+            statement.executeQuery().use { rows ->
+                buildList { while (rows.next()) add(EpochKey.unwrap(keying, rows.getInt(1), rows.getBytes(2))) }
+            }
+        }
 
     /**
      * The key rows of [epoch] are tagged under, created on first use. Refuses an epoch outside [Epochs.live]: a row is
@@ -126,8 +139,8 @@ internal enum class TaggedTable(val table: String, val purpose: TagPurpose, priv
 }
 
 /**
- * Runs [statement] once per chunk of [installId]'s tags in [table], for every live key; [bind] orders the parameters
- * from the epoch and the tag array. Returns the summed update counts.
+ * Runs [statement] once per chunk of [installId]'s tags in [table], for every key in [keys]; [bind] orders the
+ * parameters from the epoch and the tag array. Returns the summed update counts.
  */
 internal fun Connection.forInstallTags(
     keys: List<EpochKey>,
@@ -151,7 +164,7 @@ internal fun Connection.forInstallTags(
 }
 
 /**
- * Deletes [installId]'s token and cluster sightings in every live epoch (#86): withdrawal, data deletion and
+ * Deletes [installId]'s token and cluster sightings under every key in [keys] (#86): withdrawal, data deletion and
  * revocation. The caller holds the install row lock, so no new sighting of it can appear meanwhile.
  */
 internal fun Connection.deleteSightings(keys: List<EpochKey>, installId: UUID): Map<String, Int> =
@@ -160,7 +173,7 @@ internal fun Connection.deleteSightings(keys: List<EpochKey>, installId: UUID): 
             "DELETE FROM ${table.table} WHERE epoch = ? AND install_tag = ANY(?::bpchar[])")
     }
 
-/** Marks [installId]'s live sightings trusted or not, with the installs row in the same transaction (#86). */
+/** Marks [installId]'s sightings under [keys] trusted or not, with the installs row in the same transaction (#86). */
 internal fun Connection.markSightingsTrusted(keys: List<EpochKey>, installId: UUID, trusted: Boolean): Int =
     listOf(TaggedTable.TOKENS, TaggedTable.CLUSTERS).sumOf { table ->
         forInstallTags(keys, table, installId,
