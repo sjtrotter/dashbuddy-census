@@ -329,6 +329,55 @@ class PublicInstallsTest : LifecycleTestDatabase() {
         }
     }
 
+    @Test fun `the tombstone purge clears each marker together with its own tombstone`() = runBlocking {
+        Database.connect(config()).use { db ->
+            val store = InstallStore(db, clock)
+            val old = instant.minusSeconds(61 * 86_400L).atOffset(ZoneOffset.UTC)
+            sql { connection ->
+                // 1,000 tombstones of installs long gone, then 1,001 installs that still carry marker and tombstone.
+                connection.update("INSERT INTO withdrawals SELECT lpad(to_hex(n), 64, '0'), ? FROM generate_series(1, 1000) n", old)
+                connection.update(
+                    """INSERT INTO installs (install_id, key_hash, created_day, last_seen_day, erased_through)
+                        SELECT gen_random_uuid(), ?, ?, ?, ? FROM generate_series(1, 1001)""",
+                    key, day, day, old,
+                )
+                connection.update("INSERT INTO withdrawals SELECT encode(sha256(install_id::text::bytea), 'hex'), erased_through FROM installs")
+                // A restart after the first committed batch: the second batch's delete fails.
+                connection.update("CREATE SEQUENCE census_test_purge_batches")
+                connection.update(
+                    """CREATE FUNCTION census_test_stop_second_batch() RETURNS trigger LANGUAGE plpgsql AS
+                        'BEGIN IF nextval(''census_test_purge_batches'') > 1 THEN RAISE EXCEPTION ''interrupted''; END IF; RETURN NULL; END'""",
+                )
+                connection.update(
+                    """CREATE TRIGGER census_test_stop_second_batch AFTER DELETE ON withdrawals
+                        FOR EACH STATEMENT EXECUTE FUNCTION census_test_stop_second_batch()""",
+                )
+            }
+            val cutoff = instant.minusSeconds(60 * 86_400L)
+            try {
+                assertTrue(runCatching { store.purgeWithdrawals(cutoff) }.isFailure)
+                assertEquals(1001L, count("withdrawals"), "exactly the first batch committed")
+                // Sol S4: no install lost its marker while its tombstone survives (replay would erase it).
+                assertEquals(0L, sql { connection ->
+                    connection.select(
+                        """SELECT count(*) FROM installs i JOIN withdrawals w
+                            ON w.install_id_hash = encode(sha256(i.install_id::text::bytea), 'hex') WHERE i.erased_through IS NULL""",
+                    ) { it.getLong(1) }!!
+                })
+            } finally {
+                sql { connection ->
+                    connection.update("DROP TRIGGER census_test_stop_second_batch ON withdrawals")
+                    connection.update("DROP FUNCTION census_test_stop_second_batch()")
+                    connection.update("DROP SEQUENCE census_test_purge_batches")
+                }
+            }
+            assertEquals(1001, store.purgeWithdrawals(cutoff))
+            assertEquals(0L, count("withdrawals"))
+            assertEquals(0L, sql { it.select("SELECT count(*) FROM installs WHERE erased_through IS NOT NULL") { r -> r.getLong(1) }!! })
+            assertEquals(0, store.reapplyWithdrawals().matched)
+        }
+    }
+
     @Test fun `vocabulary provenance names no install`() = runBlocking {
         Database.connect(config()).use { db ->
             val ids = List(3) { install(trusted = true) }

@@ -272,16 +272,38 @@ class InstallStore(private val db: Database, private val clock: Clock) {
         }
     }
 
+    /**
+     * #79: the ordering marker on installs lives no longer than the tombstone it copies, and the two go together
+     * (Sol S4). Each batch picks one bounded set of expired tombstones, locks their install rows first (the lock order
+     * of withdrawal and deletion), then clears those markers and deletes those tombstones in the same transaction, so
+     * no restart can find a cleared marker beside a surviving tombstone and erase the install.
+     */
     suspend fun purgeWithdrawals(olderThan: Instant): Int = purge("withdrawals") {
-        // #79: the ordering marker on installs lives no longer than the tombstone it copies.
-        update(
-            "UPDATE installs SET erased_through = NULL WHERE install_id IN (SELECT install_id FROM installs WHERE erased_through <= ? LIMIT 1000)",
-            olderThan.atOffset(ZoneOffset.UTC),
-        )
-        update(
-            "DELETE FROM withdrawals WHERE ctid IN (SELECT ctid FROM withdrawals WHERE withdrawn_at <= ? LIMIT 1000)",
-            olderThan.atOffset(ZoneOffset.UTC),
-        )
+        val cutoff = olderThan.atOffset(ZoneOffset.UTC)
+        val hashes = prepareStatement(
+            "SELECT install_id_hash FROM withdrawals WHERE withdrawn_at <= ? ORDER BY install_id_hash LIMIT 1000",
+        ).use { statement ->
+            statement.setObject(1, cutoff)
+            statement.executeQuery().use { rows -> buildList { while (rows.next()) add(rows.getString(1)) } }
+        }
+        if (hashes.isEmpty()) return@purge 0
+        val batch = createArrayOf("text", hashes.toTypedArray())
+        try {
+            select(
+                """SELECT install_id FROM installs WHERE encode(sha256(install_id::text::bytea), 'hex') = ANY(?)
+                    ORDER BY install_id FOR UPDATE""",
+                batch,
+            ) { rows -> buildList { do { add(rows.getObject(1, UUID::class.java)) } while (rows.next()) } }
+            // Rechecked under the locks: an erasure that committed first moved both past the cutoff.
+            update(
+                """UPDATE installs SET erased_through = NULL
+                    WHERE encode(sha256(install_id::text::bytea), 'hex') = ANY(?) AND erased_through <= ?""",
+                batch, cutoff,
+            )
+            update("DELETE FROM withdrawals WHERE install_id_hash = ANY(?) AND withdrawn_at <= ?", batch, cutoff)
+        } finally {
+            batch.free()
+        }
     }
 
     suspend fun issueNonce(installId: UUID?): String = query {
