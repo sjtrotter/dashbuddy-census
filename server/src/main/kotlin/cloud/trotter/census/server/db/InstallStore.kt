@@ -158,9 +158,41 @@ class InstallStore(private val db: Database, private val clock: Clock) {
         MutationOutcome.Applied(deleteInstallRows(installId), withdrawnAt)
     }
 
-    private fun Connection.deleteInstallRows(installId: UUID): Map<String, Int> =
-        WITHDRAWAL_TABLES.associateWith { table ->
+    /**
+     * #79: "delete my data" without withdrawing. One transaction, parent locked first like [withdraw]: every row keyed
+     * to the install goes except the install row itself and today's ledger row, which keeps the daily quota and the
+     * batch ids (so a deletion cannot reset the quota, and a batch sent before it cannot be re-admitted as new). The
+     * tombstone is the withdrawal tombstone, so the off-host journal and restore replay carry it unchanged; the
+     * install copies its instant into `erased_through`, which tells replay this generation already applied it.
+     */
+    suspend fun deleteData(installId: UUID, expectedCurrentKeyHash: String, today: LocalDate): MutationOutcome = query {
+        val current = select("SELECT key_hash, revoked_at FROM installs WHERE install_id = ? FOR UPDATE", installId) { row ->
+            val active = row.getObject("revoked_at") == null
+            active && sameHash(row.getString("key_hash"), expectedCurrentKeyHash)
+        } ?: false
+        if (!current) return@query MutationOutcome.StaleCredential
+        val requestedAt = clock.now().truncatedTo(ChronoUnit.MICROS)
+        // GREATEST: a journal row merged with up to five minutes of host skew may already sit ahead of this clock.
+        val tombstone = select(
+            """INSERT INTO withdrawals (install_id_hash, withdrawn_at) VALUES (?, ?)
+                ON CONFLICT (install_id_hash) DO UPDATE SET withdrawn_at = GREATEST(withdrawals.withdrawn_at, EXCLUDED.withdrawn_at)
+                RETURNING withdrawn_at""",
+            installIdHash(installId), requestedAt.atOffset(ZoneOffset.UTC),
+        ) { it.getObject(1, java.time.OffsetDateTime::class.java) } ?: error("Missing tombstone")
+        update("UPDATE installs SET erased_through = ? WHERE install_id = ?", tombstone, installId)
+        MutationOutcome.Applied(deleteInstallRows(installId, keepInstallFrom = today), tombstone.toInstant())
+    }
+
+    /**
+     * The one per-install erasure. [keepInstallFrom] null = withdrawal: everything, the install row last. Non-null =
+     * data deletion: the install row and the ledger rows from that day on stay ([deleteData]).
+     */
+    private fun Connection.deleteInstallRows(installId: UUID, keepInstallFrom: LocalDate? = null): Map<String, Int> =
+        (if (keepInstallFrom == null) WITHDRAWAL_TABLES else DATA_TABLES).associateWith { table ->
             when (table) {
+                "ingest_ledger" -> if (keepInstallFrom == null) {
+                    update("DELETE FROM ingest_ledger WHERE install_id = ?", installId)
+                } else update("DELETE FROM ingest_ledger WHERE install_id = ? AND day < ?", installId, keepInstallFrom)
                 // Delete/lock envelopes before clusters, the same lock order as retention and draft saves.
                 "trusted_envelopes" -> deleteEnvelopesAndClearDrafts("DELETE FROM trusted_envelopes WHERE install_id = ? RETURNING id", installId)
                 "health_daily" -> deleteHealthAndRefold(installId)
@@ -450,9 +482,13 @@ class InstallStore(private val db: Database, private val clock: Clock) {
         fun installIdHash(installId: UUID): String =
             MessageDigest.getInstance("SHA-256").digest(installId.toString().toByteArray(Charsets.UTF_8)).toLowerHex()
 
+        /** Every table keyed by `install_id`, children first; `PublicInstallsTest` fails when a new one is missing (#79). */
         val WITHDRAWAL_TABLES: List<String> = listOf(
             "trusted_envelopes", "health_daily", "token_sightings_v5", "cluster_sightings_v5", "ingest_ledger", "nonces", "installs",
         )
+
+        /** What "delete my data" erases (#79): every install-keyed table but the install row. */
+        val DATA_TABLES: List<String> = WITHDRAWAL_TABLES - "installs"
     }
 }
 

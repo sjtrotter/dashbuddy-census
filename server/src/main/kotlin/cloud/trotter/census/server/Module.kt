@@ -163,7 +163,7 @@ fun Application.module(
 }
 
 private val LOGGABLE_PATHS = setOf(
-    "/healthz", "/readyz", "/v1/policy", "/v1/enroll", "/v1/rotate", "/v1/nonce", "/v1/installs/me", "/v1/me", "/v1/skeletons",
+    "/healthz", "/readyz", "/v1/policy", "/v1/enroll", "/v1/rotate", "/v1/nonce", "/v1/installs/me", "/v1/installs/me/data", "/v1/me", "/v1/skeletons",
     "/v1/envelopes", "/v1/health", "/ops",
 )
 
