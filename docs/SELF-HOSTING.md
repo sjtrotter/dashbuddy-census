@@ -4,7 +4,7 @@ The server supports signed ingestion and authenticated operator review. Notifica
 
 ## Public deployment
 
-Use a Linux host with Docker and Compose >= 2.24.4, public DNS, and inbound TCP 80/443. Follow the README's four commands. In `.env`, choose matching `POSTGRES_PASSWORD` and `DATABASE_PASSWORD`, fill `PUBLIC_HOST` and `ACME_EMAIL`, and set `OPERATOR_TOKEN_SHA256` to a 64-character hex digest. There are no default application secrets. The example `change-me` values are placeholders.
+Use a Linux host with Docker and Compose >= 2.24.4, public DNS, and inbound TCP 80/443. Follow the README's four commands. In `.env`, choose matching `POSTGRES_PASSWORD` and `DATABASE_PASSWORD`, fill `PUBLIC_HOST` and `ACME_EMAIL`, and set `OPERATOR_TOKEN_SHA256` to a 64-character hex digest and `CENSUS_HASH_PEPPER` as below. There are no default application secrets. The example `change-me` values are placeholders.
 
 To hash a token without placing its literal value in shell history, in Bash:
 
@@ -17,6 +17,16 @@ unset census_operator_token
 Store the token in a password manager, and copy only the digest into `.env`. Remove the empty `SERVER_VERSION=` line: `env_file` would otherwise override the image's version and make policy report `dev`. Set `IMAGE_DIGEST` separately if desired. Database credentials configure a new volume; changing `.env` alone does not rotate an existing PostgreSQL role's password.
 
 The stack uses an `edge` network for Caddy and census, allowing ACME egress, and an internal `db` network for census and Postgres. Postgres has no egress, and Caddy cannot reach it. Only Caddy publishes ports: 80/443 for the client API, and the operator listener on `OPS_BIND_IP:8443` (default `127.0.0.1`, so `/ops` is reachable only from the host — a loopback tunnel such as `ssh -L` or SSM port forwarding — or over a VPN address you set; the public site answers 404 for `/ops`, #1181). That listener uses Caddy's internal CA; trust its root certificate on the operator's device. Postgres and census have no published host ports. Caddy persists certificates, Postgres persists data, and census uses a read-only root with an ephemeral `/tmp`. Each service carries a memory limit sized for a 2 GiB host (census 704 MiB with the JVM bounded by `JAVA_TOOL_OPTIONS` to a 320 MiB heap, 96 MiB metaspace, 32 MiB direct memory counted for Netty too, a 48 MiB code cache, 512 KiB thread stacks and SerialGC, plus a 32 MiB `/tmp` tmpfs; Postgres 320 MiB with `shared_buffers=128MB`, `max_connections=20`, `work_mem=2MB`, `maintenance_work_mem=32MB`, `autovacuum_work_mem=16MB`; Caddy 96 MiB). A limit bounds ONE runaway service to its own cgroup; the limits sum to 1120 MiB so 715 MiB stays for the host, and the residual host-OOM risk is host, agent or transient use (a backup's aws-cli, a deploy's compose CLI) exceeding those 715 MiB — the 90 % memory alarm is the backstop (#1179). The per-service figures in the compose comments are estimates; the limits are the bounds. A HotSpot-raised heap/metaspace `OutOfMemoryError` exits census so Compose restarts it; a direct-buffer exhaustion degrades to failed requests. Raise the limits together with the host size; the JVM bounds must stay below the census limit. Configure host firewall and storage access accordingly. Access and runtime logs are discarded (ADR-0011). The edge image is upstream Caddy plus `caddy-ratelimit` (`deploy/caddy/Dockerfile`, published as `ghcr.io/sjtrotter/dashbuddy-census-caddy`, pinned in Compose by `CADDY_IMAGE_REF`): the public site admits at most 10 per minute and 20 per hour of `/v1/enroll`, and 200 `/v1` requests per minute, per client address, held ONLY in the plugin's memory — no access log, no retention, lost on restart (#1178). The operator listener is not per-IP limited: it is reachable only over the VPN from known peers and the application's own 60/minute operator bucket applies.
+
+### Hash pepper
+
+`CENSUS_HASH_PEPPER` is required: 64 hex digits (32 random bytes). The server stores every word hash, and every value derived from one, as `HMAC-SHA256(pepper, value)` (#85), so a stolen database or backup cannot be matched against a guess list. Generate it once into the empty `CENSUS_HASH_PEPPER=` line of `.env` (the value never appears in shell history), then copy it into a password manager, as you would the TOTP seed:
+
+```bash
+sed -i "s/^CENSUS_HASH_PEPPER=\$/CENSUS_HASH_PEPPER=$(openssl rand -hex 32)/" .env
+```
+
+It never enters the database, backups or logs. Startup refuses a missing or malformed pepper, and refuses a pepper other than the one the database was first keyed under. Never change it: a new pepper is a new hash domain and needs a migration plan. A restore runs with the current `.env`, so keep the pepper with your backups' recovery material; without it, a dump cannot be brought back up.
 
 ## Verify and pin a release
 

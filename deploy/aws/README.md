@@ -63,7 +63,7 @@ This stops the old instance before detaching the data volume and re-attaches it 
 
 ## 3. Set parameters and resume startup
 
-The three SecureStrings use the AWS-managed `aws/ssm` key; the instance has scoped SSM reads and `kms:Decrypt` only on that key ARN, resolved through `alias/aws/ssm`, with no customer KMS key or broad KMS grant. Terraform creates placeholders and ignores later value changes. ACME email is an operator-owned String; `public_host` is a String continuously managed from `var.public_host`, and `alerts_topic_arn` is a String managed from the existing SNS topic. The optional TOTP secret is provisioned below.
+The four SecureStrings use the AWS-managed `aws/ssm` key; the instance has scoped SSM reads and `kms:Decrypt` only on that key ARN, resolved through `alias/aws/ssm`, with no customer KMS key or broad KMS grant. Terraform creates placeholders and ignores later value changes. ACME email is an operator-owned String; `public_host` is a String continuously managed from `var.public_host`, and `alerts_topic_arn` is a String managed from the existing SNS topic. The optional TOTP secret and the required hash pepper are provisioned below.
 
 Run on the workstation (adjust the prefix if customized; disable shell tracing):
 
@@ -86,7 +86,7 @@ aws ssm put-parameter --name /dashbuddy-census/operator_token_sha256 \
 unset OPERATOR_TOKEN TOKEN_SHA256
 ```
 
-The host writes a root-owned 0600 `.env` atomically, never logs secret values, and refuses missing/placeholder **required** parameters (`public_host`, `acme_email`, `postgres_password`, `operator_token_sha256`). Database passwords must use the documented base64 format (letters, digits, `+ / = _ -`); token hashes must have 64 hex digits. `POSTGRES_PASSWORD` and `DATABASE_PASSWORD` get the same value. Changing the SSM database password does not rotate an existing PostgreSQL role: coordinate the database password change before recreating containers.
+The host writes a root-owned 0600 `.env` atomically, never logs secret values, and refuses missing/placeholder **required** parameters (`public_host`, `acme_email`, `postgres_password`, `operator_token_sha256`, `census_hash_pepper`). Database passwords must use the documented base64 format (letters, digits, `+ / = _ -`); token hashes and the pepper must have 64 hex digits. `POSTGRES_PASSWORD` and `DATABASE_PASSWORD` get the same value. Changing the SSM database password does not rotate an existing PostgreSQL role: coordinate the database password change before recreating containers.
 
 ## Operator second factor + alarm delivery
 
@@ -123,7 +123,7 @@ The host writes a root-owned 0600 `.env` atomically, never logs secret values, a
 
    This adds the `operator_totp_secret` SecureString placeholder, the instance role's `sns:Publish` grant scoped to `aws_sns_topic.alerts.arn`, and the Terraform-managed `alerts_topic_arn` String. The existing SSM read resource `/dashbuddy-census/*` covers both names. Now run the workstation `put-parameter` above; never put the real TOTP secret in Terraform configuration. Confirm the existing SNS email subscription. Deploy the S6b app image through the usual image workflow before restarting below.
 
-   The renderer omits `OPERATOR_TOTP_SECRET` or `ALERTS_TOPIC_ARN` when its optional parameter is missing, empty, or `CHANGE-ME`; startup continues. Present values must match `^[A-Z2-7]{16,64}$` and `^arn:aws:sns:[a-z0-9-]+:[0-9]{12}:[A-Za-z0-9_-]{1,256}$` respectively. Invalid formats refuse rendering without printing values; the app also validates canonical base32. An omitted TOTP secret leaves authenticated mutations at `503 totp_unconfigured`; an omitted topic makes the host publisher exit silently; the app still logs and keeps its bounded spool. The four required parameters and their refusal are unchanged.
+   The renderer omits `OPERATOR_TOTP_SECRET` or `ALERTS_TOPIC_ARN` when its optional parameter is missing, empty, or `CHANGE-ME`; startup continues. Present values must match `^[A-Z2-7]{16,64}$` and `^arn:aws:sns:[a-z0-9-]+:[0-9]{12}:[A-Za-z0-9_-]{1,256}$` respectively. Invalid formats refuse rendering without printing values; the app also validates canonical base32. An omitted TOTP secret leaves authenticated mutations at `503 totp_unconfigured`; an omitted topic makes the host publisher exit silently; the app still logs and keeps its bounded spool. The required parameters and their refusal are unchanged by this step; #85 later added `census_hash_pepper` to them (next section).
 
 3. **Existing host:** its cloud-init is frozen by `ignore_changes`, so applying the template edit does **not** update the host scripts or units. Run this one-time SSM command from the workstation's reviewed checkout in `deploy/aws` (first written for S6b; since #1181 it also installs the WireGuard configure script and package and refreshes the Caddyfile, so it is the command for every host-script/Caddy change). It installs the exact optional-parameter renderer, startup script, census service, and alarm publisher script plus its service/path/timer units from the template, with root ownership and 0700 scripts. Set `CENSUS_NAME_PREFIX` and `CENSUS_IMAGE_REF` to this deployment's non-secret template settings, and `CENSUS_COMPOSE_REF` to the reviewed branch/tag containing these fixes. Bootstrap originally cloned the repository to `/opt/census-src` and copied Compose into `/opt/census`; neither `census-start` nor the image deploy workflow refreshes those files. This command holds the deployment lock, fetches the reviewed Compose file, preserves the selected census image and existing volume bindings, creates the alarms directory owned by uid/gid 10001, initializes the root-owned 0600 budget state outside the spool (preserving any existing budget) and root-owned `/root/.aws`, and writes the alarm volume bind into the Compose override. It enables the publisher path/timer and restarts `census.service`.
 
@@ -259,6 +259,30 @@ The root Python publisher treats the spool as hostile: it opens entries relative
 Each AWS CLI publish has a 20-second timeout; success deletes the entry, failure retains it. The hardened service has a five-minute timeout, a read-only system except the spool, budget state and root AWS cache, private temporary storage and no new privileges. It journals only `census-alarm-publish: published=<n> failed=<n> rejected=<n> deferred=<n>` plus one `census-alarm-publish: budget exhausted, deferred=<n>` when needed, never names, bodies, exception text or AWS output. Missing topic configuration exits silently. Inspect `journalctl -u census-alarm-publish.service`; the path unit watches directory changes and the timer retries every five minutes.
 
 The subject is `census alarm: <kind>`; the body has exactly five lines: `kind=...`, `platform=...`, `version=...`, `install_prefix=...`, `rule_ids=...`. The host accepts `[redacted]` only for platform/version; the prefix must be eight lowercase hex characters or `-` (the server sends `-` only since #79), and rule IDs must match the wire grammar. Neither the application message nor its logs contain a topic ARN/account ID, full install ID, secret, token, TOTP code, payload string, or exception message. AWS's own email envelope/unsubscribe links are outside the application message. Spool overflow or write failure may lose the email copy, and a successful publish followed by a host crash before deletion can cause a duplicate. Counts of raised alarms refer to local delivery, not confirmed email delivery.
+
+## Hash pepper (#85)
+
+The server stores every word hash, and every value derived from one (a notification's fingerprint), as `HMAC-SHA256(pepper, value)`, so a stolen database or backup cannot be matched against a guess list. The pepper is the SecureString `/dashbuddy-census/census_hash_pepper`: 64 hex digits (32 random bytes). It is **required**: the renderer refuses startup without it, and the app refuses to start without it or with a pepper other than the one its database was keyed under (`HashPepperMismatchException` in `journalctl -u census`). It never enters the database, a backup, Terraform configuration or a log line.
+
+1. Generate it **once**, locally, with shell tracing disabled, and keep it exactly like the TOTP seed: in the password manager and in `~/dashbuddy/secrets/census-hash-pepper` (mode 0600).
+
+   ```sh
+   umask 077
+   mkdir -p ~/dashbuddy/secrets
+   (set -C; openssl rand -hex 32 > ~/dashbuddy/secrets/census-hash-pepper)
+   chmod 0600 ~/dashbuddy/secrets/census-hash-pepper
+   ```
+
+2. `terraform apply` from `deploy/aws` creates the `census_hash_pepper` placeholder (the existing `/dashbuddy-census/*` read grant covers it). Then store the retained value:
+
+   ```sh
+   aws ssm put-parameter --name /dashbuddy-census/census_hash_pepper \
+     --type SecureString --value "$(cat ~/dashbuddy/secrets/census-hash-pepper)" --overwrite
+   ```
+
+3. **Existing host:** its frozen renderer does not know the new parameter, so the `.env` it writes lacks `CENSUS_HASH_PEPPER` and the #85 image refuses to start. Before deploying that image, run the host-script refresh command from [Operator second factor + alarm delivery](#operator-second-factor--alarm-delivery) step 3 with `CENSUS_COMPOSE_REF` set to a reviewed ref containing #85; it installs the renderer that requires and renders the pepper and restarts `census.service`. Then deploy the image as usual. Its first start runs V7, which rewrites the stored hashes under the pepper in one transaction before HTTP opens.
+
+**Never rotate it.** A new pepper is a new hash domain: every stored value would have to be rewritten under it, which needs its own migration plan, not a parameter change. Losing it exposes nothing, but the server then cannot start on that database or its backups: keep both copies. Restores use the current `.env`, so a dump taken after V7 restores only under the same pepper, and a dump taken before V7 is keyed by V7 during the restore's migration. Dumps taken before the V7 deployment still hold public hashes until they expire (14 days, plus 14 for S3 noncurrent versions).
 
 ## 4. DNS and first start
 

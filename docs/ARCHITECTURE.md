@@ -16,7 +16,7 @@ AWS wrapper: account budgets + automatic EC2 stop; daily cost anomalies;
              multi-region CloudTrail management events --> S3 (14 days)
 ```
 
-Census validates environment configuration, migrates through V6, replays withdrawals, applies the monotonic filter floor, and drains startup lifecycle work before accepting HTTP. The five-connection Hikari pool is registered with Exposed. Migration, recovery or lifecycle failure aborts startup. Readiness runs a bounded `SELECT 1`; liveness does not check the database. Signed, budgeted ingestion and authenticated operator review share the same effective policy.
+Census validates environment configuration (including the required hash pepper), migrates through V7 and checks the pepper against the database's, replays withdrawals, applies the monotonic filter floor, and drains startup lifecycle work before accepting HTTP. The five-connection Hikari pool is registered with Exposed. Migration, recovery or lifecycle failure aborts startup. Readiness runs a bounded `SELECT 1`; liveness does not check the database. Signed, budgeted ingestion and authenticated operator review share the same effective policy.
 
 ## Contract seam
 
@@ -25,6 +25,8 @@ Census validates environment configuration, migrates through V6, replays withdra
 ## Storage and deployment boundary
 
 V5 adds three attributable replacement tables and one policy-only floor table, retaining empty legacy tables. Tokens and vocabulary partition by `(hash_domain, filter_rev, token_hash)`; token evidence additionally keys by install. Cluster sightings carry exact domain/revision and observation day. Sample caps remain five per fingerprint/app-version and one per receipt day across revisions. Validated observation days, clamped to receipt day for the one-day future tolerance, govern evidence age; retries and backfills do not refresh it. V1–V4 and their checksums are unchanged.
+
+V7 (#85) is a Flyway Java migration, the one migration that is not SQL, because it needs the pepper and the pepper never enters SQL or the database. It rewrites every stored word hash (`token_hash` in the token and vocabulary tables, every slot `h` in `cluster_samples`) to `HMAC-SHA256(pepper, label + hash)` cut to the census width, re-keys notification fingerprints (full width) in `clusters` and in every column a foreign key points from (found from the catalog) and inside the stored notification samples, and records the pepper's HMAC check value in `hash_keying`. Flyway runs it in one transaction with its history row: an interruption rolls it all back and the next start reruns it, and once committed it never runs again. `Database.flyway` is the one migration set; a Flyway built without V7 stops at V6. Ingest applies the same keying before any write (`HashKeying.atRest`), so a migrated row equals what ingest stores for the same item. Screen fingerprints cover class and id only and stay public. Equality is preserved, so every join, k count and cross-version comparison is unchanged. A legacy (pre-V5, null-provenance) notification sample can no longer be re-verified against its keyed fingerprint, so the V5 cutover removes it instead of scrubbing it.
 
 Configuration is injected, stdout carries logs, and PostgreSQL holds durable state. The runtime is non-root, drops capabilities in Compose, and writes only under `/tmp`. Flyway coordination handles concurrent migration attempts, but operators must still review backward compatibility for rolling deployments.
 

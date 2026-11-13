@@ -207,7 +207,7 @@ write_files:
       import tempfile
 
       prefix = '/${name_prefix}/'
-      names = ['public_host', 'acme_email', 'postgres_password', 'operator_token_sha256']
+      names = ['public_host', 'acme_email', 'postgres_password', 'operator_token_sha256', 'census_hash_pepper']
       optional = {
           'operator_totp_secret': ('OPERATOR_TOTP_SECRET', r'^[A-Z2-7]{16,64}$'),
           'census_notifications_enabled': ('CENSUS_NOTIFICATIONS_ENABLED', r'^(true|false)$'),
@@ -228,9 +228,10 @@ write_files:
           'acme_email': r'[A-Za-z0-9.!#$%&*+/=?^_`{|}~@-]+',
           'postgres_password': r'[A-Za-z0-9+/=_-]+',
           'operator_token_sha256': r'[a-fA-F0-9]{64}',
+          'census_hash_pepper': r'[a-fA-F0-9]{64}',
       }
       if any(not re.fullmatch(pattern, values[name]) for name, pattern in checks.items()):
-          raise SystemExit('CENSUS: invalid parameter format; use a base64 database password and a 64-digit token SHA-256.')
+          raise SystemExit('CENSUS: invalid parameter format; use a base64 database password, a 64-digit token SHA-256 and a 64-digit hash pepper.')
       image = '${image_ref}'
       tag = image.rsplit(':', 1)[1] if '@' not in image else 'latest'
       env = {
@@ -241,6 +242,8 @@ write_files:
           'DATABASE_URL': 'jdbc:postgresql://postgres:5432/census',
           'DATABASE_USER': 'census',
           'OPERATOR_TOKEN_SHA256': values['operator_token_sha256'],
+          # #85: the pepper stored word hashes are keyed under; the app refuses to start without it.
+          'CENSUS_HASH_PEPPER': values['census_hash_pepper'],
           'CENSUS_IMAGE_TAG': tag,
           'CENSUS_NOTIFICATIONS_ENABLED': 'false',
           'CENSUS_MIN_FILTER_REV': '1',
