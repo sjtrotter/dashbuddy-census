@@ -414,25 +414,37 @@ class OpsStore(private val db: Database, private val clock: Clock, private val p
     } }
 
     /**
-     * The token's sighting rows are share-locked first, so a concurrent withdrawal, revocation or trust change (which
-     * update or delete those rows under the install lock) either committed before or waits for this promotion (#86:
-     * the rows no longer name their installs, so they are locked instead of the installs). The insertion re-counts
-     * from a fresh snapshot.
+     * Promotion counts exactly the cohort it locked (#86, Sol S5). The token's sighting rows are share-locked first, so
+     * a withdrawal, revocation or trust change (which delete or update those rows under the install lock) either
+     * committed before or waits for this promotion; and the eligibility query is restricted to those locked
+     * `(epoch, install_tag)` rows, so a sighting inserted after the lock never adds to the count. The sweep later drops
+     * an entry whose evidence fell below k.
      */
     suspend fun resolve(tokenHash: String, clearText: String?, source: String, reject: Boolean,
         hashDomain: Int = 1, filterRev: Int = policy.minimumFilterRev): Boolean = query {
-        select("""SELECT count(*) FROM (SELECT 1 FROM token_sightings_v5 WHERE token_hash=? AND hash_domain=? AND filter_rev=?
-            ORDER BY epoch, install_tag FOR SHARE) locked""", tokenHash, hashDomain, filterRev) { it.getLong(1) }
+        val cohort = select("""SELECT epoch, install_tag FROM token_sightings_v5 WHERE token_hash=? AND hash_domain=? AND filter_rev=?
+            ORDER BY epoch, install_tag FOR SHARE""", tokenHash, hashDomain, filterRev) { rows ->
+            buildList { do { add("${rows.getInt(1)}:${rows.getString(2)}") } while (rows.next()) }
+        } ?: emptyList()
+        afterResolveLock?.invoke()
         val today = clock.today()
-        update(
-            """INSERT INTO vocabulary_v5 (token_hash, kind, distinct_installs_at_promotion, promoted_day, clear_text, unblinded_day, source, status, hash_domain, filter_rev)
-                SELECT token_hash, kind, installs, ?, ?, ?, ?, ?, hash_domain, filter_rev FROM ($queueSql) queue
-                WHERE token_hash = ? AND hash_domain=? AND filter_rev=?
-                ON CONFLICT (hash_domain, token_hash, filter_rev) DO NOTHING""",
-            today, if (reject) null else clearText, if (reject) null else today, source,
-            if (reject) "rejected" else "unblinded", *queueArgs(), tokenHash, hashDomain, filterRev,
-        ) == 1
+        val locked = createArrayOf("text", cohort.toTypedArray())
+        try {
+            update(
+                """INSERT INTO vocabulary_v5 (token_hash, kind, distinct_installs_at_promotion, promoted_day, clear_text, unblinded_day, source, status, hash_domain, filter_rev)
+                    SELECT token_hash, kind, installs, ?, ?, ?, ?, ?, hash_domain, filter_rev FROM (${VocabularyEligibility.queue(policy, cohort = true)}) queue
+                    WHERE token_hash = ? AND hash_domain=? AND filter_rev=?
+                    ON CONFLICT (hash_domain, token_hash, filter_rev) DO NOTHING""",
+                today, if (reject) null else clearText, if (reject) null else today, source,
+                if (reject) "rejected" else "unblinded", *queueArgs(), locked, tokenHash, hashDomain, filterRev,
+            ) == 1
+        } finally {
+            locked.free()
+        }
     }
+
+    /** Test seam: runs inside [resolve]'s transaction after the cohort is locked and before it is counted. */
+    internal var afterResolveLock: (() -> Unit)? = null
 
     private fun Connection.array(sql: String, vararg args: Any?, read: (ResultSet) -> JsonObject): JsonArray =
         JsonArray(select(sql, *args) { rows -> buildList { do { add(read(rows)) } while (rows.next()) } } ?: emptyList())

@@ -6,6 +6,9 @@ import kotlinx.serialization.json.*
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
 import java.time.ZoneOffset
+import java.util.concurrent.Executors
+import java.util.concurrent.Future
+import java.util.concurrent.TimeUnit
 
 class VocabularyEligibilityTest : LifecycleTestDatabase() {
     /** #85: the fixtures' word hash as stored, keyed under the test pepper; the queue and resolve speak this value. */
@@ -67,6 +70,51 @@ class VocabularyEligibilityTest : LifecycleTestDatabase() {
             assertEquals(0,ops.vocabularyQueueCount())
             LifecycleStore(db,clock,policy).runOnce()
             assertEquals(0,count("vocabulary_v5"))
+        }
+    }
+
+    @Test fun `a sighting stored after promotion locks its cohort is not counted`() = runBlocking {
+        Database.connect(config()).use { db ->
+            val ids = List(9) { install() }; for (id in ids) observe(db, id)
+            val tenth = install()
+            val ops = OpsStore(db, clock, policy)
+            // #86 (Sol S5): the tenth install's sighting commits between the lock and the count.
+            ops.afterResolveLock = { runBlocking { observe(db, tenth) } }
+            assertFalse(ops.resolve(storedToken, "reviewed", "corpus", false))
+            ops.afterResolveLock = null
+            assertEquals(0, count("vocabulary_v5"))
+            assertEquals(1, ops.vocabularyQueueCount())
+            assertTrue(ops.resolve(storedToken, "reviewed", "corpus", false))
+        }
+    }
+
+    @Test fun `a withdrawal of a counted install waits for the promotion that counted it`() = runBlocking {
+        Database.connect(config()).use { db ->
+            val ids = List(10) { install() }; for (id in ids) observe(db, id)
+            val ops = OpsStore(db, clock, policy)
+            val executor = Executors.newSingleThreadExecutor()
+            try {
+                var withdrawal: Future<MutationOutcome>? = null
+                ops.afterResolveLock = {
+                    withdrawal = executor.submit<MutationOutcome> { runBlocking { InstallStore(db, clock).withdraw(ids.last(), key) } }
+                    // The withdrawal reaches the locked sighting rows and waits there.
+                    val deadline = System.nanoTime() + 30_000_000_000L
+                    while (sql { it.select("""SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock'
+                            AND query LIKE 'DELETE FROM token_sightings_v5%'""") { r -> r.getInt(1) }!! } == 0) {
+                        check(System.nanoTime() < deadline) { "withdrawal never waited on the cohort lock" }
+                        Thread.sleep(10)
+                    }
+                }
+                assertTrue(ops.resolve(storedToken, "reviewed", "corpus", false))
+                ops.afterResolveLock = null
+                assertTrue(withdrawal!!.get(30, TimeUnit.SECONDS) is MutationOutcome.Applied)
+                assertEquals(10, sql { it.select("SELECT distinct_installs_at_promotion FROM vocabulary_v5") { r -> r.getInt(1) } })
+                // Nine remain: the sweep removes the entry whose evidence fell below k.
+                assertEquals(0, ops.vocabularyQueueCount())
+                assertEquals(1, LifecycleStore(db, clock, policy).runOnce().getValue("vocabulary").deleted)
+            } finally {
+                executor.shutdownNow()
+            }
         }
     }
 }

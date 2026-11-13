@@ -11,7 +11,11 @@ import java.time.LocalDate
  * an install seen in two epochs carries two unrelated tags, so adding epochs together could count it twice.
  */
 object VocabularyEligibility {
-    fun evidence(policy: Policy): String = """SELECT hash_domain, filter_rev, token_hash, min(kind) AS kind,
+    /**
+     * [cohort] true adds one parameter after [args]: a text array of `epoch:install_tag` the count is restricted to
+     * (the promotion's locked rows, [OpsStore.resolve]).
+     */
+    fun evidence(policy: Policy, cohort: Boolean = false): String = """SELECT hash_domain, filter_rev, token_hash, min(kind) AS kind,
         max(installs) AS installs, min(first_day) AS first_day, max(last_day) AS last_day FROM (
             SELECT t.hash_domain, t.filter_rev, t.token_hash, t.epoch, min(t.kind) AS kind,
             count(DISTINCT t.install_tag) AS installs, min(t.first_day) AS first_day, max(t.last_day) AS last_day
@@ -19,10 +23,11 @@ object VocabularyEligibility {
             WHERE NOT t.trusted AND (t.counts_from IS NULL OR t.counts_from <= ?)
             AND t.last_day + 30 > ? AND t.hash_domain IN (${policy.acceptedHashDomains.joinToString(",")})
             AND t.filter_rev >= ${policy.minimumFilterRev}
+            ${if (cohort) "AND (t.epoch::text || ':' || t.install_tag) = ANY(?::text[])" else ""}
             GROUP BY t.hash_domain, t.filter_rev, t.token_hash, t.epoch
         ) per_epoch GROUP BY hash_domain, filter_rev, token_hash"""
 
-    fun queue(policy: Policy): String = """SELECT q.* FROM (${evidence(policy)}) q
+    fun queue(policy: Policy, cohort: Boolean = false): String = """SELECT q.* FROM (${evidence(policy, cohort)}) q
         WHERE q.installs >= ${policy.k} AND NOT EXISTS (SELECT 1 FROM vocabulary_v5 v
         WHERE v.hash_domain=q.hash_domain AND v.filter_rev=q.filter_rev AND v.token_hash=q.token_hash)"""
 
