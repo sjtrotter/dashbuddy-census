@@ -272,7 +272,7 @@ characters and the optional resolved rule must match the wire rule-ID grammar. S
 to false to remove trust. Successful mutations return 204; missing target rows return 404.
 Revocation is idempotent and immediately blocks the install's signed requests.
 
-Vocabulary source is `trusted:<eight-hex-prefix>`, `corpus`, or `rule_anchor`. Clear text is at
+Vocabulary source is `trusted`, `corpus`, or `rule_anchor` (#79: provenance names no install; V6 rewrote older `trusted:<prefix>` rows and a CHECK refuses that form). Clear text is at
 most 128 characters. Resolution proves `CensusHash.of(clearText) == tokenHash`; mismatch returns
 422 `hash_mismatch`. Rejection stores NULL clear text. Resolution requires current non-trusted
 k eligibility within the supplied `hashDomain` and `filterRev` (both default 1 for older callers), seven elapsed days of quarantine and unexpired per-install evidence. It never overwrites an existing row. Sweeps remove ineligible queued/unblinded entries and expired rejected entries. `shipped` export remains M4/#641.

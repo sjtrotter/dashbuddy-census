@@ -175,7 +175,7 @@ fun Route.opsRoutes(
             post("/vocabulary/resolve") {
                 val request = call.opsBody<ResolveRequest>() ?: return@post
                 if (request.hashDomain !in policy.acceptedHashDomains || request.filterRev < policy.minimumFilterRev || !CensusHash.isWellFormed(request.tokenHash) || request.clearText != null && request.clearText.length > 128 ||
-                    !Regex("trusted:[0-9a-f]{8}|corpus|rule_anchor").matches(request.source) || !request.reject && request.clearText == null
+                    !Regex("trusted|corpus|rule_anchor").matches(request.source) || !request.reject && request.clearText == null
                 ) badRequest()
                 if (request.clearText != null && CensusHash.of(request.clearText) != request.tokenHash) {
                     call.respond(HttpStatusCode.UnprocessableEntity, ErrorResponse("hash_mismatch"))

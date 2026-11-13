@@ -24,3 +24,9 @@ CREATE TABLE ingest_pause (
     paused boolean NOT NULL,
     changed_day date NOT NULL
 );
+
+-- Vocabulary provenance names no install (Sol S2): `trusted:<install prefix>` becomes plain `trusted`, and the
+-- prefix form is refused from now on, so a reviewed token never keeps a link to the install that showed it.
+UPDATE vocabulary_v5 SET source = 'trusted' WHERE source LIKE 'trusted:%';
+UPDATE vocabulary SET source = 'trusted' WHERE source LIKE 'trusted:%';
+ALTER TABLE vocabulary_v5 ADD CONSTRAINT vocabulary_v5_source_unlinked CHECK (source IS NULL OR source NOT LIKE 'trusted:%');

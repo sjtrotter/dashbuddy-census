@@ -306,6 +306,38 @@ class PublicInstallsTest : LifecycleTestDatabase() {
         }
     }
 
+    @Test fun `vocabulary provenance names no install`() = runBlocking {
+        Database.connect(config()).use { db ->
+            val ids = List(3) { install(trusted = true) }
+            testApplication {
+                application { module(opsConfig(), db, clock, policy = Policy()) }
+                val prefix = ids.first().toString().take(8)
+                fun resolve(source: String) = """{"tokenHash":"0123456789abcdef","clearText":null,"source":"$source","reject":true}"""
+                // Plain `trusted` passes validation (and finds nothing to resolve); the prefix form is refused.
+                assertError(client.ops("/ops/vocabulary/resolve", resolve("trusted"), code = nextCode()), 404, "not_found")
+                assertError(client.ops("/ops/vocabulary/resolve", resolve("trusted:$prefix"), code = nextCode()), 400, "bad_request")
+            }
+            val insert = """INSERT INTO vocabulary_v5 (token_hash, kind, distinct_installs_at_promotion, promoted_day, source, status, hash_domain, filter_rev)
+                VALUES ('0123456789abcdef', 'words:1', 10, ?, ?, 'rejected', 1, 1)"""
+            assertTrue(runCatching { sql { it.update(insert, day, "trusted:" + ids.first().toString().take(8)) } }.isFailure)
+            sql { it.update(insert, day, "trusted") }
+            // Guard: no text column in the schema holds any install's ID prefix.
+            val columns = sql { connection ->
+                connection.prepareStatement(
+                    """SELECT table_name, column_name FROM information_schema.columns WHERE table_schema = current_schema()
+                        AND data_type IN ('text', 'character', 'character varying', 'jsonb')""",
+                ).use { statement ->
+                    statement.executeQuery().use { rows -> buildList { while (rows.next()) add(rows.getString(1) to rows.getString(2)) } }
+                }
+            }
+            assertTrue(columns.any { it == ("vocabulary_v5" to "source") })
+            for ((table, column) in columns) for (id in ids) {
+                val hits = sql { it.select("SELECT count(*) FROM \"$table\" WHERE \"$column\"::text LIKE ?", "%${id.toString().take(8)}%") { r -> r.getLong(1) }!! }
+                assertEquals(0L, hits, "$table.$column holds an install prefix")
+            }
+        }
+    }
+
     private fun nextCode(): String {
         instant = instant.plusSeconds(30)
         return Totp.code(totpSecret, instant.epochSecond)
