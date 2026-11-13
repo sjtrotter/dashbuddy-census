@@ -15,7 +15,6 @@ Public health/policy, identity, ingest and operator routes are implemented. Noti
 | GET | `/v1/me` | Implemented | Day-level identity and remaining budgets |
 | POST | `/v1/skeletons` | Implemented | Admit skeleton batches under the advertised policy |
 | POST | `/v1/health` | Implemented | Daily recognition-health reports |
-| POST | `/v1/slot-classes` | Implemented | Each slot's class for a cluster variant, for the contributor review screen (#80) |
 | GET, POST | `/ops/pause` | Implemented | Read or set the upload pause switch (operator; POST needs TOTP) |
 | GET | `/ops/` | Implemented | Authenticated operator dashboard |
 
@@ -46,16 +45,7 @@ Public health/policy, identity, ingest and operator routes are implemented. Noti
         "backupsDays": 14,
         "withdrawalsDays": 60
     },
-    "hashDomain": "census.v1",
-    "slotConstancy": {
-        "withheldPercent": 10,
-        "shapePercent": 51,
-        "constantPercent": 90,
-        "regionalMinInstalls": 3,
-        "regionalMinValues": 2,
-        "regionalPercent": 50,
-        "maxSlotsPerSkeleton": 1024
-    }
+    "hashDomain": "census.v1"
 }
 ```
 
@@ -118,21 +108,15 @@ Each text slot of a cluster gets a class, judged across installs (ADR-0011 §14)
 | `shape` | At least `shapePercent` (51%) of the installs saw a value format (#78). Never vocabulary. |
 | `unknown` | Fewer than k installs saw the slot, or one hash covers the share for `constant` but on fewer than k installs. |
 
-Support is counted per cluster variant (app version, hash domain, filter revision, raw layout) and slot, within one epoch (#86): the distinct epoch tags of non-trusted, out-of-quarantine rows. Of the live epochs, a slot is judged on the one where the most installs saw it; epochs are never added together. The thresholds are in `Policy.slotConstancy`, published under `/v1/policy`.
+Support is counted per cluster variant (app version, hash domain, filter revision, raw layout) and slot, within one epoch (#86): the distinct epoch tags of non-trusted, out-of-quarantine rows. Of the live epochs, a slot is judged on the one where the most installs saw it; epochs are never added together. The thresholds are in `Policy.slotConstancy`.
 
-The counts come from `slot_sightings` (V9), not from token sightings, which do not say where a word sat. Ingest walks each accepted, keyed skeleton and writes, per (cluster, variant, layout, slot): one presence row (`value = 'present'`) and one row per value, the keyed word hash or a marker (`withheld`, `shape`, `unhashed`). Rows are presence only and carry an epoch tag whose object is the whole row identity, value included, so one install's rows for two values carry unrelated tags; trust and the quarantine mark ride on the row as on token sightings. Each row's `last_day` is its own newest observation of that slot and value, so retention (the cluster sightings' 30 days) removes an old value on its own day; `first_received` is the receipt day of its first upload. A floor raise deletes rows below it; withdrawal, data deletion and revocation delete the install's rows through its tags. At most `maxSlotsPerSkeleton` slots of one skeleton are recorded, in tree order.
+The counts come from `slot_sightings` (V9), not from token sightings, which do not say where a word sat. Ingest walks each accepted, keyed skeleton and writes, per (cluster, variant, layout, slot): one presence row (`value = 'present'`) and one row per value, the keyed word hash or a marker (`withheld`, `shape`, `unhashed`). Rows are presence only and carry an epoch tag whose object is the whole row identity, value included, so one install's rows for two values carry unrelated tags; trust and the quarantine mark ride on the row as on token sightings. Each row's `last_day` is its own newest observation of that slot and value, so retention (the cluster sightings' 30 days) removes an old value on its own day. A floor raise deletes rows below it; withdrawal, data deletion and revocation delete the install's rows through its tags. At most `maxSlotsPerSkeleton` slots of one skeleton are recorded, in tree order.
 
-Slot ids, which the app computes from its own skeleton ([CLIENT.md](CLIENT.md#reading-slot-classes)): `root/<child index>/…/<text key>` for a screen node's text field (`root/text`, `root/0/2/desc`), `windowTitle`, a notification field's wire name (`title`, `text`, `bigText`, `tickerText`, `subText`) and `action/<index>` for a notification action. The path is the tree as sent, anonymous wrappers included. A cluster's fingerprint splices anonymous wrappers away, so two raw trees of one cluster can put different nodes at one path; evidence is therefore partitioned by the **layout id**, a sha256 over the raw tree's shape (every node's class, id and child count, and for an anonymous wrapper its text keys), never its values. Its byte form is in [CLIENT.md](CLIENT.md#reading-slot-classes) and `SlotWalk.layout`.
+Slot ids: `root/<child index>/…/<text key>` for a screen node's text field (`root/text`, `root/0/2/desc`), `windowTitle`, a notification field's wire name (`title`, `text`, `bigText`, `tickerText`, `subText`) and `action/<index>` for a notification action. The path is the tree as sent, anonymous wrappers included. A cluster's fingerprint splices anonymous wrappers away, so two raw trees of one cluster can put different nodes at one path; evidence is therefore partitioned by the **layout id**, a sha256 over the raw tree's shape (every node's class, id and child count, and for an anonymous wrapper its text keys), never its values. `SlotWalk.layout` holds its exact byte form.
 
-**The app reads a daily release, never live rows.** Once a UTC day the lifecycle sweep (sweep key `slot_release`) replaces `slot_evidence_released` with the per-value install counts of every slot that k installs saw in its best-supported epoch, counting only rows received before the release day (`slot_release` records its day and instant). For a request, the server recomputes the asking install's epoch tags over each slot's released values, subtracts the rows of its own that the release counted, and only then classifies. An upload therefore cannot move a class its uploader can read before the next release, and an install's own rows never decide its own answer. An install that erased its data after the release gets no classes until the next one. The residual (colluding installs) is in [SECURITY.md](SECURITY.md#slot-classes-read-by-the-app-80).
+**Operator-only.** Classes are computed from the live rows for the operator views below; no app route serves them. Classes the app can read arrive with the contributor tier (#81), which must not answer from live evidence: an install could upload a guessed value and read whether it completed a value k installs share. The thresholds (`Policy.slotConstancy`) are server configuration and are not published in `/v1/policy`.
 
-| Endpoint | Request | Success |
-| --- | --- | --- |
-| `POST /v1/slot-classes` | Bearer + HMAC; JSON `{"items":[{"kind":"screen","fingerprint":"<64 hex, public>","platformAppVersion":"8.0","hashDomain":1,"filterRev":1,"layout":"<64 hex>"}]}`, 1–8 items | `200 {"items":[{"fingerprint":"<as sent>","slots":{"root/text":"constant","root/0/text":"varying"}}]}` |
-
-The answer holds classes only: never a hash, keyed or public, and never a count. A slot below k is left out of `slots`, so a cluster fewer than k installs saw answers `{}`, exactly as one nobody saw; the app treats a missing slot as `unknown`. A hash domain the policy does not accept, a revision below its floor, or no release yet also answers `{}`. `platformAppVersion` may be null (the server's `unknown` variant). Unknown keys, an empty or over-long list, a malformed fingerprint, layout, kind, version or counter are `400 bad_request`. The route shares the authenticated install rate limit, is never paused, and writes nothing. The body is signed, so the fingerprints asked about appear in no path or log line.
-
-`GET /ops/clusters/{fingerprint}` carries `slots` (each variant's slots with class, installs and distinct hashes, from the live rows, not the release) and the cluster page shows them in a "Slot constancy" panel; cluster cards on `/ops/clusters/view` show the count of slots per class.
+`GET /ops/clusters/{fingerprint}` carries `slots` (each variant's slots with class, installs and distinct hashes) and the cluster page shows them in a "Slot constancy" panel; cluster cards on `/ops/clusters/view` show the count of slots per class.
 
 ## Skeleton v2: value shapes, click flags, notification actions — #78
 
