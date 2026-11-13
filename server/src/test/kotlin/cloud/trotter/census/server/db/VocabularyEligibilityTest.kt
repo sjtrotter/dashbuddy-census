@@ -8,6 +8,9 @@ import org.junit.jupiter.api.Test
 import java.time.ZoneOffset
 
 class VocabularyEligibilityTest : LifecycleTestDatabase() {
+    /** #85: the fixtures' word hash as stored, keyed under the test pepper; the queue and resolve speak this value. */
+    private val storedToken = testKeying.token("0123456789abcdef")
+
     @Test fun `seven elapsed days and nine versus ten contributors agree across queue count display resolve`() = runBlocking {
         Database.connect(config()).use { db ->
             val ids = List(10) { install() }
@@ -19,11 +22,11 @@ class VocabularyEligibilityTest : LifecycleTestDatabase() {
             val ops = OpsStore(db, clock, policy)
             assertEquals(0, ops.vocabularyQueueCount()); assertTrue(ops.vocabularyQueueDisplay().isEmpty())
             assertTrue(ops.vocabularyQueue().isEmpty())
-            assertFalse(ops.resolve("0123456789abcdef", "reviewed", "corpus", false))
+            assertFalse(ops.resolve(storedToken, "reviewed", "corpus", false))
             instant = instant.plusSeconds(86_400)
             assertEquals(1, ops.vocabularyQueueCount()); assertEquals(10, ops.vocabularyQueueDisplay().single().distinctInstalls)
-            assertEquals("0123456789abcdef", ops.vocabularyQueue().single().jsonObject["tokenHash"]!!.jsonPrimitive.content)
-            assertTrue(ops.resolve("0123456789abcdef", "reviewed", "corpus", false))
+            assertEquals(storedToken, ops.vocabularyQueue().single().jsonObject["tokenHash"]!!.jsonPrimitive.content)
+            assertTrue(ops.resolve(storedToken, "reviewed", "corpus", false))
             ops.trust(tenth, true)
             assertEquals(1, LifecycleStore(db, clock, policy).runOnce().getValue("vocabulary").deleted)
             assertTrue(ops.vocabularyQueue().isEmpty())
@@ -41,8 +44,8 @@ class VocabularyEligibilityTest : LifecycleTestDatabase() {
             assertTrue(ops.vocabularyQueueDisplay().all { it.distinctInstalls == 10 })
             sql { it.update("UPDATE token_sightings_v5 SET last_day=? WHERE install_id=? AND hash_domain=1 AND filter_rev=1", day.minusDays(30), ids.last()) }
             assertEquals(2, ops.vocabularyQueueCount())
-            assertFalse(ops.resolve("0123456789abcdef", null, "corpus", true, 1, 1))
-            assertTrue(ops.resolve("0123456789abcdef", null, "corpus", true, 1, 2))
+            assertFalse(ops.resolve(storedToken, null, "corpus", true, 1, 1))
+            assertTrue(ops.resolve(storedToken, null, "corpus", true, 1, 2))
             InstallStore(db, clock).withdraw(ids.last(), key)
             InstallStore(db, clock).enrol(ids.last(), key, "1.0")
             observe(db, ids.last(), listOf(item(),item(2)))
@@ -58,7 +61,7 @@ class VocabularyEligibilityTest : LifecycleTestDatabase() {
             val ids = List(10) { install() }; for (id in ids) observe(db,id)
             val ops = OpsStore(db,clock,policy)
             val gate = CompletableDeferred<Unit>()
-            val workers = listOf(async(Dispatchers.IO) { gate.await(); ops.resolve("0123456789abcdef", "reviewed", "corpus", false) },
+            val workers = listOf(async(Dispatchers.IO) { gate.await(); ops.resolve(storedToken, "reviewed", "corpus", false) },
                 async(Dispatchers.IO) { gate.await(); InstallStore(db,clock).withdraw(ids.last(),key) })
             gate.complete(Unit); workers.awaitAll()
             assertEquals(0,ops.vocabularyQueueCount())

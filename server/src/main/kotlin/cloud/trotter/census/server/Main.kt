@@ -64,7 +64,8 @@ fun main(args: Array<String>) {
         if (journal != null) fail(journal, log, "database", t)
         // The throwable is attached on purpose: SafeThrowableConverter renders ONLY the exception class chain
         // and the top frames (never a message), so the full diagnostic lineage survives without the JDBC URL.
-        log.error("database startup failed ({}); check DATABASE_URL/DATABASE_USER/DATABASE_PASSWORD", t.javaClass.simpleName, t)
+        // #85: HashPepperMismatchException means CENSUS_HASH_PEPPER is not the pepper this database was keyed under.
+        log.error("database startup failed ({}); check DATABASE_URL/DATABASE_USER/DATABASE_PASSWORD/CENSUS_HASH_PEPPER", t.javaClass.simpleName, t)
         exitProcess(1)
     }
     database.use { db ->

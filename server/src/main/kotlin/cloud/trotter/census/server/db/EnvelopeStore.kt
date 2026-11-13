@@ -41,6 +41,20 @@ class EnvelopeStore(private val db: Database, private val clock: Clock) {
         policy: BudgetPolicy,
         retentionDays: Int,
         now: Instant = clock.now(),
+    ): EnvelopeOutcome = store(installId, keyHash, day, accepted, rejected, db.keying.batch(batchId), bodyBytes, policy, retentionDays, now)
+
+    /** [batchId] is already keyed (#85): the app derives envelope batch ids from the envelopes' bytes. */
+    private suspend fun store(
+        installId: UUID,
+        keyHash: String,
+        day: LocalDate,
+        accepted: List<EnvelopeVerdict.Accepted>,
+        rejected: Map<String, Int>,
+        batchId: String,
+        bodyBytes: Long,
+        policy: BudgetPolicy,
+        retentionDays: Int,
+        now: Instant,
     ): EnvelopeOutcome = query {
         val trusted = select(
             "SELECT trusted FROM installs WHERE install_id = ? AND key_hash = ? AND revoked_at IS NULL FOR SHARE",

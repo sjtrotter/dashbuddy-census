@@ -59,6 +59,8 @@ abstract class LifecycleTestDatabase {
             "root" to cloud.trotter.census.contract.SkeletonSchema.json.encodeToJsonElement(cloud.trotter.census.contract.UiSkeletonNodeDto.serializer(),root)))
         return SkeletonValidator.validate(raw,policy,day) as ItemVerdict.Accepted
     }
+    /** #85: an accepted item as SkeletonStore stores it (keyed word hashes, keyed notification fingerprint). */
+    protected fun stored(accepted: ItemVerdict.Accepted): ItemVerdict.Accepted = testKeying.atRest(accepted)
     protected suspend fun observe(db: Database, id: UUID, accepted: List<ItemVerdict.Accepted> = listOf(item())) =
         SkeletonStore(db, clock).ingest(id, key, day, accepted, 0, emptyMap(), UUID.randomUUID().toString(), 1, BudgetPolicy())
     @BeforeEach fun reset() {

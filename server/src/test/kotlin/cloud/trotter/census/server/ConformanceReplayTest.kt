@@ -15,6 +15,7 @@ import cloud.trotter.census.server.db.SkeletonStore
 import cloud.trotter.census.server.ingest.BudgetPolicy
 import cloud.trotter.census.server.ingest.ItemVerdict
 import cloud.trotter.census.server.ingest.SkeletonValidator
+import cloud.trotter.census.server.ingest.atRest
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpMethod
@@ -78,11 +79,13 @@ class ConformanceReplayTest {
                 when (verdict) {
                     is ItemVerdict.Accepted -> {
                         assertEquals(200, response.status.value)
+                        // #85: stored keyed, under the keyed fingerprint.
+                        val keyed = testKeying.atRest(verdict)
                         val stored = sql { connection -> connection.prepareStatement("SELECT skeleton::text FROM cluster_samples WHERE fingerprint = ?").use { stmt ->
-                            stmt.setString(1, verdict.item.fingerprint)
+                            stmt.setString(1, keyed.item.fingerprint)
                             stmt.executeQuery().use { rows -> assertTrue(rows.next()); rows.getString(1) }
                         } }
-                        assertEquals(Json.parseToJsonElement(verdict.canonicalJson), Json.parseToJsonElement(stored))
+                        assertEquals(Json.parseToJsonElement(keyed.canonicalJson), Json.parseToJsonElement(stored))
                     }
                     is ItemVerdict.Rejected -> {
                         assertEquals("bad_version", verdict.reason)
@@ -194,7 +197,12 @@ class ConformanceReplayTest {
                         }
                     }
                     val posted = golden.take(300)
-                    val fingerprints = posted.groupBy { it.getValue("fingerprint").jsonPrimitive.content }
+                    // #85: grouped by the stored fingerprint (a notification's is keyed; a screen's covers no text).
+                    val fingerprints = posted.groupBy {
+                        val fingerprint = it.getValue("fingerprint").jsonPrimitive.content
+                        if (it.getValue("skeleton").jsonObject["kind"] != JsonPrimitive("notification")) fingerprint
+                        else testKeying.atRest(ItemVerdict.Accepted(CensusSkeletonSchema.deserialize(it.getValue("skeleton").jsonObject.toString()), "", 0, emptyList())).item.fingerprint
+                    }
                     val counts = tableCounts()
                     assertEquals(fingerprints.size, counts.getValue("clusters"))
                     // F6(a), as jsonb normalizes spacing/key order: the stored sample is the item's canonical content
@@ -207,8 +215,10 @@ class ConformanceReplayTest {
                             }
                         }
                         assertTrue(stored.isNotEmpty(), "a sample must exist for $fingerprint")
+                        // #85: the canonical content with every slot hash keyed (screen fingerprints carry no text, so stay public).
                         val expected = group.groupBy { it.getValue("skeleton").jsonObject["platformAppVersion"] }.values.map {
-                            Json.parseToJsonElement(CensusSkeletonSchema.measure(CensusSkeletonSchema.deserialize(it.first().getValue("skeleton").jsonObject.toString())).json)
+                            val item = CensusSkeletonSchema.deserialize(it.first().getValue("skeleton").jsonObject.toString())
+                            Json.parseToJsonElement(testKeying.atRest(ItemVerdict.Accepted(item, "", 0, emptyList())).canonicalJson)
                         }.toSet()
                         assertEquals(expected, stored.map { Json.parseToJsonElement(it) }.toSet())
                     }
@@ -253,7 +263,7 @@ class ConformanceReplayTest {
                             statement.executeQuery().use { rows -> buildSet { while (rows.next()) add(rows.getString(1)) } }
                         }
                     }
-                    assertEquals(posted.flatMap { it.getValue("hashes").jsonArray.map { hash -> hash.jsonPrimitive.content } }.toSet(), hashes)
+                    assertEquals(posted.flatMap { it.getValue("hashes").jsonArray.map { hash -> testKeying.token(hash.jsonPrimitive.content) } }.toSet(), hashes)
                     val ledgerBefore = requireNotNull(store.ledgerFor(UUID.fromString(id), day))
                     assertEquals(300, ledgerBefore.accepted)
                     assertEquals(duplicates, ledgerBefore.duplicate)
@@ -297,7 +307,7 @@ class ConformanceReplayTest {
                     val freshLedger = requireNotNull(store.ledgerFor(UUID.fromString(freshId), day))
                     assertEquals(80, freshLedger.accepted)
                     assertEquals(mapOf("bad_hash" to 50), freshLedger.rejectedByReason)
-                    assertEquals(listOf("correctable"), freshLedger.batchIds)
+                    assertEquals(listOf(testKeying.batch("correctable")), freshLedger.batchIds)
                     assertEquals(batch("correctable", boundaryItems).toByteArray().size.toLong(), freshLedger.bytes)
 
                     for (body in listOf("[]", "{}", """{"batchId":"bad id","items":[{}]}""", """{"batchId":"a","items":{}}""", batch("empty", emptyList()))) {
@@ -339,7 +349,7 @@ class ConformanceReplayTest {
                     assertEquals((raceBefore?.accepted ?: 0) + 1, raceLedger.accepted)
                     assertEquals((raceBefore?.duplicate ?: 0) + 1, raceLedger.duplicate)
                     assertEquals(raceBody.toByteArray().size.toLong(), raceLedger.bytes)
-                    assertEquals(listOf("race"), raceLedger.batchIds)
+                    assertEquals(listOf(testKeying.batch("race")), raceLedger.batchIds)
 
                     // Each app version retains its own first sample and sightings.
                     val versionRoot = JsonObject(mapOf("class" to JsonPrimitive("SightingVersionProbe")))

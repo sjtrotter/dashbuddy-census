@@ -12,6 +12,14 @@ Follow the [AWS deployment runbook](../deploy/aws/README.md) for the S2 Graviton
 
 Operator authentication uses the operator token directly as a bearer or with TOTP to establish a browser session. Generate and retain a high-entropy token in the operator's password manager. Put only its 64-digit SHA-256 hex digest in `OPERATOR_TOKEN_SHA256`. Never put the original token in `.env`, tickets, or request logs. Replace the digest and recreate census with `docker compose up -d --force-recreate census`; authenticated clients must switch to the new token and browser sessions are lost on restart. No overlapping-token window is implemented.
 
+## Hash pepper
+
+`CENSUS_HASH_PEPPER` (#85) is the server secret every stored word hash is keyed under: the database holds `HMAC-SHA256(pepper, hash)` in place of the phone's public hash, and a notification's fingerprint and every client batch id are keyed the same way, so `ingest_ledger.batch_ids` never holds the id the phone sent. Create it once with `openssl rand -hex 32` (64 hex digits), with shell tracing disabled, and keep it the way the TOTP seed is kept: in the password manager and in a mode-0600 file under `~/dashbuddy/secrets/` on the operator workstation. On AWS it is the SecureString `/dashbuddy-census/census_hash_pepper`, rendered into the root-only `.env` ([AWS runbook](../deploy/aws/README.md#hash-pepper-85)); self-hosters put it in `.env` ([self-hosting](SELF-HOSTING.md#hash-pepper)). It never belongs in the database, a backup, a ticket or a log.
+
+Startup refuses a missing or malformed pepper, and refuses one that differs from the pepper the database was keyed under (`HashPepperMismatchException` in the startup log): the first migration under #85 (V7) records an HMAC check value in `hash_keying`, never the pepper. **Never rotate it.** A new pepper is a new hash domain; moving to one means rewriting every stored value under it, which is a migration plan, not a configuration change. Back it up beside the TOTP seed: a restore runs under the current `.env`, so a dump taken after V7 comes back only under the same pepper, and a dump taken before V7 is keyed by V7 during the restore. Losing the pepper exposes nothing, but the server then cannot start on that database or its backups.
+
+What it protects: a stolen database, dump or backup cannot be matched against a guess list. What it does not: the live operator, who holds the pepper, can still hash, key and compare any guess, as the vocabulary resolve route does. See [security](SECURITY.md#keyed-storage-85).
+
 ## Backup and restore
 
 Run `./backup.sh` from `deploy/compose` using a daily scheduler. After `pg_dump` and dump upload, it runs `./export-withdrawals.sh` and `./export-filter-floor.sh`. Withdrawal export is an atomic, restricted-permission CSV export to `backups/withdrawals/withdrawals-<UTC timestamp>.csv`. Either export/upload failure fails the backup operation; the existing dump is preserved, but is not a complete recovery set. Earlier versions warned on withdrawal export failure; this release makes it fatal. Export `BACKUP_BUCKET` to upload journals under `withdrawals/` and dumps at the bucket root. Dumps and withdrawal journals retain 14 local UTC dates; policy-only `filter-floor/` journals are retained without age expiry. For observation backups, configure bucket encryption, restricted access, and the 14-day lifecycle including noncurrent versions. Local files and S3 copies contain sensitive pseudonymous data. The exporter can also run separately between backups.
@@ -214,21 +222,21 @@ exception is k = 1 for the operator's own device. Below the gate, every class/id
 by `~` and the first eight hex characters of its SHA-256 digest. Text slots show only kind
 badges at every gate level; their token hashes are never rendered in a sample or dashboard.
 Install, sighting, version, and day counts remain visible. Raw sample JSON is never returned.
-Vocabulary hashes are available only on the dedicated JSON vocabulary surface.
+Vocabulary hashes (keyed under the pepper, #85) are available only on the dedicated JSON vocabulary surface.
 
 ### JSON reads
 
 | Endpoint | Result |
 | --- | --- |
 | `GET /ops/clusters?platform=&version=&status=&kind=&limit=` | Array of `{platformAppVersion, clusters}` groups, numeric versions newest first; optional filters must be valid when supplied. The additive `platform` filter uses `[a-z_][a-z0-9_]{0,31}` and restricts clusters before version grouping; the JSON shape is unchanged. Default 50 rows, maximum 200 across groups. Rows include dates, counts, trust/gate flags, versions, `newWithVersion`, status, resolved rule, and notes. |
-| `GET /ops/clusters/{fingerprint}` | Cluster row and `{platformAppVersion, receivedDay, skeleton}` or `{platformAppVersion, receivedDay, notification}` samples; `newWithVersion` refers to its newest observed version. |
+| `GET /ops/clusters/{fingerprint}` | Takes the fingerprint as the cluster rows show it: a screen fingerprint is the phone's, a notification fingerprint is keyed (#85) and will not match the one the phone computed. Cluster row and `{platformAppVersion, receivedDay, skeleton}` or `{platformAppVersion, receivedDay, notification}` samples; `newWithVersion` refers to its newest observed version. |
 | `GET /ops/installs?limit=` | Prefixes, dates, trust/revocation flags, last app version, and whether an attestation verdict exists. Default 50, maximum 200. |
 | `GET /ops/health?days=7` | `fleet` rows and per-install prefix/day/platform/version counters; maximum 90 days. |
 | `GET /ops/alarms` | Today's successfully delivered alarms and process-local `AlarmStats` counts. |
 | `GET /ops/enrol` | `{"counts": {...}}`: process-local enrol outcome counts by reason (`enrolled`, `unsupported_schema`, `bad_request`, `unauthorized`, `install_exists`, `revoked`), every key present, zero included; reset on restart. Counts only, no identities. Not counted: a `413` or `408` from the body reader, and any answer given before the enrol handler runs (a routing-level `400` such as a malformed query escape, the rate limiter's `429`, a `500` or `503`). |
 | `GET /ops/pause` | `{"paused":bool,"changedDay":"YYYY-MM-DD"}` (`changedDay` absent until first set). `POST` with `{"paused":bool}` and TOTP sets it; see [Pause uploads](#pause-uploads). |
 | `GET /ops/ledger?day=YYYY-MM-DD` | Per-install prefix counters and totals; defaults to today. `batches` is a count, never the batch IDs. |
-| `GET /ops/vocabulary/queue?limit=` | Hash, kind, distinct non-trusted install count, first/last day for eligible hashes absent from vocabulary; default 50, maximum 200. |
+| `GET /ops/vocabulary/queue?limit=` | Keyed hash (`tokenHash`, the stored `HMAC(pepper, hash)`, not the phone's public census hash; #85), kind, distinct non-trusted install count, first/last day for eligible hashes absent from vocabulary; default 50, maximum 200. |
 
 Cluster ranking is computed at read time as `distinctInstalls28d × log2(1 + sightings28d) ×
 recency`, where recency is 1.0 within 7 days, 0.5 within 28 days, and 0.1 otherwise. `sightings28d` counts presence rows (install × observation day × version), never uploads (#79). The 28-day
@@ -273,8 +281,9 @@ to false to remove trust. Successful mutations return 204; missing target rows r
 Revocation is idempotent and immediately blocks the install's signed requests.
 
 Vocabulary source is `trusted`, `corpus`, or `rule_anchor` (#79: provenance names no install; V6 rewrote older `trusted:<prefix>` rows and a CHECK refuses that form). Clear text is at
-most 128 characters. Resolution proves `CensusHash.of(clearText) == tokenHash`; mismatch returns
-422 `hash_mismatch`. Rejection stores NULL clear text. Resolution requires current non-trusted
+most 128 characters. `tokenHash` is the keyed value from `GET /ops/vocabulary/queue` (#85). Resolution proves
+`HMAC(pepper, CensusHash.of(clearText)) == tokenHash` (hash, key, then a constant-time compare); a mismatch, including a
+phone-side public hash, returns 422 `hash_mismatch`. Rejection stores NULL clear text. Resolution requires current non-trusted
 k eligibility within the supplied `hashDomain` and `filterRev` (both default 1 for older callers), seven elapsed days of quarantine and unexpired per-install evidence. It never overwrites an existing row. Sweeps remove ineligible queued/unblinded entries and expired rejected entries. `shipped` export remains M4/#641.
 
 ## Classify & draft

@@ -421,7 +421,7 @@ class IdentityRoutesTest {
             assertTrue(store.tryConsume(id, day, 5, 0, "second", BudgetPolicy()) is ConsumeOutcome.Consumed)
             store.recordIngest(id, day, 1, mapOf("invalid" to 1, "oversize" to 2))
             store.recordIngest(id, day, 0, emptyMap())
-            assertEquals(LedgerRow(85, 8, 17, mapOf("invalid" to 25, "oversize" to 2), listOf("batch", "second")), store.ledgerFor(id, day))
+            assertEquals(LedgerRow(85, 8, 17, mapOf("invalid" to 25, "oversize" to 2), listOf("batch", "second").map { testKeying.batch(it) }), store.ledgerFor(id, day))
             assertTrue(store.isBatchKnown(id, day, "batch"))
             assertFalse(store.isBatchKnown(id, day.plusDays(1), "batch"))
             assertFalse(store.isBatchKnown(other, day, "batch"))
@@ -633,7 +633,7 @@ class IdentityRoutesTest {
             }
             assertEquals(1, results.count { it is ConsumeOutcome.Consumed })
             assertEquals(1, results.count { it is ConsumeOutcome.BudgetExhausted })
-            assertEquals(LedgerRow(bytes = 10, accepted = 10, batchIds = listOf("first", "last")), store.ledgerFor(id, clock.today()))
+            assertEquals(LedgerRow(bytes = 10, accepted = 10, batchIds = listOf("first", "last").map { testKeying.batch(it) }), store.ledgerFor(id, clock.today()))
         }
     }
 
@@ -657,7 +657,7 @@ class IdentityRoutesTest {
             assertEquals(ConsumeOutcome.Consumed(7, 0, 0), store.tryConsume(id, day, 1, 1, null, policy))
             assertEquals(exhausted, store.tryConsume(id, day, Long.MAX_VALUE, 0, null, policy.copy(dailyBytes = Long.MAX_VALUE)))
             assertEquals(exhausted, store.tryConsume(id, day, 0, Int.MAX_VALUE, null, policy.copy(dailySkeletonBudget = Int.MAX_VALUE)))
-            assertEquals(LedgerRow(bytes = 3, accepted = 2, batchIds = listOf("a")), store.ledgerFor(id, day))
+            assertEquals(LedgerRow(bytes = 3, accepted = 2, batchIds = listOf(testKeying.batch("a"))), store.ledgerFor(id, day))
         }
     }
 

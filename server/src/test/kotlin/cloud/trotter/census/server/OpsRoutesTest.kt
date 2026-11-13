@@ -294,15 +294,18 @@ class OpsRoutesTest {
                 assertError(client.signed(clock, id, key, HttpMethod.Post, "/v1/envelopes", envelope), 403, "not_trusted")
 
                 val queue = Json.parseToJsonElement(client.ops("/ops/vocabulary/queue").bodyAsText()).jsonArray
-                assertEquals(listOf(CensusHash.of("Ready now")), queue.map { it.jsonObject.getValue("tokenHash").jsonPrimitive.content })
+                // #85: the queue serves the stored, keyed value; the public census hash appears nowhere.
+                val tokenHash = testKeying.token(CensusHash.of("Ready now")!!)
+                assertEquals(listOf(tokenHash), queue.map { it.jsonObject.getValue("tokenHash").jsonPrimitive.content })
                 val display = ops.vocabularyQueueDisplay()
                 assertEquals(1, display.size)
                 assertEquals("words:2", display.single().kind)
                 assertEquals(10, display.single().distinctInstalls)
                 assertEquals(day.toString(), display.single().firstDay)
                 assertEquals(day.toString(), display.single().lastDay)
-                val tokenHash = CensusHash.of("Ready now")
                 assertError(client.mutate("/ops/vocabulary/resolve", """{"tokenHash":"$tokenHash","clearText":"Wrong text","source":"corpus","reject":false}"""), 422, "hash_mismatch")
+                // The public hash of the right text is not what the server stores: refused as a mismatch, nothing written.
+                assertError(client.mutate("/ops/vocabulary/resolve", """{"tokenHash":"${CensusHash.of("Ready now")}","clearText":"Ready now","source":"corpus","reject":false}"""), 422, "hash_mismatch")
                 assertEquals(204, client.mutate("/ops/vocabulary/resolve", """{"tokenHash":"$tokenHash","clearText":"Ready now","source":"corpus","reject":false}""").status.value)
                 sql { connection -> connection.prepareStatement("SELECT status, clear_text FROM vocabulary_v5 WHERE token_hash = ?").use { statement ->
                     statement.setString(1, tokenHash)

@@ -1,5 +1,6 @@
+# census_hash_pepper (#85): the key every stored word hash is HMAC'd under. Required at startup; never rotated.
 resource "aws_ssm_parameter" "secret" {
-  for_each = toset(["postgres_password", "operator_token_sha256", "operator_totp_secret"])
+  for_each = toset(["postgres_password", "operator_token_sha256", "operator_totp_secret", "census_hash_pepper"])
 
   name  = "/${var.name_prefix}/${each.key}"
   type  = "SecureString"
