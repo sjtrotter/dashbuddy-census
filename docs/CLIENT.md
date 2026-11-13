@@ -183,7 +183,7 @@ Fleet totals are recomputed for each touched day/platform/version inside the sam
 The contributor review screen (app #1626) greys the slots that hold values. Ask with signed `POST /v1/slot-classes`, naming each cluster variant by the fields of the skeleton the phone holds:
 
 ```json
-{"items":[{"kind":"screen","fingerprint":"<the skeleton's public fingerprint>","platformAppVersion":"8.0","hashDomain":1,"filterRev":1}]}
+{"items":[{"kind":"screen","fingerprint":"<the skeleton's public fingerprint>","platformAppVersion":"8.0","hashDomain":1,"filterRev":1,"layout":"<64 hex>"}]}
 ```
 
 Send 1–8 items; only these keys are allowed, and `platformAppVersion` may be null. The answer, in request order:
@@ -192,4 +192,13 @@ Send 1–8 items; only these keys are allowed, and `platformAppVersion` may be n
 {"items":[{"fingerprint":"<as sent>","slots":{"root/text":"constant","root/0/text":"varying","windowTitle":"regional"}}]}
 ```
 
-Compute slot ids from the same skeleton: `root`, then the child index of each step down the tree as the skeleton sends it (anonymous wrappers included), then the text key, e.g. `root/0/2/desc`; `windowTitle`; for a notification the field's wire name (`title`, `text`, `bigText`, `tickerText`, `subText`) or `action/<index>`. A class is `constant` (candidate chrome: show the word, which the contributor may confirm), `regional` or `varying` (a value: grey it, never unmask it), `withheld` (a backstop fired on other phones: grey it), or `shape` (a value format). A slot missing from `slots` is `unknown`: fewer than k installs saw it, so treat it as a value. The server never returns a hash or a count. Classes change as phones report, so ask again before each review rather than caching across days.
+Compute slot ids from the same skeleton: `root`, then the child index of each step down the tree as the skeleton sends it (anonymous wrappers included), then the text key, e.g. `root/0/2/desc`; `windowTitle`; for a notification the field's wire name (`title`, `text`, `bigText`, `tickerText`, `subText`) or `action/<index>`.
+
+Compute `layout` from the same skeleton as the lowercase hex sha256 of these bytes, where `LP(s)` is the UTF-8 byte count of `s` in ASCII decimal, a 0 byte, then the UTF-8 bytes, and `NUM(n)` is `n` in ASCII decimal followed by a 0 byte:
+
+- a screen: `L1`, then every node in pre-order (the tree as sent, wrappers included): `LP(class or "")`; `N` when the node has no id, else `I` then `LP(id)`; `NUM(child count)`; then, for an anonymous wrapper (no id and a class in the contract's `AnonymousWrappers.WRAPPER_CLASSES`), `W`, `NUM(number of text keys)` and `LP(key)` for each text key in sorted order, and for any other node `-`;
+- a notification: `N1` then `NUM(action count)`.
+
+Values never enter the layout, so every frame of one screen has one layout; a wrapper that appears, vanishes or carries text gives another.
+
+A class is `constant` (candidate chrome: show the word, which the contributor may confirm), `regional` or `varying` (a value: grey it, never unmask it), `withheld` (a backstop fired on other phones: grey it), or `shape` (a value format). A slot missing from `slots` is `unknown`: fewer than k installs saw it, so treat it as a value. The server never returns a hash or a count. Classes come from a release the server takes once a UTC day, with this install's own uploads left out, so they change at most daily and never because of what this phone sent; ask once per review. After "Delete my census data" the answer is empty until the next day's release.
