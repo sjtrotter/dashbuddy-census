@@ -431,7 +431,7 @@ class InstallStore(private val db: Database, private val clock: Clock) {
         items: Int,
         batchId: String?,
         policy: BudgetPolicy,
-    ): ConsumeOutcome = query { consumeLedger(installId, day, bytes, items, batchId, policy, clock.now()) }
+    ): ConsumeOutcome = query { consumeLedger(installId, day, bytes, items, batchId?.let { db.keying.batch(it) }, policy, clock.now()) }
 
     /**
      * The credential-bound form of [recordIngest] (Astra, S4 round 2): a request authenticated under a key that has since
@@ -497,7 +497,7 @@ class InstallStore(private val db: Database, private val clock: Clock) {
     suspend fun isBatchKnown(installId: UUID, day: LocalDate, batchId: String): Boolean = query {
         select(
             "SELECT ? = ANY(batch_ids) AS known FROM ingest_ledger WHERE install_id = ? AND day = ?",
-            batchId, installId, day,
+            db.keying.batch(batchId), installId, day,
         ) { it.getBoolean("known") } ?: false
     }
 

@@ -32,10 +32,23 @@ class HashKeying private constructor(private val key: SecretKeySpec) {
         return mac(TOKEN_LABEL, censusHash).substring(0, CensusHash.HEX_LENGTH)
     }
 
-    /** The keyed form of a public fingerprint that folds word hashes in (today: a notification's). */
-    fun fingerprint(publicFingerprint: String): String {
-        require(CensusFingerprint.isWellFormed(publicFingerprint)) { "not a census fingerprint" }
-        return mac(FINGERPRINT_LABEL, publicFingerprint)
+    /**
+     * The keyed form of a fingerprint that folds word hashes in (today: a notification's). Ingest applies it to the
+     * fingerprint recomputed over the already-keyed slots ([cloud.trotter.census.server.ingest.storedFingerprint]),
+     * so a stored body proves its own key.
+     */
+    fun fingerprint(fingerprint: String): String {
+        require(CensusFingerprint.isWellFormed(fingerprint)) { "not a census fingerprint" }
+        return mac(FINGERPRINT_LABEL, fingerprint)
+    }
+
+    /**
+     * The keyed form of a client batch id. The app derives it from the batch's public fingerprints (a truncated
+     * sha256), so a stored raw id would let a guessed notification be confirmed against the ledger.
+     */
+    fun batch(batchId: String): String {
+        require(batchId.isNotEmpty() && batchId.length <= MAX_BATCH_ID_LENGTH) { "not a batch id" }
+        return mac(BATCH_LABEL, batchId)
     }
 
     /**
@@ -55,7 +68,7 @@ class HashKeying private constructor(private val key: SecretKeySpec) {
     private val macs = ThreadLocal.withInitial { Mac.getInstance(ALGORITHM).apply { init(key) } }
 
     private fun mac(label: String, value: String): String =
-        HexFormat.of().formatHex(macs.get().doFinal((label + value).toByteArray(Charsets.US_ASCII)))
+        HexFormat.of().formatHex(macs.get().doFinal((label + value).toByteArray(Charsets.UTF_8)))
 
     override fun toString(): String = "HashKeying([redacted])"
 
@@ -66,7 +79,9 @@ class HashKeying private constructor(private val key: SecretKeySpec) {
         private const val ALGORITHM = "HmacSHA256"
         private const val TOKEN_LABEL = "census.keyed.v1:token:"
         private const val FINGERPRINT_LABEL = "census.keyed.v1:fingerprint:"
+        private const val BATCH_LABEL = "census.keyed.v1:batch:"
         private const val CHECK_LABEL = "census.keyed.v1:check"
+        private const val MAX_BATCH_ID_LENGTH = 128
 
         /** Parses the pepper; the error names the variable, never the value. */
         fun fromHex(hex: String): HashKeying {

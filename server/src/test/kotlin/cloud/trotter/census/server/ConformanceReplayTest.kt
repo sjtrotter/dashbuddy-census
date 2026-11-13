@@ -200,7 +200,8 @@ class ConformanceReplayTest {
                     // #85: grouped by the stored fingerprint (a notification's is keyed; a screen's covers no text).
                     val fingerprints = posted.groupBy {
                         val fingerprint = it.getValue("fingerprint").jsonPrimitive.content
-                        if (it.getValue("skeleton").jsonObject["kind"] == JsonPrimitive("notification")) testKeying.fingerprint(fingerprint) else fingerprint
+                        if (it.getValue("skeleton").jsonObject["kind"] != JsonPrimitive("notification")) fingerprint
+                        else testKeying.atRest(ItemVerdict.Accepted(CensusSkeletonSchema.deserialize(it.getValue("skeleton").jsonObject.toString()), "", 0, emptyList())).item.fingerprint
                     }
                     val counts = tableCounts()
                     assertEquals(fingerprints.size, counts.getValue("clusters"))
@@ -306,7 +307,7 @@ class ConformanceReplayTest {
                     val freshLedger = requireNotNull(store.ledgerFor(UUID.fromString(freshId), day))
                     assertEquals(80, freshLedger.accepted)
                     assertEquals(mapOf("bad_hash" to 50), freshLedger.rejectedByReason)
-                    assertEquals(listOf("correctable"), freshLedger.batchIds)
+                    assertEquals(listOf(testKeying.batch("correctable")), freshLedger.batchIds)
                     assertEquals(batch("correctable", boundaryItems).toByteArray().size.toLong(), freshLedger.bytes)
 
                     for (body in listOf("[]", "{}", """{"batchId":"bad id","items":[{}]}""", """{"batchId":"a","items":{}}""", batch("empty", emptyList()))) {
@@ -348,7 +349,7 @@ class ConformanceReplayTest {
                     assertEquals((raceBefore?.accepted ?: 0) + 1, raceLedger.accepted)
                     assertEquals((raceBefore?.duplicate ?: 0) + 1, raceLedger.duplicate)
                     assertEquals(raceBody.toByteArray().size.toLong(), raceLedger.bytes)
-                    assertEquals(listOf("race"), raceLedger.batchIds)
+                    assertEquals(listOf(testKeying.batch("race")), raceLedger.batchIds)
 
                     // Each app version retains its own first sample and sightings.
                     val versionRoot = JsonObject(mapOf("class" to JsonPrimitive("SightingVersionProbe")))

@@ -17,7 +17,10 @@ import io.ktor.http.HttpStatusCode
 import io.ktor.server.testing.testApplication
 import org.flywaydb.core.Flyway
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
@@ -116,8 +119,12 @@ class MigrationTest {
             for (hash in public.values) run("INSERT INTO token_sightings_v5 VALUES (?, ?::uuid, ?, ?, 'words:2', 1, 1)", hash, install, day, day)
             run("INSERT INTO vocabulary_v5 VALUES (?, 'words:2', 10, ?, 'Ready now', ?, 'corpus', 'unblinded', 1, 1)", public.getValue("Ready now"), day, day)
             run("INSERT INTO trusted_envelopes (install_id, fingerprint, envelope, received_day, purge_after) VALUES (?::uuid, ?, '{}', ?, ?)", install, screen.fingerprint, day, day.plusDays(30))
+            // The app names a single-notification batch after that notification's public fingerprint (CensusApi.batchId).
+            val batchId = cloud.trotter.census.server.auth.sha256Hex(notification.fingerprint.toByteArray(Charsets.UTF_8)).take(32)
+            run("INSERT INTO ingest_ledger (install_id, day, batch_ids) VALUES (?::uuid, ?, ARRAY[?, 'second'])", install, day, batchId)
+            val guesses = public.values + notification.fingerprint + batchId
             val publicDump = connection.dumpRows(schema)
-            assertEquals(public.values.toSet() + notification.fingerprint, matches(publicDump, public.values + notification.fingerprint))
+            assertEquals(guesses.toSet(), matches(publicDump, guesses))
 
             assertEquals(1, flyway().load().migrate().migrationsExecuted)
             assertEquals(0, flyway().load().migrate().migrationsExecuted)
@@ -125,7 +132,7 @@ class MigrationTest {
             fun strings(sql: String) = connection.createStatement().use { statement ->
                 statement.executeQuery(sql).use { rows -> buildSet { while (rows.next()) add(rows.getString(1)) } }
             }
-            val keyedFingerprint = testKeying.fingerprint(notification.fingerprint)
+            val keyedFingerprint = testKeying.atRest(ItemVerdict.Accepted(notification, "", 0, emptyList())).item.fingerprint
             assertEquals(public.values.map { testKeying.token(it) }.toSet(), strings("SELECT token_hash FROM token_sightings_v5"))
             assertEquals(setOf(testKeying.token(public.getValue("Ready now"))), strings("SELECT token_hash FROM vocabulary_v5"))
             assertEquals(setOf("Ready now"), strings("SELECT clear_text FROM vocabulary_v5"))
@@ -140,9 +147,10 @@ class MigrationTest {
                     strings("SELECT skeleton::text FROM cluster_samples WHERE fingerprint = '${expected.item.fingerprint}'").map { Json.parseToJsonElement(it) }.toSet())
             }
             assertEquals(setOf(testKeying.keyCheck), strings("SELECT key_check FROM hash_keying"))
+            assertEquals(setOf(listOf(batchId, "second").map { testKeying.batch(it) }.joinToString(",")), strings("SELECT array_to_string(batch_ids, ',') FROM ingest_ledger"))
             // A thief's guess list (public hashes, the public notification fingerprint) matches nothing in the dump.
             val keyedDump = connection.dumpRows(schema)
-            assertEquals(emptySet<String>(), matches(keyedDump, public.values + notification.fingerprint))
+            assertEquals(emptySet<String>(), matches(keyedDump, guesses))
             assertEquals(setOf(screen.fingerprint), matches(keyedDump, listOf(screen.fingerprint)))
 
             KeyedHashStorageMigration.verify(connection, testKeying)
@@ -153,8 +161,55 @@ class MigrationTest {
     }
 
     @Test
+    fun `V6 with legacy samples upgrades through V7 and the cutover keeps a valid one and removes an invalid one`() = kotlinx.coroutines.runBlocking {
+        val day = java.time.LocalDate.of(2026, 10, 6)
+        val config = Config.fromEnv(testEnvironment() + mapOf("DATABASE_URL" to schemaUrl("legacy_upgrade"),
+            "DATABASE_USER" to postgres.username, "DATABASE_PASSWORD" to postgres.password))
+        DriverManager.getConnection(postgres.jdbcUrl, postgres.username, postgres.password).use { connection ->
+            connection.createStatement().use { it.execute("CREATE SCHEMA IF NOT EXISTS legacy_upgrade") }
+        }
+        Database.flyway(config.databaseUrl, config.databaseUser, config.databasePassword, testKeying).target("6").load().migrate()
+        val publicHash = requireNotNull(CensusHash.of("Order ready"))
+        val valid = CensusSkeletonSchema.deserialize(notificationFixture(day, channel = "VALID", hash = publicHash).toString())
+        val tampered = CensusSkeletonSchema.deserialize(notificationFixture(day, channel = "TAMPERED", hash = publicHash).toString())
+        // An invalid legacy body: a slot hash that no longer matches the fingerprint it sits under.
+        val tamperedBody = CensusSkeletonSchema.measure(tampered).json.replace(publicHash, "0123456789abcdef")
+        val install = "00000000-0000-4000-8000-000000000002"
+        DriverManager.getConnection(config.databaseUrl, config.databaseUser, config.databasePassword).use { connection ->
+            fun run(sql: String, vararg args: Any?) = connection.prepareStatement(sql).use { statement ->
+                args.forEachIndexed { index, value -> statement.setObject(index + 1, value) }
+                statement.executeUpdate()
+            }
+            run("INSERT INTO installs (install_id, key_hash, created_day, last_seen_day) VALUES (?::uuid, repeat('a',64), ?, ?)", install, day, day)
+            for ((item, body) in listOf(valid to CensusSkeletonSchema.measure(valid).json, tampered to tamperedBody)) {
+                run("INSERT INTO clusters (fingerprint, platform, kind, first_seen_day, last_seen_day) VALUES (?, 'doordash', 'notification', ?, ?)", item.fingerprint, day, day)
+                // Null provenance: a pre-V5 sample the V5 cutover has not judged yet.
+                run("INSERT INTO cluster_samples (fingerprint, platform_app_version, received_day, skeleton) VALUES (?, '8.0', ?, ?::jsonb)", item.fingerprint, day, body)
+            }
+        }
+        Database.migrate(config)
+        val clock = object : Clock { override fun now(): java.time.Instant = day.atTime(12, 0).toInstant(java.time.ZoneOffset.UTC) }
+        Database.connect(config).use { db -> cloud.trotter.census.server.db.FilterPolicyStore(db, clock).bootstrap(1) }
+        val keyed = testKeying.atRest(ItemVerdict.Accepted(valid, "", 0, emptyList())).item.fingerprint
+        DriverManager.getConnection(config.databaseUrl, config.databaseUser, config.databasePassword).use { connection ->
+            connection.createStatement().use { statement ->
+                statement.executeQuery("SELECT fingerprint, hash_domain, filter_rev, skeleton::text FROM cluster_samples").use { rows ->
+                    assertTrue(rows.next())
+                    assertEquals(keyed, rows.getString(1)); assertEquals(1, rows.getInt(2)); assertEquals(1, rows.getInt(3))
+                    // The cutover scrubbed it: legacy hashes become expired slots; its fingerprint field is the keyed one.
+                    val body = Json.parseToJsonElement(rows.getString(4)).jsonObject
+                    assertEquals(keyed, body.getValue("fingerprint").jsonPrimitive.content)
+                    assertFalse(rows.getString(4).contains("\"h\""))
+                    assertTrue(!rows.next(), "the tampered legacy sample is removed")
+                }
+            }
+            assertEquals(emptySet<String>(), matches(connection.dumpRows("legacy_upgrade"), listOf(publicHash, valid.fingerprint, tampered.fingerprint)))
+        }
+    }
+
+    @Test
     fun `startup migration refuses a pepper other than the one the database was keyed under`() {
-        fun config(pepper: String) = Config.fromEnv(testEnvironment() + mapOf("DATABASE_URL" to postgres.jdbcUrl + "?currentSchema=pepper_check",
+        fun config(pepper: String) = Config.fromEnv(testEnvironment() + mapOf("DATABASE_URL" to schemaUrl("pepper_check"),
             "DATABASE_USER" to postgres.username, "DATABASE_PASSWORD" to postgres.password, HashKeying.ENV to pepper))
         DriverManager.getConnection(postgres.jdbcUrl, postgres.username, postgres.password).use { connection ->
             connection.createStatement().use { it.execute("CREATE SCHEMA IF NOT EXISTS pepper_check") }
@@ -290,6 +345,10 @@ class MigrationTest {
         }
         assertEquals(0, flyway.migrate().migrationsExecuted)
     }
+
+    /** The container URL already carries a query string; a schema is one more parameter. */
+    private fun schemaUrl(schema: String): String =
+        postgres.jdbcUrl + (if ('?' in postgres.jdbcUrl) "&" else "?") + "currentSchema=$schema"
 
     /** Shares a disposable PostgreSQL instance and the availability condition (#1157 S1). */
     companion object {

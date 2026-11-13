@@ -51,9 +51,10 @@ class SkeletonStore(private val db: Database, private val clock: Clock) {
         policy: BudgetPolicy,
         now: Instant = clock.now(),
     ): IngestOutcome {
-        // #85: keyed before anything is written; nothing below sees a public word hash or notification fingerprint.
+        // #85: keyed before anything is written; nothing below sees a public word hash, notification fingerprint or
+        // batch id (the app derives the id from the batch's public fingerprints).
         val stored = accepted.map { db.keying.atRest(it) }
-        return store(installId, keyHash, day, stored, duplicateInBatch, rejected, batchId, bodyBytes, policy, now)
+        return store(installId, keyHash, day, stored, duplicateInBatch, rejected, db.keying.batch(batchId), bodyBytes, policy, now)
     }
 
     private suspend fun store(

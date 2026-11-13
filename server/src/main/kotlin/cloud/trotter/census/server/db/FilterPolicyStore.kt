@@ -2,6 +2,7 @@ package cloud.trotter.census.server.db
 
 import cloud.trotter.census.server.*
 import cloud.trotter.census.server.ingest.StoredSampleExpiry
+import cloud.trotter.census.server.ingest.storedFingerprint
 import cloud.trotter.census.server.jobs.SweepResult
 import kotlinx.coroutines.*
 import kotlinx.serialization.json.*
@@ -125,7 +126,8 @@ class FilterPolicyStore(private val db: Database, private val clock: Clock) {
                         (body["fingerprint"] as? JsonPrimitive)?.takeIf { it.isString }?.content == sample.fp &&
                         runCatching {
                             val dto=cloud.trotter.census.contract.CensusSkeletonSchema.deserialize(sample.body)
-                            dto.kind.wire == sample.kind && cloud.trotter.census.contract.CensusFingerprint.of(dto) == sample.fp
+                            // #85: stored bodies are keyed; a notification's key is recomputed from its keyed slots.
+                            dto.kind.wire == sample.kind && db.keying.storedFingerprint(dto) == sample.fp
                         }.getOrDefault(false)
                     if (!valid || sample.status == "resolved" || sample.last.plusDays(90) <= clock.today()) {
                         deleted += update("DELETE FROM cluster_samples WHERE fingerprint=? AND platform_app_version=? AND received_day=?", sample.fp, sample.version, sample.received)

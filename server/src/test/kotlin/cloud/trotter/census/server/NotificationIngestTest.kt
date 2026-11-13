@@ -60,8 +60,8 @@ class NotificationIngestTest {
             assertEquals(2, sql { it.select("SELECT count(*) FROM clusters") { row -> row.getInt(1) } })
             // #85: the sample is stored keyed: keyed slot hashes under the keyed fingerprint, never the wire values.
             val publicFingerprint = notification.getValue("fingerprint").jsonPrimitive.content
-            val stored = sql { it.select("SELECT skeleton::text FROM cluster_samples WHERE fingerprint = ?", testKeying.fingerprint(publicFingerprint)) { row -> row.getString(1) } }
             val expected = testKeying.atRest(SkeletonValidator.validate(notification, notificationPolicy, day) as ItemVerdict.Accepted)
+            val stored = sql { it.select("SELECT skeleton::text FROM cluster_samples WHERE fingerprint = ?", expected.item.fingerprint) { row -> row.getString(1) } }
             assertEquals(Json.parseToJsonElement(expected.canonicalJson), Json.parseToJsonElement(requireNotNull(stored)))
             assertFalse(stored.contains(publicFingerprint)); assertFalse(stored.contains("0123456789abcdef"))
             assertEquals(1, sql { it.select("SELECT count(*) FROM token_sightings_v5") { row -> row.getInt(1) } })
@@ -106,7 +106,7 @@ class NotificationIngestTest {
                 val date = day.plusDays(offset.toLong()); instant = date.atTime(12, 0).toInstant(java.time.ZoneOffset.UTC)
                 assertTrue(ingest(listOf(notificationFixture(date, version = "8.0"), notificationFixture(date, version = "9.0")), "cap-$offset", date) is IngestOutcome.Stored)
             }
-            val fp = testKeying.fingerprint(variants.first().getValue("fingerprint").jsonPrimitive.content)
+            val fp = testKeying.atRest(SkeletonValidator.validate(variants.first(), notificationPolicy, day) as ItemVerdict.Accepted).item.fingerprint
             assertEquals(10, sql { it.select("SELECT count(*) FROM cluster_samples WHERE fingerprint = ?", fp) { row -> row.getInt(1) } })
             for (version in listOf("8.0", "9.0")) assertEquals(5, sql {
                 it.select("SELECT count(*) FROM cluster_samples WHERE fingerprint = ? AND platform_app_version = ?", fp, version) { row -> row.getInt(1) }

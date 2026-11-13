@@ -12,6 +12,7 @@ import cloud.trotter.census.server.db.KeyedHashStorageMigration
 import cloud.trotter.census.server.ingest.ItemVerdict
 import cloud.trotter.census.server.ingest.SkeletonValidator
 import cloud.trotter.census.server.ingest.atRest
+import cloud.trotter.census.server.ingest.storedFingerprint
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNotEquals
@@ -42,6 +43,11 @@ class HashKeyingTest {
         assertFalse(testKeying.same(keyed, hash))
         assertThrows(IllegalArgumentException::class.java) { testKeying.token("ABCDEF0123456789") }
         assertThrows(IllegalArgumentException::class.java) { testKeying.fingerprint("c".repeat(63)) }
+        val batch = testKeying.batch("0123456789abcdef0123456789abcdef")
+        assertTrue(CensusFingerprint.isWellFormed(batch))
+        assertNotEquals(batch, other.batch("0123456789abcdef0123456789abcdef"))
+        assertNotEquals(batch, testKeying.fingerprint("0123456789abcdef0123456789abcdef".repeat(2)))
+        assertThrows(IllegalArgumentException::class.java) { testKeying.batch("") }
     }
 
     @Test fun `the pepper is exactly 64 hex digits and never echoed`() {
@@ -59,7 +65,10 @@ class HashKeyingTest {
         val notification = notificationAccepted(day)
         val stored = testKeying.atRest(notification)
         val publicSlot = (notification.item as NotificationSkeletonDto).slots.values.first().h!!
-        assertEquals(testKeying.fingerprint(notification.item.fingerprint), stored.item.fingerprint)
+        // The stored key is the keyed fingerprint of the keyed slots, so the stored body proves its own key.
+        assertEquals(testKeying.fingerprint(requireNotNull(CensusFingerprint.of(stored.item))), stored.item.fingerprint)
+        assertEquals(stored.item.fingerprint, testKeying.storedFingerprint(stored.item))
+        assertNotEquals(testKeying.fingerprint(notification.item.fingerprint), stored.item.fingerprint)
         assertTrue((stored.item as NotificationSkeletonDto).slots.values.all { it.h == testKeying.token(publicSlot) })
         assertEquals(notification.tokens.map { testKeying.token(it.hash) }, stored.tokens.map { it.hash })
         assertEquals(notification.bytes, stored.bytes)

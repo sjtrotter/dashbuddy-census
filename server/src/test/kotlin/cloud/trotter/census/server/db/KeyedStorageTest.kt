@@ -33,6 +33,13 @@ class KeyedStorageTest : LifecycleTestDatabase() {
         return SkeletonValidator.validate(raw, policy, day) as ItemVerdict.Accepted
     }
 
+    /**
+     * The app's batch id at the pinned contract (`CensusApi.batchId`, core/network CensusApi.kt:288): sha256 of the
+     * batch's sorted fingerprints joined by newlines, first 32 hex. Reproduced here; the server never derives it.
+     */
+    private fun appBatchId(fingerprints: List<String>): String =
+        cloud.trotter.census.server.auth.sha256Hex(fingerprints.sorted().joinToString("\n").toByteArray(Charsets.UTF_8)).take(32)
+
     private fun notification(): ItemVerdict.Accepted = SkeletonValidator.validate(
         notificationFixture(day, hash = requireNotNull(CensusHash.of(notificationWord))), policy, day,
     ) as ItemVerdict.Accepted
@@ -41,6 +48,10 @@ class KeyedStorageTest : LifecycleTestDatabase() {
         Database.connect(config()).use { db ->
             val items = listOf(screen(), notification())
             repeat(policy.k) { observe(db, install(), items) }
+            // A single-notification batch named the way the app names it: its id is derived from a public fingerprint.
+            val publicFingerprint = notification().item.fingerprint
+            val batchId = appBatchId(listOf(publicFingerprint))
+            assertTrue(SkeletonStore(db, clock).ingest(install(), key, day, listOf(notification()), 0, emptyMap(), batchId, 1, BudgetPolicy()) is IngestOutcome.Stored)
             val ops = OpsStore(db, clock, policy)
 
             // The live server, holding the pepper, matches every candidate: hash, key, compare (the resolve route's path).
@@ -54,6 +65,9 @@ class KeyedStorageTest : LifecycleTestDatabase() {
             val dump = sql { it.dumpRows() }
             val publicGuesses = candidates.map { requireNotNull(CensusHash.of(it)) }
             assertEquals(emptySet<String>(), matches(dump, publicGuesses))
+            // The guessed notification's public fingerprint, and the batch id the app derives from it, match nothing.
+            assertEquals(emptySet<String>(), matches(dump, listOf(publicFingerprint, batchId)))
+            assertEquals(setOf(testKeying.batch(batchId)), matches(dump, listOf(testKeying.batch(batchId))))
             val wrongPepper = HashKeying.fromHex("5".repeat(64))
             assertEquals(emptySet<String>(), matches(dump, candidates.map { requireNotNull(wrongPepper.candidate(it)) }))
             // Positive control: the dump does hold the keyed values (and the reviewed clear text the operator chose to store).
@@ -72,7 +86,7 @@ class KeyedStorageTest : LifecycleTestDatabase() {
             assertEquals(emptySet<String>(), matches(dump, raw + notification.item.fingerprint))
 
             // Notification fingerprints are keyed in the catalogue and in every reference to it; screen ones cover no text.
-            val keyed = testKeying.fingerprint(notification.item.fingerprint)
+            val keyed = stored(notification).item.fingerprint
             for (table in listOf("clusters", "cluster_samples", "cluster_sightings_v5")) {
                 assertEquals(setOf(screen.item.fingerprint, keyed), sql { it.select("SELECT jsonb_agg(DISTINCT fingerprint)::text FROM $table") { r ->
                     Json.parseToJsonElement(r.getString(1)).jsonArray.map { e -> e.jsonPrimitive.content }.toSet()
