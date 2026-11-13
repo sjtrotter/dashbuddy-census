@@ -299,10 +299,11 @@ private fun FlowContent.healthSection(health: JsonObject, today: String) = panel
     val installs = health.rows("installs")
     details {
         summary { +"Per-install health · ${number(installs.size)} rows" }
+        p("muted") { +"A pseudonym is not an install: one phone gets a new pseudonym every 30 days." }
         if (installs.isEmpty()) emptyState("No per-install health reports in this window.")
-        else dataTable("Per-install health · last 7 UTC days", listOf("Install", "Day", "Platform", "Version", "Admitted", "UNKNOWN", "Trips"), installs.map { row ->
+        else dataTable("Per-install health · last 7 UTC days", listOf("Pseudonym", "Day", "Platform", "Version", "Admitted", "UNKNOWN", "Trips"), installs.map { row ->
             listOf(
-                cell { code { +prefix(row.text("installIdPrefix")) } }, cell { date(row.text("day")) },
+                cell { code { +prefix(row.text("pseudonymPrefix")) } }, cell { date(row.text("day")) },
                 cell { +platform(row.text("platform")) }, cell { code { +version(row.text("version")) } },
                 numeric(row.count("admitted")), numeric(row.count("unknown")),
                 cell(num = true) { val trips = row.count("trips"); if (trips > 0) chip(number(trips), "warn") else +number(trips) },

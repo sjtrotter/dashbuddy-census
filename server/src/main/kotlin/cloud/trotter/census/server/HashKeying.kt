@@ -69,6 +69,14 @@ class HashKeying private constructor(private val key: SecretKeySpec) {
     private fun mac(label: String, value: String): String =
         HexFormat.of().formatHex(macs.get().doFinal((label + value).toByteArray(Charsets.UTF_8)))
 
+    /**
+     * #86: the AES-256 key that wraps each random epoch key in `epoch_keys`, so a dump or backup without the pepper
+     * holds no usable epoch key. Wrapping only: an epoch key is never derived from the pepper, so deleting it from
+     * the database destroys it.
+     */
+    internal fun epochWrappingKey(): SecretKeySpec =
+        SecretKeySpec(macs.get().doFinal(EPOCH_WRAP_LABEL.toByteArray(Charsets.UTF_8)), "AES")
+
     override fun toString(): String = "HashKeying([redacted])"
 
     companion object {
@@ -80,6 +88,7 @@ class HashKeying private constructor(private val key: SecretKeySpec) {
         private const val FINGERPRINT_LABEL = "census.keyed.v1:fingerprint:"
         private const val BATCH_LABEL = "census.keyed.v1:batch:"
         private const val CHECK_LABEL = "census.keyed.v1:check"
+        private const val EPOCH_WRAP_LABEL = "census.keyed.v1:epoch-wrap"
         private const val MAX_BATCH_ID_LENGTH = 128
 
         /** Parses the pepper; the error names the variable, never the value. */

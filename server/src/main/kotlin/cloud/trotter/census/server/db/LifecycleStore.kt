@@ -47,6 +47,13 @@ class LifecycleStore(private val db: Database, private val clock: Clock, private
             { query { select("SELECT count(*) FROM installs WHERE last_seen_day + 365 <= ?", today) { it.getLong(1) } ?: 0 } },
             { installs.purgeInactive(today) to 0 },
         )
+        // #86: an epoch key older than the previous epoch is destroyed; its rows can then be tied to no install. The
+        // current and next epochs' keys are created here ahead of need, so ingest rarely creates one mid-batch.
+        result["epoch_keys"] = sweep(
+            { query { with(EpochKeyStore) { expiredCount(today) } } },
+            { query { with(EpochKeyStore) { destroyExpired(today).also { ensureAhead(db.keying, today) } } } to 0 },
+        )
+        result["quarantine_marks"] = quarantineMarks(today)
         result["tokens"] = delete("token_sightings_v5", "last_day + 30 <= ?", today)
         result["sightings"] = delete("cluster_sightings_v5", "day + ${policy.retention.clusterSightingsDays} <= ?", today)
         for (kind in listOf("screen", "notification")) result["samples_$kind"] = samples(kind, today)
@@ -54,6 +61,16 @@ class LifecycleStore(private val db: Database, private val clock: Clock, private
         result["catalogue"] = catalogue()
         return result
     }
+
+    /**
+     * #86: a passed quarantine mark is cleared, so the day an install's evidence started to count (shared by all its
+     * sightings from its first week) does not outlive that week.
+     */
+    private suspend fun quarantineMarks(today: LocalDate): SweepResult = sweep(
+        { query { select("SELECT count(*) FROM token_sightings_v5 WHERE counts_from <= ?", today) { it.getLong(1) } ?: 0 } },
+        { query { 0 to update("""UPDATE token_sightings_v5 SET counts_from = NULL WHERE ctid IN
+            (SELECT ctid FROM token_sightings_v5 WHERE counts_from <= ? LIMIT 1000)""", today) } },
+    )
 
     private fun sampleDue(): String = """(s.purge_after IS NULL OR s.purge_after <= ? OR EXISTS (
         SELECT 1 FROM jsonb_path_query(s.skeleton, '$.**.h') h
@@ -113,6 +130,8 @@ class LifecycleStore(private val db: Database, private val clock: Clock, private
         return query {
             buildMap {
                 put("inactive_installs", select("SELECT count(*) FROM installs WHERE last_seen_day+365 <= ?",today) { it.getLong(1) }!!)
+                put("epoch_keys", with(EpochKeyStore) { expiredCount(today) })
+                put("quarantine_marks", select("SELECT count(*) FROM token_sightings_v5 WHERE counts_from <= ?",today) { it.getLong(1) }!!)
                 put("tokens", select("SELECT count(*) FROM token_sightings_v5 WHERE last_day+30 <= ?",today) { it.getLong(1) }!!)
                 put("sightings", select("SELECT count(*) FROM cluster_sightings_v5 WHERE day+${policy.retention.clusterSightingsDays} <= ?",today) { it.getLong(1) }!!)
                 for (kind in listOf("screen","notification")) put("samples_$kind",

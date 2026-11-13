@@ -10,10 +10,6 @@ class FilterReplayTest : LifecycleTestDatabase() {
         Database.connect(config()).use { db ->
             val id = install(); val sample = item(); observe(db,id,listOf(sample))
             sql {
-                it.update("INSERT INTO token_sightings VALUES('0123456789abcdef',?,?,?,'words:1')",id,day,day)
-                // #85: the cluster is stored under the keyed fingerprint, and the keyed body still proves it.
-                it.update("INSERT INTO cluster_sightings VALUES(?,?,?,'8.0',1)",stored(sample).item.fingerprint,id,day)
-                it.update("INSERT INTO vocabulary VALUES('0123456789abcdef','words:1',10,?,NULL,NULL,NULL,'rejected')",day)
                 it.update("UPDATE cluster_samples SET hash_domain=NULL,filter_rev=NULL,purge_after=NULL")
                 // #85: a legacy row predates keying, so its body is the public one (V7 cuts real ones over before keying).
                 it.update("UPDATE cluster_samples SET skeleton=?::jsonb WHERE fingerprint=?", sample.canonicalJson, stored(sample).item.fingerprint)
@@ -21,15 +17,19 @@ class FilterReplayTest : LifecycleTestDatabase() {
             }
             val floors = FilterPolicyStore(db,clock)
             assertEquals(1,floors.bootstrap(1))
-            assertEquals(0,count("token_sightings")); assertEquals(0,count("cluster_sightings")); assertEquals(0,count("vocabulary"))
             val body = sql { it.select("SELECT skeleton::text FROM cluster_samples") { r -> r.getString(1) }!! }
             assertFalse(body.contains("0123456789abcdef")); assertTrue(body.contains("expired"))
             assertFalse(body.contains(sample.item.fingerprint)); assertTrue(body.contains(stored(sample).item.fingerprint))
             assertEquals("HOME",sql { it.select("SELECT screen_class FROM clusters") { r -> r.getString(1) } })
             assertNull(sql { it.select("SELECT notes FROM clusters") { r -> r.getString(1) } })
             assertEquals(1,floors.bootstrap(1)); assertEquals(0,floors.results.getValue("legacy_samples").rewritten)
-            sql { it.update("INSERT INTO token_sightings VALUES('0123456789abcdef',?,?,?,'words:1')",id,day,day) }
-            assertTrue(runCatching { floors.bootstrap(1) }.isFailure)
+            // #86: startup refuses a content table that names an install again.
+            sql { it.update("ALTER TABLE token_sightings_v5 ADD COLUMN install_id uuid") }
+            try {
+                assertTrue(runCatching { floors.bootstrap(1) }.isFailure)
+            } finally {
+                sql { it.update("ALTER TABLE token_sightings_v5 DROP COLUMN install_id") }
+            }
         }
     }
 

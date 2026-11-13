@@ -13,12 +13,12 @@ class VocabularyEligibilityTest : LifecycleTestDatabase() {
 
     @Test fun `seven elapsed days and nine versus ten contributors agree across queue count display resolve`() = runBlocking {
         Database.connect(config()).use { db ->
-            val ids = List(10) { install() }
-            for (id in ids) observe(db, id)
-            val tenth = ids.last()
             // #79: quarantine counts whole UTC days after the enrolment day (Sol S6); the tenth enrolled on day - 7,
             // which may have been 23:59, so it qualifies only tomorrow, when seven full days have certainly passed.
-            sql { it.update("UPDATE installs SET created_day=? WHERE install_id=?", day.minusDays(7), tenth) }
+            // #86: ingest stamps that day onto the tenth's sightings, which no longer join the installs table.
+            val ids = List(9) { install() } + install(age = 7)
+            for (id in ids) observe(db, id)
+            val tenth = ids.last()
             val ops = OpsStore(db, clock, policy)
             assertEquals(0, ops.vocabularyQueueCount()); assertTrue(ops.vocabularyQueueDisplay().isEmpty())
             assertTrue(ops.vocabularyQueue().isEmpty())
@@ -42,7 +42,7 @@ class VocabularyEligibilityTest : LifecycleTestDatabase() {
             val ops = OpsStore(db, clock, policy.copy(acceptedHashDomains=listOf(1,2)))
             assertEquals(3, ops.vocabularyQueueCount())
             assertTrue(ops.vocabularyQueueDisplay().all { it.distinctInstalls == 10 })
-            sql { it.update("UPDATE token_sightings_v5 SET last_day=? WHERE install_id=? AND hash_domain=1 AND filter_rev=1", day.minusDays(30), ids.last()) }
+            sql { it.update("UPDATE token_sightings_v5 SET last_day=? WHERE install_tag=? AND hash_domain=1 AND filter_rev=1", day.minusDays(30), tokenTag(ids.last())) }
             assertEquals(2, ops.vocabularyQueueCount())
             assertFalse(ops.resolve(storedToken, null, "corpus", true, 1, 1))
             assertTrue(ops.resolve(storedToken, null, "corpus", true, 1, 2))

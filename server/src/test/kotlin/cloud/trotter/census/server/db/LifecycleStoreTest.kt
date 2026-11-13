@@ -166,8 +166,9 @@ class LifecycleStoreTest : LifecycleTestDatabase() {
     @Test fun `capped backlog continues failures isolate and cancellation propagates`() = runBlocking {
         Database.connect(config()).use { db ->
             val id = install()
-            sql { it.update("""INSERT INTO token_sightings_v5 SELECT lpad(to_hex(n),16,'0'), ?, ?, ?, 'words:1', 1, 1
-                FROM generate_series(1,50001) n""", id, day.minusDays(31), day.minusDays(30)) }
+            sql { it.update("""INSERT INTO token_sightings_v5 (token_hash, first_day, last_day, kind, hash_domain, filter_rev, epoch, install_tag, trusted)
+                SELECT lpad(to_hex(n),16,'0'), ?, ?, 'words:1', 1, 1, ?, ?, false
+                FROM generate_series(1,50001) n""", day.minusDays(31), day.minusDays(30), Epochs.of(day), tokenTag(id)) }
             val lifecycle = LifecycleStore(db, clock, policy)
             val first = lifecycle.runOnce().getValue("tokens")
             assertEquals(50000, first.deleted); assertTrue(first.capped); assertEquals(1, first.remainingDue)
@@ -192,8 +193,9 @@ class LifecycleStoreTest : LifecycleTestDatabase() {
         Database.connect(config()).use { db ->
             val id=install()
             sql {
-                it.update("""INSERT INTO token_sightings_v5 SELECT lpad(to_hex(n),16,'0'), ?, ?, ?, 'words:1',1,1
-                    FROM generate_series(1,5000) n""",id,day.minusDays(31),day.minusDays(30))
+                it.update("""INSERT INTO token_sightings_v5 (token_hash, first_day, last_day, kind, hash_domain, filter_rev, epoch, install_tag, trusted)
+                    SELECT lpad(to_hex(n),16,'0'), ?, ?, 'words:1',1,1, ?, ?, false
+                    FROM generate_series(1,5000) n""",day.minusDays(31),day.minusDays(30),Epochs.of(day),tokenTag(id))
                 it.update("CREATE FUNCTION pause_lifecycle() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN PERFORM pg_sleep(0.5); RETURN NULL; END;'")
                 it.update("CREATE TRIGGER pause_lifecycle BEFORE DELETE ON token_sightings_v5 FOR EACH STATEMENT EXECUTE FUNCTION pause_lifecycle()")
             }

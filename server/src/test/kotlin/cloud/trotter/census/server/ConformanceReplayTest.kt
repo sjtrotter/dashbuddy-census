@@ -53,6 +53,9 @@ import java.sql.DriverManager
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneOffset
+import cloud.trotter.census.server.db.TokenObject
+import cloud.trotter.census.server.db.isTagOf
+import cloud.trotter.census.server.db.testTag
 import java.util.UUID
 import java.util.zip.GZIPInputStream
 
@@ -60,7 +63,7 @@ import java.util.zip.GZIPInputStream
 @EnabledIf(value = "dockerAvailable", disabledReason = "Docker unavailable: conformance tests skipped")
 class ConformanceReplayTest {
     @org.junit.jupiter.api.BeforeEach
-    fun clean() { sql { connection -> connection.createStatement().use { it.execute("TRUNCATE installs, clusters CASCADE") } } }
+    fun clean() { sql { connection -> connection.createStatement().use { it.execute("TRUNCATE installs, clusters, token_sightings_v5, health_daily CASCADE") } } }
 
     @Test
     fun `notification vectors replay through authenticated ingest with explicit policy`() {
@@ -223,10 +226,11 @@ class ConformanceReplayTest {
                         assertEquals(expected, stored.map { Json.parseToJsonElement(it) }.toSet())
                     }
                     val sightings = sql { connection ->
-                        connection.prepareStatement("SELECT fingerprint, count(*) FROM cluster_sightings_v5 WHERE install_id = ?::uuid GROUP BY fingerprint").use { statement ->
-                            statement.setString(1, id)
-                            statement.executeQuery().use { rows -> buildMap { while (rows.next()) put(rows.getString(1), rows.getInt(2)) } }
-                        }
+                        // #86: the install's rows are the ones carrying its tag for their cluster.
+                        connection.prepareStatement("SELECT fingerprint, epoch, install_tag FROM cluster_sightings_v5").use { statement ->
+                            statement.executeQuery().use { rows -> buildList { while (rows.next()) add(Triple(rows.getString(1), rows.getInt(2), rows.getString(3))) } }
+                        }.filter { (fingerprint, epoch, tag) -> connection.isTagOf(TagPurpose.CLUSTER, UUID.fromString(id), fingerprint, epoch, tag, day) }
+                            .groupingBy { it.first }.eachCount()
                     }
                     // #79: one presence row per observation day, version, domain and revision; never a count.
                     assertEquals(fingerprints.mapValues { (_, group) ->
@@ -258,10 +262,11 @@ class ConformanceReplayTest {
                         }
                     })
                     val hashes = sql { connection ->
-                        connection.prepareStatement("SELECT DISTINCT token_hash FROM token_sightings_v5 WHERE install_id = ?::uuid").use { statement ->
-                            statement.setString(1, id)
-                            statement.executeQuery().use { rows -> buildSet { while (rows.next()) add(rows.getString(1)) } }
-                        }
+                        connection.prepareStatement("SELECT token_hash, hash_domain, filter_rev, epoch, install_tag FROM token_sightings_v5").use { statement ->
+                            statement.executeQuery().use { rows -> buildList { while (rows.next()) add(listOf(rows.getString(1), rows.getInt(2), rows.getInt(3), rows.getInt(4), rows.getString(5))) } }
+                        }.filter { row ->
+                            connection.isTagOf(TagPurpose.TOKEN, UUID.fromString(id), TokenObject.of(row[1] as Int, row[2] as Int, row[0] as String), row[3] as Int, row[4] as String, day)
+                        }.map { it[0] as String }.toSet()
                     }
                     assertEquals(posted.flatMap { it.getValue("hashes").jsonArray.map { hash -> testKeying.token(hash.jsonPrimitive.content) } }.toSet(), hashes)
                     val ledgerBefore = requireNotNull(store.ledgerFor(UUID.fromString(id), day))
@@ -339,9 +344,9 @@ class ConformanceReplayTest {
                     assertEquals(listOf("accepted", "duplicate"), statuses.sorted())
                     val raceFingerprint = items.first().getValue("fingerprint").jsonPrimitive.content
                     assertEquals(1, sql { connection ->
-                        connection.prepareStatement("SELECT count(*) FROM cluster_sightings_v5 WHERE fingerprint = ? AND install_id = ?::uuid").use { statement ->
+                        connection.prepareStatement("SELECT count(*) FROM cluster_sightings_v5 WHERE fingerprint = ? AND install_tag = ?").use { statement ->
                             statement.setString(1, raceFingerprint)
-                            statement.setString(2, raceId)
+                            statement.setString(2, connection.testTag(TagPurpose.CLUSTER, UUID.fromString(raceId), raceFingerprint, day).tag)
                             statement.executeQuery().use { rows -> rows.next(); rows.getInt(1) }
                         }
                     })
@@ -367,9 +372,9 @@ class ConformanceReplayTest {
                     assertEquals(1, versionsBody.getValue("accepted").jsonPrimitive.int)
                     assertEquals(1, versionsBody.getValue("duplicate").jsonPrimitive.int)
                     assertEquals(mapOf("1.0.0" to 1, "2.0.0" to 1), sql { connection ->
-                        connection.prepareStatement("SELECT platform_app_version, count(*) FROM cluster_sightings_v5 WHERE fingerprint = ? AND install_id = ?::uuid GROUP BY platform_app_version").use { statement ->
+                        connection.prepareStatement("SELECT platform_app_version, count(*) FROM cluster_sightings_v5 WHERE fingerprint = ? AND install_tag = ? GROUP BY platform_app_version").use { statement ->
                             statement.setString(1, versionFingerprint)
-                            statement.setString(2, raceId)
+                            statement.setString(2, connection.testTag(TagPurpose.CLUSTER, UUID.fromString(raceId), versionFingerprint, day).tag)
                             statement.executeQuery().use { rows -> buildMap { while (rows.next()) put(rows.getString(1), rows.getInt(2)) } }
                         }
                     })

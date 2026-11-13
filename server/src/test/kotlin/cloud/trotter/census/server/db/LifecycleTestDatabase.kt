@@ -43,11 +43,22 @@ abstract class LifecycleTestDatabase {
      * key still carries the domain, so its separation is exercised by seeding the sighting row directly.
      */
     protected fun sightDomain2(id: UUID, revision: Int = 1) = sql {
-        it.update("""INSERT INTO token_sightings_v5(token_hash,install_id,first_day,last_day,kind,hash_domain,filter_rev)
-            SELECT DISTINCT token_hash, ?, ?, ?, kind, 2, ? FROM token_sightings_v5 WHERE hash_domain=1 LIMIT 1
-            ON CONFLICT (hash_domain, token_hash, filter_rev, install_id) DO UPDATE SET last_day=EXCLUDED.last_day""",
-            id, day, day, revision)
+        val (token, kind) = it.select("SELECT token_hash, kind FROM token_sightings_v5 WHERE hash_domain=1 LIMIT 1") { r -> r.getString(1) to r.getString(2) }!!
+        val trusted = it.select("SELECT trusted FROM installs WHERE install_id=?", id) { r -> r.getBoolean(1) }!!
+        it.update("""INSERT INTO token_sightings_v5(token_hash,epoch,install_tag,trusted,first_day,last_day,kind,hash_domain,filter_rev)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 2, ?)
+            ON CONFLICT (hash_domain, token_hash, filter_rev, epoch, install_tag) DO UPDATE SET last_day=EXCLUDED.last_day""",
+            token, Epochs.of(day), tokenTag(id, token, 2, revision), trusted, day, day, kind, revision)
     }
+
+    /** #86: [id]'s epoch tag for [objectKey] under [on]'s epoch, as ingest computes it (the key is created if missing). */
+    protected fun tag(purpose: TagPurpose, id: UUID, objectKey: String, on: LocalDate = day): String = sql {
+        with(EpochKeyStore) { it.keyForTagging(testKeying, Epochs.of(on), day) }.tag(purpose, id, objectKey)
+    }
+
+    /** [id]'s tag on a token sighting (the fixtures' word hash, keyed, by default). */
+    protected fun tokenTag(id: UUID, token: String = testKeying.token("0123456789abcdef"), domain: Int = 1, revision: Int = 1, on: LocalDate = day): String =
+        tag(TagPurpose.TOKEN, id, TokenObject.of(domain, revision, token), on)
     protected fun screenItem(): ItemVerdict.Accepted {
         val slot=cloud.trotter.census.contract.TextSlot("0123456789abcdef","words:1")
         val child=cloud.trotter.census.contract.UiSkeletonNodeDto(className="android.widget.TextView",text=mapOf("desc" to slot,"pane" to slot))
@@ -66,7 +77,7 @@ abstract class LifecycleTestDatabase {
     @BeforeEach fun reset() {
         instant = Instant.parse("2026-10-06T12:00:00Z")
         Database.migrate(config())
-        sql { it.update("TRUNCATE installs, clusters, withdrawals, vocabulary, vocabulary_v5, filter_floor, health_fleet_daily CASCADE") }
+        sql { it.update("TRUNCATE installs, clusters, withdrawals, vocabulary_v5, filter_floor, health_fleet_daily, token_sightings_v5, health_daily, epoch_keys CASCADE") }
     }
     companion object {
         @Container @JvmField val postgres = PostgreSQLContainer("postgres:17-alpine")

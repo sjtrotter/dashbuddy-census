@@ -2,6 +2,7 @@ package cloud.trotter.census.server.db
 
 import cloud.trotter.census.server.Clock
 import cloud.trotter.census.server.Database
+import cloud.trotter.census.server.TagPurpose
 import cloud.trotter.census.server.ingest.LifecycleDeadline
 import cloud.trotter.census.server.ingest.ItemVerdict
 import cloud.trotter.census.server.ingest.BudgetPolicy
@@ -25,7 +26,7 @@ sealed interface IngestOutcome {
     data class BudgetExhausted(val retryAfterSeconds: Long) : IngestOutcome
 }
 
-/** Canonical samples and install-keyed sightings, written together in one transaction. */
+/** Canonical samples and epoch-tagged sightings (#86), written together in one transaction. */
 class SkeletonStore(private val db: Database, private val clock: Clock) {
     private suspend fun <T> query(block: Connection.() -> T): T = withContext(Dispatchers.IO) {
         transaction(db.exposed) {
@@ -69,11 +70,15 @@ class SkeletonStore(private val db: Database, private val clock: Clock) {
         policy: BudgetPolicy,
         now: Instant,
     ): IngestOutcome = query {
-        val current = select(
-            "SELECT 1 FROM installs WHERE install_id = ? AND key_hash = ? AND revoked_at IS NULL FOR SHARE",
+        // #86: the install's trust and quarantine are read under the same share lock that serializes this batch with
+        // withdrawal, revocation and a trust change, and stamped onto its sightings, which no longer name it.
+        val install = select(
+            "SELECT trusted, created_day FROM installs WHERE install_id = ? AND key_hash = ? AND revoked_at IS NULL FOR SHARE",
             installId, keyHash,
-        ) { true } ?: false
-        if (!current) return@query IngestOutcome.StaleCredential
+        ) { it.getBoolean(1) to it.getObject(2, LocalDate::class.java) } ?: return@query IngestOutcome.StaleCredential
+        val (trusted, createdDay) = install
+        val countsFrom = VocabularyEligibility.countsFrom(createdDay, day)
+        val tagger = Tagger(this, db.keying, day)
         update("INSERT INTO ingest_ledger (install_id, day) VALUES (?, ?) ON CONFLICT DO NOTHING", installId, day)
         val known = select(
             "SELECT batch_ids FROM ingest_ledger WHERE install_id = ? AND day = ? FOR UPDATE",
@@ -133,20 +138,28 @@ class SkeletonStore(private val db: Database, private val clock: Clock) {
             for (acceptedItem in group) {
                 val item = acceptedItem.item
                 val observed = LifecycleDeadline.observation(LocalDate.parse(item.day), day)
+                // #86: keyed by an epoch tag of (install, cluster) under the observation day's epoch, never the install.
+                val sighting = tagger.tag(TagPurpose.CLUSTER, installId, fingerprint, observed)
                 update(
                     // #79: presence only. A second sighting on the same day changes nothing.
-                    """INSERT INTO cluster_sightings_v5 (fingerprint, install_id, day, platform_app_version, hash_domain, filter_rev)
-                        VALUES (?, ?, ?, ?, ?, ?)
-                        ON CONFLICT (fingerprint, install_id, day, platform_app_version, hash_domain, filter_rev) DO NOTHING""",
-                    fingerprint, installId, observed, item.platformAppVersion ?: "unknown", item.hashDomain, item.filterRev,
+                    """INSERT INTO cluster_sightings_v5 (fingerprint, epoch, install_tag, trusted, day, platform_app_version, hash_domain, filter_rev)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT (fingerprint, install_tag, day, platform_app_version, hash_domain, filter_rev) DO NOTHING""",
+                    fingerprint, sighting.epoch, sighting.tag, trusted, observed, item.platformAppVersion ?: "unknown",
+                    item.hashDomain, item.filterRev,
                 )
                 for (token in acceptedItem.tokens.distinct()) {
+                    val tag = tagger.tag(TagPurpose.TOKEN, installId,
+                        TokenObject.of(token.key.hashDomain, token.key.filterRev, token.key.hash), observed)
                     tokensTouched += update(
-                        """INSERT INTO token_sightings_v5 (token_hash, install_id, first_day, last_day, kind, hash_domain, filter_rev)
-                            VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (hash_domain, token_hash, filter_rev, install_id) DO UPDATE SET
+                        """INSERT INTO token_sightings_v5 (token_hash, epoch, install_tag, trusted, counts_from, first_day, last_day, kind, hash_domain, filter_rev)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (hash_domain, token_hash, filter_rev, epoch, install_tag) DO UPDATE SET
                                 first_day = LEAST(token_sightings_v5.first_day, EXCLUDED.first_day),
-                                last_day = GREATEST(token_sightings_v5.last_day, EXCLUDED.last_day)""",
-                        token.key.hash, installId, observed, observed, token.kind, token.key.hashDomain, token.key.filterRev,
+                                last_day = GREATEST(token_sightings_v5.last_day, EXCLUDED.last_day),
+                                counts_from = CASE WHEN token_sightings_v5.counts_from IS NULL OR EXCLUDED.counts_from IS NULL
+                                    THEN NULL ELSE LEAST(token_sightings_v5.counts_from, EXCLUDED.counts_from) END""",
+                        token.key.hash, tag.epoch, tag.tag, trusted, countsFrom, observed, observed, token.kind,
+                        token.key.hashDomain, token.key.filterRev,
                     )
                 }
             }

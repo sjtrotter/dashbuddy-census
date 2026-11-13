@@ -31,7 +31,7 @@ class NotificationIngestTest {
     private var instant = Instant.parse("2026-10-02T12:00:00Z")
     private val clock = object : Clock { override fun now(): Instant = instant }
     private val day = LocalDate.of(2026, 10, 2)
-    @BeforeEach fun clean() { sql { it.update("TRUNCATE installs, clusters CASCADE") } }
+    @BeforeEach fun clean() { sql { it.update("TRUNCATE installs, clusters, token_sightings_v5, health_daily CASCADE") } }
 
     @Test
     fun `mixed HTTP batches spend one quota before dedup and retries do not spend again`() {
