@@ -3,14 +3,15 @@ package cloud.trotter.census.server.routes
 import cloud.trotter.census.server.Clock
 import cloud.trotter.census.server.ErrorResponse
 import cloud.trotter.census.server.Policy
+import cloud.trotter.census.server.budget
 import cloud.trotter.census.server.auth.AuthenticatedBodyKey
 import cloud.trotter.census.server.auth.AuthenticatedInstallKey
 import cloud.trotter.census.server.auth.InstallRowKey
 import cloud.trotter.census.server.auth.RequestInstantKey
 import cloud.trotter.census.server.db.IngestOutcome
 import cloud.trotter.census.server.db.InstallStore
+import cloud.trotter.census.server.db.PauseStore
 import cloud.trotter.census.server.db.SkeletonStore
-import cloud.trotter.census.server.ingest.BudgetPolicy
 import cloud.trotter.census.server.ingest.ItemVerdict
 import cloud.trotter.census.server.ingest.SkeletonValidator
 import cloud.trotter.census.server.ingest.parseBounded
@@ -31,8 +32,9 @@ private val batchIdPattern = Regex("[A-Za-z0-9_-]{1,64}")
 private val ingestLog = LoggerFactory.getLogger("Ingest")
 
 /** Mounted inside identityRoutes' authenticated install rate limit; the body was already read and signed. */
-fun Route.skeletonRoutes(store: InstallStore, skeletons: SkeletonStore, clock: Clock, policy: Policy) {
+fun Route.skeletonRoutes(store: InstallStore, skeletons: SkeletonStore, clock: Clock, policy: Policy, pause: PauseStore) {
     post("/skeletons") {
+        if (call.refusedByPause(pause)) return@post
         val rawBody = call.attributes[AuthenticatedBodyKey]
         val body = parseBounded(rawBody) as? JsonObject
         val batchId = (body?.get("batchId") as? JsonPrimitive)?.takeIf { it.isString }?.content
@@ -72,7 +74,7 @@ fun Route.skeletonRoutes(store: InstallStore, skeletons: SkeletonStore, clock: C
         val outcome = skeletons.ingest(
             installId, keyHash, today, accepted, duplicate, rejected,
             batchId, rawBody.size.toLong(),
-            BudgetPolicy(dailySkeletonBudget = policy.dailySkeletonBudget), now,
+            policy.budget(), now,
         )
         when (outcome) {
             IngestOutcome.StaleCredential -> call.respond(HttpStatusCode.Unauthorized, ErrorResponse("unauthorized"))

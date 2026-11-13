@@ -3,6 +3,7 @@ package cloud.trotter.census.server.routes
 import cloud.trotter.census.server.Clock
 import cloud.trotter.census.server.ErrorResponse
 import cloud.trotter.census.server.Policy
+import cloud.trotter.census.server.budget
 import cloud.trotter.census.server.auth.AuthenticatedBodyKey
 import cloud.trotter.census.server.auth.AuthenticatedInstallKey
 import cloud.trotter.census.server.auth.InstallAuth
@@ -170,7 +171,7 @@ fun Route.identityRoutes(
                     call.respond(HttpStatusCode.Unauthorized, ErrorResponse("unauthorized"))
                     return@get
                 }
-                val budget = Budget(clock, BudgetPolicy(dailySkeletonBudget = policy.dailySkeletonBudget))
+                val budget = Budget(clock, policy.budget())
                 call.respond(
                     MeResponse(
                         installId.toString().take(8), me.createdDay.toString(), me.lastSeenDay.toString(), me.trusted,

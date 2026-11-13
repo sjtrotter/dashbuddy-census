@@ -5,6 +5,7 @@ import cloud.trotter.census.server.Database
 import cloud.trotter.census.server.ingest.BudgetPolicy
 import cloud.trotter.census.server.ingest.ConsumeOutcome
 import cloud.trotter.census.server.ingest.HealthReport
+import cloud.trotter.census.server.secondsToUtcMidnight
 import cloud.trotter.census.server.jobs.DayReport
 import cloud.trotter.census.server.jobs.FleetDay
 import cloud.trotter.census.server.jobs.NewClusterCount
@@ -61,24 +62,25 @@ class HealthStore(private val db: Database, private val clock: Clock) {
             recordIngestCounters(installId, day, 0, rejected)
             return@query HealthOutcome.BatchQuality
         }
+        // #79: the per-install health-report quota, decided under the ledger row lock before any byte is spent.
+        update("INSERT INTO ingest_ledger (install_id, day) VALUES (?, ?) ON CONFLICT DO NOTHING", installId, day)
+        val reported = select(
+            "SELECT health_reports FROM ingest_ledger WHERE install_id = ? AND day = ? FOR UPDATE", installId, day,
+        ) { it.getInt(1) } ?: error("Missing ledger row")
+        if (reported.toLong() + reports.size > policy.dailyHealthReports) {
+            return@query HealthOutcome.BudgetExhausted(secondsToUtcMidnight(now))
+        }
         when (val consumed = consumeLedger(installId, day, bodyBytes, 0, null, policy, now)) {
             is ConsumeOutcome.BudgetExhausted -> return@query HealthOutcome.BudgetExhausted(consumed.retryAfterSeconds)
             is ConsumeOutcome.Consumed -> Unit
         }
-        val touched = reports.map { FleetKey(it.day, it.platform, it.platformAppVersion) }.distinct()
-            .sortedWith(compareBy({ it.day }, { it.platform }, { it.version }))
-        // Claim and lock each fleet row BEFORE the daily writes. Recompute in a subsequent statement's
-        // snapshot, so a concurrent second install includes the first install's committed contribution.
-        for (key in touched) {
-            update(
-                """INSERT INTO health_fleet_daily (day, platform, platform_app_version, installs_reporting, admitted, unknown, rule_counts)
-                    VALUES (?, ?, ?, 0, 0, 0, '{}'::jsonb) ON CONFLICT DO NOTHING""", key.day, key.platform, key.version,
-            )
-            select(
-                "SELECT 1 FROM health_fleet_daily WHERE day = ? AND platform = ? AND platform_app_version = ? FOR UPDATE",
-                key.day, key.platform, key.version,
-            ) { true } ?: error("Missing fleet row")
-        }
+        update(
+            "UPDATE ingest_ledger SET health_reports = health_reports + ? WHERE install_id = ? AND day = ?",
+            reports.size, installId, day,
+        )
+        val touched = reports.map { FleetKey(it.day, it.platform, it.platformAppVersion) }
+        // Claim and lock each fleet row BEFORE the daily writes; recompute after them.
+        lockFleet(touched)
         for (report in reports) {
             update(
                 """INSERT INTO health_daily (install_id, day, platform, platform_app_version, admitted, unknown, trips, rule_counts, ruleset_version)

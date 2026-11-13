@@ -5,13 +5,15 @@ import cloud.trotter.census.server.Policy
 import cloud.trotter.census.server.db.LedgerRow
 import cloud.trotter.census.server.secondsToUtcMidnight
 
+/** Per-install, per-UTC-day admission limits; defaults come from [Policy] (#79: health reports have their own). */
 data class BudgetPolicy(
     val dailySkeletonBudget: Int = Policy().dailySkeletonBudget,
-    val dailyBytes: Long = 10L * 1024 * 1024,
-    val dailyBatches: Int = 40,
+    val dailyBytes: Long = Policy().dailyBytesBudget,
+    val dailyBatches: Int = Policy().dailyBatchBudget,
+    val dailyHealthReports: Int = Policy().dailyHealthReportBudget,
 ) {
     init {
-        require(dailySkeletonBudget >= 0 && dailyBytes >= 0 && dailyBatches >= 0)
+        require(dailySkeletonBudget >= 0 && dailyBytes >= 0 && dailyBatches >= 0 && dailyHealthReports >= 0)
     }
 }
 

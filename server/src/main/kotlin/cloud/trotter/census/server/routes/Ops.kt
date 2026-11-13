@@ -9,6 +9,7 @@ import cloud.trotter.census.server.auth.InstallId
 import cloud.trotter.census.server.auth.readLimitedBody
 import cloud.trotter.census.server.db.CLUSTER_STATUSES
 import cloud.trotter.census.server.db.OpsStore
+import cloud.trotter.census.server.db.PauseStore
 import cloud.trotter.census.server.ingest.WireGrammars
 import cloud.trotter.census.server.ingest.parseBounded
 import cloud.trotter.census.server.jobs.HealthAlarms
@@ -50,6 +51,7 @@ private val opsJson = Json { explicitNulls = false; encodeDefaults = true }
 /** The form's bound on the operator token (the bearer header has none); the login page's maxlength mirrors it. */
 internal const val MAX_TOKEN_LENGTH = 1024
 private val clusterStatuses = CLUSTER_STATUSES.toSet()
+private val pauseLog = org.slf4j.LoggerFactory.getLogger("Ops")
 
 fun Route.opsRoutes(
     config: Config,
@@ -62,6 +64,7 @@ fun Route.opsRoutes(
     replay: TotpReplay = TotpReplay(),
     lifecycle: cloud.trotter.census.server.jobs.LifecycleReport? = null,
     enrolStats: EnrolStats = EnrolStats(),
+    pause: PauseStore? = null,
 ) {
     route("/ops") {
         install(OpsAuth) {
@@ -158,6 +161,16 @@ fun Route.opsRoutes(
                 } catch (_: DateTimeParseException) { badRequest() }
                 call.respond(store.ledger(day))
             }
+            if (pause != null) {
+                // #79: the upload pause switch. Reading needs operator auth; changing it is a POST, so it needs TOTP.
+                get("/pause") { call.respond(pause.state()) }
+                post("/pause") {
+                    val request = call.opsBody<PauseRequest>() ?: return@post
+                    val state = pause.set(request.paused)
+                    pauseLog.info("upload pause paused={}", state.paused)
+                    call.respond(state)
+                }
+            }
             get("/vocabulary/queue") { call.respond(store.vocabularyQueue(call.bound("limit", 50, 200))) }
             post("/vocabulary/resolve") {
                 val request = call.opsBody<ResolveRequest>() ?: return@post
@@ -228,6 +241,8 @@ private suspend inline fun <reified T> ApplicationCall.opsBody(): T? {
 private data class StatusRequest(val status: String, val resolvedRuleId: String? = null, val notes: String? = null)
 @Serializable
 private data class TrustRequest(val trusted: Boolean)
+@Serializable
+private data class PauseRequest(val paused: Boolean)
 @Serializable
 private data class ResolveRequest(val tokenHash: String, val clearText: String? = null, val source: String, val reject: Boolean, val hashDomain: Int = 1, val filterRev: Int = 1)
 

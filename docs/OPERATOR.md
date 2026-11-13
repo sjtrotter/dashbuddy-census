@@ -65,7 +65,19 @@ Schedule a restore drill; copying a dump alone does not prove recovery.
 
 ## Revoke or withdraw an install
 
-`DELETE /v1/installs/me` lets an authenticated install withdraw. The operator can revoke credentials using the endpoint below. Revocation retains stored observations; withdrawal deletes install-keyed rows in one transaction. See [Backup and restore](#backup-and-restore) for mandatory tombstone replay and journal recovery. Foreign keys currently do not cascade. Do not pretend a manual `DELETE FROM installs` is a complete withdrawal procedure.
+One operator action stops uploads from every non-trusted install without a deploy (#79). Use it when an install or a group of installs is flooding or poisoning the census. `POST /ops/pause` with `{"paused":true}` (operator bearer and a fresh `X-Census-Totp`) answers `{"paused":true,"changedDay":"YYYY-MM-DD"}`; `GET /ops/pause` reads it. The switch is a database row (`ingest_pause`), so it survives restarts and needs no configuration change. While it is on, `POST /v1/skeletons` and `POST /v1/health` from a non-trusted install answer `503 {"error":"paused"}` with `Retry-After: 3600` and store nothing; the app keeps its queue and retries. Trusted installs, enrolment, `/v1/me`, withdrawal and "delete my data" keep working. Each change logs one INFO line `upload pause paused=<true|false>` under `Ops`. Lift it with `{"paused":false}`.
+
+```sh
+curl --fail-with-body "$CENSUS_URL/ops/pause" \
+  -H "Authorization: Bearer $OPERATOR_TOKEN" -H "X-Census-Totp: $TOTP" \
+  -H 'Content-Type: application/json' -d '{"paused":true}'
+```
+
+Per-install quotas apply at admission whether or not the switch is on: per UTC day, 300 accepted skeleton items, 40 batches, 10 MiB and 60 health reports, from `Policy` (`dailySkeletonBudget`, `dailyBatchBudget`, `dailyBytesBudget`, `dailyHealthReportBudget`). A breach answers `429 budget_exhausted` with `Retry-After` to UTC midnight. `/ops/ledger` shows today's per-install counters.
+
+## Revoke, withdraw or delete an install's data
+
+`DELETE /v1/installs/me` lets an authenticated install withdraw; `DELETE /v1/installs/me/data` deletes its server data and keeps it enrolled (#79). The deletion erases every per-install row except the install row and today's ledger row (kept for the quota and batch replay protection, expiring with the 7-day ledger), writes the same tombstone and journal notice as a withdrawal, and is replayed the same way: after a restore from a backup older than the deletion, replay erases that install whole, and the app re-enrols. The response counts the rows erased. The operator can revoke credentials using the endpoint below. Revocation retains stored observations; withdrawal deletes install-keyed rows in one transaction. See [Backup and restore](#backup-and-restore) for mandatory tombstone replay and journal recovery. Foreign keys currently do not cascade. Do not pretend a manual `DELETE FROM installs` is a complete withdrawal procedure.
 
 ## Reinstall with a new signing key
 
@@ -95,7 +107,7 @@ enrols, which would spend the shared enrol budget.
 
 ## Incident: what we can and cannot see
 
-The database can show pseudonymous install IDs, key hashes, token hashes, structural fingerprints, day-level counts, and reviewed vocabulary. Skeleton storage must not contain screen plaintext below the promotion gate. The S5 trusted-envelope exception is described below. No storage path may retain bearer tokens, IP addresses, or device identifiers. Nonce and revocation timestamps are explicit exceptions to date-only observations. Request logs have known route, method, status, elapsed duration, and an optional eight-hex-character install-ID prefix; unmatched paths are redacted.
+The database can show pseudonymous install IDs, key hashes, token hashes, structural fingerprints, day-level counts, and reviewed vocabulary. Skeleton storage must not contain screen plaintext below the promotion gate. The S5 trusted-envelope exception is described below. No storage path may retain bearer tokens, IP addresses, or device identifiers. Nonce, revocation and deletion-tombstone timestamps are explicit exceptions to date-only observations; enrolment is a day (`installs.created_day`, #79). Request logs have known route, method, status and elapsed duration, and no part of the install ID (#79); unmatched paths are redacted. Ingest and alarm lines carry counts and dimensions only. To find an install behind abuse, read the authenticated `/ops/ledger` (today's per-install prefix counters, held 7 days in the database) and `/ops/installs`; to stop it at once, use the [pause switch](#pause-uploads).
 
 A refused enrolment creates no install row, so it shows in only two places: the process-local counts on `GET /ops/enrol` (by reason, reset on restart) and container stdout, as an access line `method=POST path=/v1/enroll status=422 duration_ms=<n>`. The `silence` alarm cannot see an identity that never enrolled: it watches trusted installs only.
 
@@ -174,7 +186,7 @@ endpoints require a valid bearer or session cookie. An explicit wrong Authorizat
 Missing or incorrect credentials return only `401 {"error":"unauthorized"}`; failed sign-in
 shows only "Sign-in failed." without identifying the factor. The shared `ops` rate bucket allows
 60 requests per minute. Each request logs one INFO line under `Ops`, with method, a known
-`/ops/<first segment>` path (`clusters`, `installs`, `health`, `alarms`, `ledger`, `vocabulary`,
+`/ops/<first segment>` path (`clusters`, `installs`, `health`, `alarms`, `ledger`, `vocabulary`, `pause`,
 `login`, or `logout`; no parameters or query), and status. Unknown segments reduce to `/ops`.
 No body, token, TOTP code or secret, cookie value, hash, payload, or full install ID is logged.
 
@@ -214,6 +226,7 @@ Vocabulary hashes are available only on the dedicated JSON vocabulary surface.
 | `GET /ops/health?days=7` | `fleet` rows and per-install prefix/day/platform/version counters; maximum 90 days. |
 | `GET /ops/alarms` | Today's successfully delivered alarms and process-local `AlarmStats` counts. |
 | `GET /ops/enrol` | `{"counts": {...}}`: process-local enrol outcome counts by reason (`enrolled`, `unsupported_schema`, `bad_request`, `unauthorized`, `install_exists`, `revoked`), every key present, zero included; reset on restart. Counts only, no identities. Not counted: a `413` or `408` from the body reader, and any answer given before the enrol handler runs (a routing-level `400` such as a malformed query escape, the rate limiter's `429`, a `500` or `503`). |
+| `GET /ops/pause` | `{"paused":bool,"changedDay":"YYYY-MM-DD"}` (`changedDay` absent until first set). `POST` with `{"paused":bool}` and TOTP sets it; see [Pause uploads](#pause-uploads). |
 | `GET /ops/ledger?day=YYYY-MM-DD` | Per-install prefix counters and totals; defaults to today. `batches` is a count, never the batch IDs. |
 | `GET /ops/vocabulary/queue?limit=` | Hash, kind, distinct non-trusted install count, first/last day for eligible hashes absent from vocabulary; default 50, maximum 200. |
 

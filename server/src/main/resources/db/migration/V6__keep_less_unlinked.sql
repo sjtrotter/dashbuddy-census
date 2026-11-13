@@ -15,3 +15,12 @@ UPDATE installs i SET erased_through = w.withdrawn_at FROM withdrawals w
     WHERE w.install_id_hash = encode(sha256(i.install_id::text::bytea), 'hex') AND i.enrolled_at > w.withdrawn_at;
 ALTER TABLE installs DROP COLUMN enrolled_at;
 
+-- Per-install health-report quota: accepted reports per install per UTC receipt day, beside the skeleton counters.
+ALTER TABLE ingest_ledger ADD COLUMN health_reports integer NOT NULL DEFAULT 0;
+
+-- The upload pause switch: one row, set by the operator; true refuses uploads from every non-trusted install.
+CREATE TABLE ingest_pause (
+    singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
+    paused boolean NOT NULL,
+    changed_day date NOT NULL
+);

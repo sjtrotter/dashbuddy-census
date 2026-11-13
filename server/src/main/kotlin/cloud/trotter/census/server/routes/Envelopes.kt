@@ -3,13 +3,13 @@ package cloud.trotter.census.server.routes
 import cloud.trotter.census.server.Clock
 import cloud.trotter.census.server.ErrorResponse
 import cloud.trotter.census.server.Policy
+import cloud.trotter.census.server.budget
 import cloud.trotter.census.server.auth.AuthenticatedBodyKey
 import cloud.trotter.census.server.auth.AuthenticatedInstallKey
 import cloud.trotter.census.server.auth.InstallRowKey
 import cloud.trotter.census.server.auth.RequestInstantKey
 import cloud.trotter.census.server.db.EnvelopeOutcome
 import cloud.trotter.census.server.db.EnvelopeStore
-import cloud.trotter.census.server.ingest.BudgetPolicy
 import cloud.trotter.census.server.ingest.EnvelopeValidator
 import cloud.trotter.census.server.ingest.EnvelopeVerdict
 import cloud.trotter.census.server.ingest.parseBounded
@@ -76,7 +76,7 @@ fun Route.envelopeRoutes(envelopes: EnvelopeStore, clock: Clock, policy: Policy)
         }
         when (val result = envelopes.ingest(
             install.id, call.attributes[AuthenticatedInstallKey].secretHash, today, accepted, rejected, batchId,
-            rawBody.size.toLong(), BudgetPolicy(dailySkeletonBudget = policy.dailySkeletonBudget),
+            rawBody.size.toLong(), policy.budget(),
             policy.retention.trustedEnvelopesDays, now,
         )) {
             EnvelopeOutcome.StaleCredential -> call.respond(HttpStatusCode.Unauthorized, ErrorResponse("unauthorized"))

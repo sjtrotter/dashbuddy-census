@@ -5,6 +5,7 @@ import cloud.trotter.census.server.db.EnvelopeStore
 import cloud.trotter.census.server.db.HealthStore
 import cloud.trotter.census.server.db.InstallStore
 import cloud.trotter.census.server.db.OpsStore
+import cloud.trotter.census.server.db.PauseStore
 import cloud.trotter.census.server.db.SkeletonStore
 import cloud.trotter.census.server.jobs.HealthAlarms
 import cloud.trotter.census.server.ops.ClustersPageHtml
@@ -150,12 +151,13 @@ fun Application.module(
         val skeletons = db?.let { SkeletonStore(it, clock) }
         val envelopes = db?.let { EnvelopeStore(it, clock) }
         val health = db?.let { HealthStore(it, clock) }
+        val pause = db?.let { PauseStore(it, clock) }
         val alarms = alarmEvaluator ?: health?.let { HealthAlarms(it, clock) }
-        opsRoutes(config, db?.let { OpsStore(it, clock, policy) }, alarms, clock, policy, lifecycle = lifecycle, enrolStats = enrolStats)
+        opsRoutes(config, db?.let { OpsStore(it, clock, policy) }, alarms, clock, policy, lifecycle = lifecycle, enrolStats = enrolStats, pause = pause)
         identityRoutes(store, clock, policy, alarms, enrolStats) {
-            if (store != null && skeletons != null) skeletonRoutes(store, skeletons, clock, policy)
+            if (store != null && skeletons != null && pause != null) skeletonRoutes(store, skeletons, clock, policy, pause)
             if (envelopes != null) envelopeRoutes(envelopes, clock, policy)
-            if (health != null && alarms != null) healthReportRoutes(health, alarms, clock, policy)
+            if (health != null && alarms != null && pause != null) healthReportRoutes(health, alarms, clock, policy, pause)
         }
     }
 }

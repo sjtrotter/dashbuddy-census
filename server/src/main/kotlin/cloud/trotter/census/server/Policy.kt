@@ -13,6 +13,10 @@ data class Policy(
     val quarantineDays: Int = 7,
     val activeWindowDays: Int = 30,
     val dailySkeletonBudget: Int = 300,
+    // #79: the rest of the per-install daily quota, enforced at admission against the UTC-day ledger.
+    val dailyBytesBudget: Long = 10L * 1024 * 1024,
+    val dailyBatchBudget: Int = 40,
+    val dailyHealthReportBudget: Int = 60,
     val maxSkeletonBytes: Int = 65_536,
     val maxBatchItems: Int = 100,
     val maxBatchBytes: Int = 1_048_576,
@@ -39,6 +43,12 @@ data class Retention(
     val backupsDays: Int = 14,
     // Must outlive every restorable backup: backupsDays (14) + S3 noncurrent-version expiry (14) + margin.
     val withdrawalsDays: Int = 60,
+)
+
+/** The per-install daily quota this policy advertises (#79): the one place routes build a [BudgetPolicy] from. */
+fun Policy.budget(): cloud.trotter.census.server.ingest.BudgetPolicy = cloud.trotter.census.server.ingest.BudgetPolicy(
+    dailySkeletonBudget = dailySkeletonBudget, dailyBytes = dailyBytesBudget, dailyBatches = dailyBatchBudget,
+    dailyHealthReports = dailyHealthReportBudget,
 )
 
 fun Config.policy(effectiveFloor: Int = minimumFilterRev): Policy = Policy(

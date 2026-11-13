@@ -3,13 +3,14 @@ package cloud.trotter.census.server.routes
 import cloud.trotter.census.server.Clock
 import cloud.trotter.census.server.ErrorResponse
 import cloud.trotter.census.server.Policy
+import cloud.trotter.census.server.budget
 import cloud.trotter.census.server.auth.AuthenticatedBodyKey
 import cloud.trotter.census.server.auth.AuthenticatedInstallKey
 import cloud.trotter.census.server.auth.InstallRowKey
 import cloud.trotter.census.server.auth.RequestInstantKey
 import cloud.trotter.census.server.db.HealthOutcome
 import cloud.trotter.census.server.db.HealthStore
-import cloud.trotter.census.server.ingest.BudgetPolicy
+import cloud.trotter.census.server.db.PauseStore
 import cloud.trotter.census.server.ingest.HealthReport
 import cloud.trotter.census.server.ingest.HealthReportValidator
 import cloud.trotter.census.server.ingest.HealthReportVerdict
@@ -29,8 +30,9 @@ import java.time.ZoneOffset
 
 private val alarmLog = LoggerFactory.getLogger("Alarm")
 
-fun Route.healthReportRoutes(health: HealthStore, alarms: HealthAlarms, clock: Clock, policy: Policy) {
+fun Route.healthReportRoutes(health: HealthStore, alarms: HealthAlarms, clock: Clock, policy: Policy, pause: PauseStore) {
     post("/health") {
+        if (call.refusedByPause(pause)) return@post
         val rawBody = call.attributes[AuthenticatedBodyKey]
         val body = parseBounded(rawBody) as? JsonObject
         val reports = body?.get("reports") as? JsonArray
@@ -56,7 +58,7 @@ fun Route.healthReportRoutes(health: HealthStore, alarms: HealthAlarms, clock: C
         val keyHash = call.attributes[AuthenticatedInstallKey].secretHash
         when (val outcome = health.upsert(
             installId, keyHash, today, accepted, rejected, rawBody.size.toLong(),
-            BudgetPolicy(dailySkeletonBudget = policy.dailySkeletonBudget), now,
+            policy.budget(), now,
         )) {
             HealthOutcome.StaleCredential -> call.respond(HttpStatusCode.Unauthorized, ErrorResponse("unauthorized"))
             HealthOutcome.BatchQuality -> call.respond(HttpStatusCode.UnprocessableEntity, BatchQualityResponse(rejected = rejected))
