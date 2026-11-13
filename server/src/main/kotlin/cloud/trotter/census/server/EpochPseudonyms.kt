@@ -50,12 +50,22 @@ enum class TagPurpose(val label: String) {
  *
  * Only a holder of this key can recompute a tag from an install id. The key is random, never derived from the pepper,
  * so destroying it ([cloud.trotter.census.server.db.EpochKeyStore]) makes its rows permanently unlinkable.
+ *
+ * Key material in memory: an instance is unwrapped for one transaction (or one migration run) and never cached,
+ * shared across threads or kept in a thread-local, so nothing outlives the work that needed it; once it is
+ * unreachable the key goes with the next collection. The raw bytes this class handles are zeroed as soon as the
+ * [SecretKeySpec] holds them. The JVM limit: [SecretKeySpec] and the initialised [Mac] keep their own copies, which the
+ * JDK offers no reliable way to wipe, so those copies live until garbage collection reclaims them.
  */
 class EpochKey internal constructor(val epoch: Int, private val key: SecretKeySpec) {
-    private val macs = ThreadLocal.withInitial { Mac.getInstance(MAC).apply { init(key) } }
+    // One Mac per instance, created on first use; an instance belongs to one transaction, the lock covers misuse.
+    private var mac: Mac? = null
 
-    fun tag(purpose: TagPurpose, installId: UUID, objectKey: String): String =
-        HexFormat.of().formatHex(macs.get().doFinal("$TAG_LABEL${purpose.label}:$installId:$objectKey".toByteArray(Charsets.UTF_8)))
+    @Synchronized
+    fun tag(purpose: TagPurpose, installId: UUID, objectKey: String): String {
+        val mac = mac ?: Mac.getInstance(MAC).apply { init(key) }.also { mac = it }
+        return HexFormat.of().formatHex(mac.doFinal("$TAG_LABEL${purpose.label}:$installId:$objectKey".toByteArray(Charsets.UTF_8)))
+    }
 
     override fun toString(): String = "EpochKey(epoch=$epoch, [redacted])"
 
@@ -74,11 +84,15 @@ class EpochKey internal constructor(val epoch: Int, private val key: SecretKeySp
         fun generate(keying: HashKeying, epoch: Int): Pair<EpochKey, ByteArray> {
             val raw = ByteArray(KEY_BYTES).also(random::nextBytes)
             val iv = ByteArray(IV_BYTES).also(random::nextBytes)
-            val cipher = Cipher.getInstance(WRAP).apply {
-                init(Cipher.ENCRYPT_MODE, keying.epochWrappingKey(), GCMParameterSpec(GCM_TAG_BITS, iv))
-                updateAAD(aad(epoch))
+            try {
+                val cipher = Cipher.getInstance(WRAP).apply {
+                    init(Cipher.ENCRYPT_MODE, keying.epochWrappingKey(), GCMParameterSpec(GCM_TAG_BITS, iv))
+                    updateAAD(aad(epoch))
+                }
+                return EpochKey(epoch, SecretKeySpec(raw, MAC)) to (iv + cipher.doFinal(raw))
+            } finally {
+                raw.fill(0)
             }
-            return EpochKey(epoch, SecretKeySpec(raw, MAC)) to (iv + cipher.doFinal(raw))
         }
 
         /**
@@ -95,7 +109,11 @@ class EpochKey internal constructor(val epoch: Int, private val key: SecretKeySp
             } catch (_: GeneralSecurityException) {
                 throw EpochKeyUnwrapException()
             }
-            return EpochKey(epoch, SecretKeySpec(raw, MAC))
+            try {
+                return EpochKey(epoch, SecretKeySpec(raw, MAC))
+            } finally {
+                raw.fill(0)
+            }
         }
 
         private fun aad(epoch: Int): ByteArray = "census.epoch.v1:key:$epoch".toByteArray(Charsets.UTF_8)

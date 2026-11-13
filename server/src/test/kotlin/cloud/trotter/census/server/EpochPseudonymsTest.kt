@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNotEquals
 import org.junit.jupiter.api.Assertions.assertThrows
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import java.time.LocalDate
 import java.util.UUID
@@ -39,6 +40,11 @@ class EpochPseudonymsTest {
         ).size)
         assertFalse(tag.contains(install.toString().take(8)))
         assertFalse(key.toString().contains(tag))
+    }
+
+    @Test fun `no epoch key material is kept in a thread-local`() {
+        // #86 (Sol S3): a thread-local Mac would keep a destroyed epoch's key alive in every idle pool thread.
+        assertTrue(EpochKey::class.java.declaredFields.none { ThreadLocal::class.java.isAssignableFrom(it.type) })
     }
 
     @Test fun `a wrapped key opens only for its epoch under its pepper, and keys are random`() {
