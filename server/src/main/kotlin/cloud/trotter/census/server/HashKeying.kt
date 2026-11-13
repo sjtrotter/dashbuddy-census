@@ -33,9 +33,8 @@ class HashKeying private constructor(private val key: SecretKeySpec) {
     }
 
     /**
-     * The keyed form of a fingerprint that folds word hashes in (today: a notification's). Ingest applies it to the
-     * fingerprint recomputed over the already-keyed slots ([cloud.trotter.census.server.ingest.storedFingerprint]),
-     * so a stored body proves its own key.
+     * The keyed form of a public fingerprint that folds word hashes in (today: a notification's); see
+     * [cloud.trotter.census.server.ingest.storedKey].
      */
     fun fingerprint(fingerprint: String): String {
         require(CensusFingerprint.isWellFormed(fingerprint)) { "not a census fingerprint" }

@@ -25,8 +25,8 @@ class Database private constructor(
 
     /** Performs migrations before opening the application's bounded pool (#1157 S1). */
     companion object {
-        fun migrate(config: Config) {
-            val flyway = flyway(config.databaseUrl, config.databaseUser, config.databasePassword, config.hashKeying)
+        fun migrate(config: Config, clock: Clock = SystemClock) {
+            val flyway = flyway(config.databaseUrl, config.databaseUser, config.databasePassword, config.hashKeying, clock)
                 // Migrations connect before Hikari, so they need the same bounded socket reads.
                 .jdbcProperties(mapOf("socketTimeout" to "30", "connectTimeout" to "10"))
                 .load()
@@ -38,11 +38,11 @@ class Database private constructor(
          * The one migration set: the SQL scripts plus V7, the Java migration that rewrites stored word hashes under
          * the pepper (#85). A Flyway built without V7 stops at V6 and refuses a database V7 has already migrated.
          */
-        fun flyway(url: String, user: String, password: String, keying: HashKeying): FluentConfiguration =
+        fun flyway(url: String, user: String, password: String, keying: HashKeying, clock: Clock = SystemClock): FluentConfiguration =
             Flyway.configure()
                 .dataSource(url, user, password)
                 .locations("classpath:db/migration")
-                .javaMigrations(KeyedHashStorageMigration(keying))
+                .javaMigrations(KeyedHashStorageMigration(keying, clock))
 
         fun connect(config: Config): Database {
             val dataSource = HikariDataSource(

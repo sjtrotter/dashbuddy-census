@@ -1,11 +1,10 @@
 package cloud.trotter.census.server.db
 
-import cloud.trotter.census.contract.CensusFingerprint
-import cloud.trotter.census.contract.CensusSkeletonSchema
-import cloud.trotter.census.contract.NotificationSkeletonDto
+import cloud.trotter.census.contract.SkeletonKind
+import cloud.trotter.census.server.Clock
 import cloud.trotter.census.server.HashKeying
-import cloud.trotter.census.server.ingest.ItemVerdict
-import cloud.trotter.census.server.ingest.atRest
+import cloud.trotter.census.server.ingest.storedKey
+import cloud.trotter.census.server.today
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -36,14 +35,15 @@ class HashPepperMismatchException : IllegalStateException()
  * - notification cluster fingerprints, which fold the title and text hashes into a public digest: the `clusters` key,
  *   every foreign key that references it (found from the catalog, so none is missed), and the `fingerprint` field
  *   inside the stored notification samples. Screen fingerprints cover class and id only, no text, and stay public.
- *   The new key is the one ingest computes (see [newKey]), so a re-keyed body still proves its key and the V5
- *   legacy cutover, which runs after this, keeps a valid legacy sample and removes an invalid one as before;
+ *   The new key is `HMAC(pepper, public fingerprint)`, the one ingest computes, so a cluster keeps its identity
+ *   whether or not it still holds a sample. Legacy (null-provenance) samples are cut over first ([cutOverLegacySamples]),
+ *   while their public bodies can still prove their fingerprints;
  * - every client batch id in `ingest_ledger.batch_ids`, which the app derives from the batch's public fingerprints.
  *
  * Fail closed: a stored value that is not a well-formed census hash or fingerprint aborts the migration (and so
  * startup) instead of staying unkeyed.
  */
-class KeyedHashStorageMigration(private val keying: HashKeying) : JavaMigration {
+class KeyedHashStorageMigration(private val keying: HashKeying, private val clock: Clock) : JavaMigration {
     override fun getVersion(): MigrationVersion = MigrationVersion.fromVersion("7")
     override fun getDescription(): String = "keyed hash storage"
     override fun getChecksum(): Int? = null
@@ -57,12 +57,14 @@ class KeyedHashStorageMigration(private val keying: HashKeying) : JavaMigration 
                 key_check char(64) NOT NULL
             )""",
         )
+        val legacy = cutOverLegacySamples(connection)
         val tokens = keyTokens(connection)
         val clusters = keyNotificationClusters(connection)
         val samples = keySamples(connection)
         val ledgers = keyBatchIds(connection)
         connection.update("INSERT INTO hash_keying (singleton, key_check) VALUES (true, ?)", keying.keyCheck)
-        log.info("keyed storage migrated tokens={} notification_clusters={} samples={} ledger_rows={}", tokens, clusters, samples, ledgers)
+        log.info("keyed storage migrated legacy_samples={} tokens={} notification_clusters={} samples={} ledger_rows={}",
+            legacy, tokens, clusters, samples, ledgers)
     }
 
     private fun keyTokens(connection: Connection): Int {
@@ -81,7 +83,7 @@ class KeyedHashStorageMigration(private val keying: HashKeying) : JavaMigration 
         val old = connection.strings("SELECT fingerprint FROM clusters WHERE kind = 'notification'")
         if (old.isEmpty()) return 0
         connection.execute("CREATE TEMP TABLE keyed_clusters (old char(64) PRIMARY KEY, new char(64) NOT NULL) ON COMMIT DROP")
-        connection.insertPairs("INSERT INTO keyed_clusters (old, new) VALUES (?, ?)", old.map { it to newKey(connection, it) })
+        connection.insertPairs("INSERT INTO keyed_clusters (old, new) VALUES (?, ?)", old.map { it to keying.storedKey(SkeletonKind.NOTIFICATION.wire, it) })
         // A non-deferrable foreign key cannot follow a key change, so: copy each row under its new key, move every
         // reference, then drop the old row.
         val columns = connection.strings(
@@ -106,22 +108,24 @@ class KeyedHashStorageMigration(private val keying: HashKeying) : JavaMigration 
     }
 
     /**
-     * The key ingest gives this notification today: the keyed fingerprint of its keyed slots, taken from any stored
-     * sample whose public body proves the old key (legacy null-provenance samples included, so the V5 cutover can
-     * still verify them afterwards). A cluster with no such sample (every copy expired or malformed) is keyed from
-     * its public fingerprint instead; the same notification arriving later then opens a new cluster.
+     * The V5 cutover of legacy (null-provenance) samples, run first, while bodies and fingerprints are still public:
+     * keying would leave a body unable to prove its fingerprint. A valid sample is scrubbed with its provenance set
+     * and stored under its cluster's coming key; an invalid, resolved or expired one is deleted. Captures paired with
+     * those clusters go first, as in the bootstrap (their drafts with them).
      */
-    private fun newKey(connection: Connection, old: String): String {
-        val bodies = connection.prepareStatement("SELECT skeleton::text FROM cluster_samples WHERE fingerprint = ?").use { statement ->
-            statement.setString(1, old)
-            statement.executeQuery().use { rows -> buildList { while (rows.next()) add(rows.getString(1)) } }
+    private fun cutOverLegacySamples(connection: Connection): Int {
+        val legacy = "SELECT fingerprint FROM cluster_samples WHERE hash_domain IS NULL OR filter_rev IS NULL OR purge_after IS NULL"
+        val captures = connection.strings("DELETE FROM trusted_envelopes WHERE fingerprint IN ($legacy) RETURNING id::text")
+        if (captures.isNotEmpty()) {
+            connection.update("UPDATE clusters SET draft = NULL, draft_day = NULL WHERE draft->>'envelopeId' = ANY(?)",
+                connection.createArrayOf("text", captures.toTypedArray()))
         }
-        for (body in bodies) {
-            val item = runCatching { CensusSkeletonSchema.deserialize(body) }.getOrNull() as? NotificationSkeletonDto ?: continue
-            if (item.fingerprint != old || CensusFingerprint.of(item) != old) continue
-            return keying.atRest(ItemVerdict.Accepted(item, "", 0, emptyList())).item.fingerprint
-        }
-        return keying.fingerprint(old)
+        var changed = 0
+        do {
+            val (deleted, scrubbed) = with(LegacySampleCutover) { connection.cutOver(keying, clock.today(), 1000, rowKeyIsPublic = true) }
+            changed += deleted + scrubbed
+        } while (deleted + scrubbed > 0)
+        return changed
     }
 
     /** Batch ids the app derived from public fingerprints (#85): every ledger array, keyed element by element. */

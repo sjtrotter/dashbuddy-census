@@ -12,7 +12,7 @@ import cloud.trotter.census.server.db.KeyedHashStorageMigration
 import cloud.trotter.census.server.ingest.ItemVerdict
 import cloud.trotter.census.server.ingest.SkeletonValidator
 import cloud.trotter.census.server.ingest.atRest
-import cloud.trotter.census.server.ingest.storedFingerprint
+import cloud.trotter.census.server.ingest.storedKey
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNotEquals
@@ -65,10 +65,10 @@ class HashKeyingTest {
         val notification = notificationAccepted(day)
         val stored = testKeying.atRest(notification)
         val publicSlot = (notification.item as NotificationSkeletonDto).slots.values.first().h!!
-        // The stored key is the keyed fingerprint of the keyed slots, so the stored body proves its own key.
-        assertEquals(testKeying.fingerprint(requireNotNull(CensusFingerprint.of(stored.item))), stored.item.fingerprint)
-        assertEquals(stored.item.fingerprint, testKeying.storedFingerprint(stored.item))
-        assertNotEquals(testKeying.fingerprint(notification.item.fingerprint), stored.item.fingerprint)
+        // One sample-independent identity: the keyed public fingerprint, which a public body proves and a keyed one cannot.
+        assertEquals(testKeying.fingerprint(notification.item.fingerprint), stored.item.fingerprint)
+        assertEquals(stored.item.fingerprint, testKeying.storedKey(notification.item))
+        assertNotEquals(stored.item.fingerprint, testKeying.storedKey(stored.item))
         assertTrue((stored.item as NotificationSkeletonDto).slots.values.all { it.h == testKeying.token(publicSlot) })
         assertEquals(notification.tokens.map { testKeying.token(it.hash) }, stored.tokens.map { it.hash })
         assertEquals(notification.bytes, stored.bytes)

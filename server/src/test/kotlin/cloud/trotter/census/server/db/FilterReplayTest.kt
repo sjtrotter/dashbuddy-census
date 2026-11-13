@@ -15,6 +15,8 @@ class FilterReplayTest : LifecycleTestDatabase() {
                 it.update("INSERT INTO cluster_sightings VALUES(?,?,?,'8.0',1)",stored(sample).item.fingerprint,id,day)
                 it.update("INSERT INTO vocabulary VALUES('0123456789abcdef','words:1',10,?,NULL,NULL,NULL,'rejected')",day)
                 it.update("UPDATE cluster_samples SET hash_domain=NULL,filter_rev=NULL,purge_after=NULL")
+                // #85: a legacy row predates keying, so its body is the public one (V7 cuts real ones over before keying).
+                it.update("UPDATE cluster_samples SET skeleton=?::jsonb WHERE fingerprint=?", sample.canonicalJson, stored(sample).item.fingerprint)
                 it.update("UPDATE clusters SET notes='PRIVATE_NOTE',screen_class='HOME'")
             }
             val floors = FilterPolicyStore(db,clock)
@@ -22,6 +24,7 @@ class FilterReplayTest : LifecycleTestDatabase() {
             assertEquals(0,count("token_sightings")); assertEquals(0,count("cluster_sightings")); assertEquals(0,count("vocabulary"))
             val body = sql { it.select("SELECT skeleton::text FROM cluster_samples") { r -> r.getString(1) }!! }
             assertFalse(body.contains("0123456789abcdef")); assertTrue(body.contains("expired"))
+            assertFalse(body.contains(sample.item.fingerprint)); assertTrue(body.contains(stored(sample).item.fingerprint))
             assertEquals("HOME",sql { it.select("SELECT screen_class FROM clusters") { r -> r.getString(1) } })
             assertNull(sql { it.select("SELECT notes FROM clusters") { r -> r.getString(1) } })
             assertEquals(1,floors.bootstrap(1)); assertEquals(0,floors.results.getValue("legacy_samples").rewritten)

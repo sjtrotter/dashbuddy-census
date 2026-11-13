@@ -1,8 +1,6 @@
 package cloud.trotter.census.server.db
 
 import cloud.trotter.census.server.*
-import cloud.trotter.census.server.ingest.StoredSampleExpiry
-import cloud.trotter.census.server.ingest.storedFingerprint
 import cloud.trotter.census.server.jobs.SweepResult
 import kotlinx.coroutines.*
 import kotlinx.serialization.json.*
@@ -109,36 +107,8 @@ class FilterPolicyStore(private val db: Database, private val clock: Clock) {
         var removed = 0L; var rewritten = 0L; var batches = 0
         while (true) {
             currentCoroutineContext().ensureActive()
-            val changed = query {
-                val rows = select("""SELECT s.*, c.status, c.last_seen_day, c.kind FROM cluster_samples s JOIN clusters c USING(fingerprint)
-                    WHERE s.hash_domain IS NULL OR s.filter_rev IS NULL OR s.purge_after IS NULL LIMIT 1000""") { rows ->
-                    buildList { do { add(LegacySample(rows.getString("fingerprint"), rows.getString("platform_app_version"),
-                        rows.getObject("received_day", LocalDate::class.java), rows.getString("skeleton"),
-                        rows.getString("status"), rows.getObject("last_seen_day", LocalDate::class.java), rows.getString("kind"))) } while (rows.next()) }
-                } ?: emptyList()
-                var deleted = 0; var scrubbed = 0
-                for (sample in rows) {
-                    update("UPDATE clusters SET notes=NULL, draft=NULL, draft_day=NULL WHERE fingerprint=?", sample.fp)
-                    val body = runCatching { Json.parseToJsonElement(sample.body).jsonObject }.getOrNull()
-                    val domain = (body?.get("hashDomain") as? JsonPrimitive)?.takeUnless { it.isString }?.intOrNull
-                    val rev = (body?.get("filterRev") as? JsonPrimitive)?.takeUnless { it.isString }?.intOrNull
-                    val valid = domain != null && domain > 0 && rev != null && rev > 0 &&
-                        (body["fingerprint"] as? JsonPrimitive)?.takeIf { it.isString }?.content == sample.fp &&
-                        runCatching {
-                            val dto=cloud.trotter.census.contract.CensusSkeletonSchema.deserialize(sample.body)
-                            // #85: stored bodies are keyed; a notification's key is recomputed from its keyed slots.
-                            dto.kind.wire == sample.kind && db.keying.storedFingerprint(dto) == sample.fp
-                        }.getOrDefault(false)
-                    if (!valid || sample.status == "resolved" || sample.last.plusDays(90) <= clock.today()) {
-                        deleted += update("DELETE FROM cluster_samples WHERE fingerprint=? AND platform_app_version=? AND received_day=?", sample.fp, sample.version, sample.received)
-                    } else {
-                        scrubbed += update("""UPDATE cluster_samples SET hash_domain=?, filter_rev=?, purge_after=?, skeleton=?::jsonb
-                            WHERE fingerprint=? AND platform_app_version=? AND received_day=?""", domain, rev, sample.last.plusDays(90),
-                            StoredSampleExpiry.rewrite(sample.body, emptySet()), sample.fp, sample.version, sample.received)
-                    }
-                }
-                deleted to scrubbed
-            }
+            // #85: V7 already cut legacy samples over while they were public; this finds none on a real database.
+            val changed = query { with(LegacySampleCutover) { cutOver(db.keying, clock.today(), 1000, rowKeyIsPublic = false) } }
             removed += changed.first; rewritten += changed.second; batches++
             if (changed.first + changed.second == 0) break
         }
@@ -235,6 +205,4 @@ class FilterPolicyStore(private val db: Database, private val clock: Clock) {
         results = counts
         return floor
     }
-
-    private data class LegacySample(val fp: String, val version: String, val received: LocalDate, val body: String, val status: String, val last: LocalDate, val kind: String)
 }

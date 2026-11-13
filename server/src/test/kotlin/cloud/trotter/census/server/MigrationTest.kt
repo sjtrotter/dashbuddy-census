@@ -187,8 +187,8 @@ class MigrationTest {
                 run("INSERT INTO cluster_samples (fingerprint, platform_app_version, received_day, skeleton) VALUES (?, '8.0', ?, ?::jsonb)", item.fingerprint, day, body)
             }
         }
-        Database.migrate(config)
         val clock = object : Clock { override fun now(): java.time.Instant = day.atTime(12, 0).toInstant(java.time.ZoneOffset.UTC) }
+        Database.migrate(config, clock)
         Database.connect(config).use { db -> cloud.trotter.census.server.db.FilterPolicyStore(db, clock).bootstrap(1) }
         val keyed = testKeying.atRest(ItemVerdict.Accepted(valid, "", 0, emptyList())).item.fingerprint
         DriverManager.getConnection(config.databaseUrl, config.databaseUser, config.databasePassword).use { connection ->
@@ -204,6 +204,53 @@ class MigrationTest {
                 }
             }
             assertEquals(emptySet<String>(), matches(connection.dumpRows("legacy_upgrade"), listOf(publicHash, valid.fingerprint, tampered.fingerprint)))
+        }
+    }
+
+    @Test
+    fun `a resolved sampleless notification keeps its identity across V7 and a repeat upload joins it`() = kotlinx.coroutines.runBlocking {
+        val day = java.time.LocalDate.of(2026, 10, 6)
+        val clock = object : Clock { override fun now(): java.time.Instant = day.atTime(12, 0).toInstant(java.time.ZoneOffset.UTC) }
+        val config = Config.fromEnv(testEnvironment() + mapOf("DATABASE_URL" to schemaUrl("resolved_identity"),
+            "DATABASE_USER" to postgres.username, "DATABASE_PASSWORD" to postgres.password))
+        DriverManager.getConnection(postgres.jdbcUrl, postgres.username, postgres.password).use { connection ->
+            connection.createStatement().use { it.execute("CREATE SCHEMA IF NOT EXISTS resolved_identity") }
+        }
+        Database.flyway(config.databaseUrl, config.databaseUser, config.databasePassword, testKeying).target("6").load().migrate()
+        val raw = notificationFixture(day, channel = "RESOLVED", version = "9.0")
+        val public = raw.getValue("fingerprint").jsonPrimitive.content
+        val install = java.util.UUID.fromString("00000000-0000-4000-8000-000000000003")
+        DriverManager.getConnection(config.databaseUrl, config.databaseUser, config.databasePassword).use { connection ->
+            fun run(sql: String, vararg args: Any?) = connection.prepareStatement(sql).use { statement ->
+                args.forEachIndexed { index, value -> statement.setObject(index + 1, value) }
+                statement.executeUpdate()
+            }
+            run("INSERT INTO installs (install_id, key_hash, created_day, last_seen_day) VALUES (?, repeat('a',64), ?, ?)", install, day.minusDays(20), day)
+            // Resolved 40 days ago: its samples expired at resolved_day + 30, but sightings are recent.
+            run("""INSERT INTO clusters (fingerprint, platform, kind, first_seen_day, last_seen_day, status, resolved_rule_id, resolved_day, screen_class)
+                VALUES (?, 'doordash', 'notification', ?, ?, 'resolved', 'doordash.notification.offer', ?, 'idle')""", public, day.minusDays(60), day.minusDays(2), day.minusDays(40))
+            run("INSERT INTO cluster_sightings_v5 VALUES (?, ?, ?, '8.0', 1, 1, 1)", public, install, day.minusDays(2))
+        }
+        Database.migrate(config, clock)
+        Database.connect(config).use { db ->
+            val accepted = cloud.trotter.census.server.ingest.SkeletonValidator.validate(raw, notificationPolicy, day) as ItemVerdict.Accepted
+            val outcome = cloud.trotter.census.server.db.SkeletonStore(db, clock).ingest(install, "a".repeat(64), day, listOf(accepted), 0,
+                emptyMap(), "repeat", 1, cloud.trotter.census.server.ingest.BudgetPolicy())
+            assertTrue(outcome is cloud.trotter.census.server.db.IngestOutcome.Stored)
+            assertEquals(0, (outcome as cloud.trotter.census.server.db.IngestOutcome.Stored).summary.newClusters)
+        }
+        val keyed = testKeying.fingerprint(public)
+        DriverManager.getConnection(config.databaseUrl, config.databaseUser, config.databasePassword).use { connection ->
+            fun strings(sql: String) = connection.createStatement().use { statement ->
+                statement.executeQuery(sql).use { rows -> buildList { while (rows.next()) add(rows.getString(1)) } }
+            }
+            assertEquals(listOf("$keyed|resolved|doordash.notification.offer|${day.minusDays(40)}|idle|${day.minusDays(60)}|$day"),
+                strings("SELECT fingerprint || '|' || status || '|' || resolved_rule_id || '|' || resolved_day || '|' || screen_class || '|' || first_seen_day || '|' || last_seen_day FROM clusters"))
+            // Both versions' presence rows sit on the one cluster; the resolution deadline still refuses a fresh sample.
+            assertEquals(listOf("$keyed|8.0|${day.minusDays(2)}", "$keyed|9.0|$day"),
+                strings("SELECT fingerprint || '|' || platform_app_version || '|' || day FROM cluster_sightings_v5 ORDER BY day"))
+            assertEquals(listOf("0"), strings("SELECT count(*) FROM cluster_samples"))
+            assertEquals(emptySet<String>(), matches(connection.dumpRows("resolved_identity"), listOf(public)))
         }
     }
 
