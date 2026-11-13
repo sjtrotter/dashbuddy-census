@@ -89,6 +89,15 @@ class HealthStoreTest {
                     SELECT ?, ?::date - n, 'doordash', '1.0.0', 0, 0, 0, '{}'::jsonb FROM generate_series(1, ?) n""", id, day.minusDays(180), rows,
             )
         }
+        // #79 (Sol S5): silence reads only health inside retention, so the trusted install needs a recent report day.
+        fun recentReport() = sql { connection ->
+            connection.update("DELETE FROM health_daily WHERE install_id = ? AND platform_app_version = '9.9.9'", id)
+            connection.update(
+                """INSERT INTO health_daily (install_id, day, platform, platform_app_version, admitted, unknown, trips, rule_counts)
+                    VALUES (?, ?, 'doordash', '9.9.9', 0, 0, 0, '{}'::jsonb)""",
+                id, instant.atOffset(ZoneOffset.UTC).toLocalDate().minusDays(2),
+            )
+        }
         try {
             Database.connect(config()).use { db ->
                 val store = InstallStore(db, clock)
@@ -136,6 +145,7 @@ class HealthStoreTest {
                     val alarms = HealthAlarms(HealthStore(db, clock), clock, startedAt = clock.now(), sink = AlarmSink { throw IllegalStateException("PRIVATE_SILENCE_FAILURE") })
                     instant = instant.plusSeconds(48 * 3600)
                     seed(1, 1)
+                    recentReport()
                     logs.list.clear()
                     val afterSilence = PurgeJob(store, clock, alarms = alarms).runOnce()
                     assertEquals(listOf(1, 1, 1, 1), listOf(afterSilence.nonces, afterSilence.ledgerRows, afterSilence.trustedEnvelopes, afterSilence.healthRows))
@@ -145,10 +155,11 @@ class HealthStoreTest {
                     val cancelling = HealthAlarms(HealthStore(db, clock), clock, startedAt = clock.now(), sink = AlarmSink { throw CancellationException("PRIVATE_CANCELLATION") })
                     instant = instant.plusSeconds(48 * 3600)
                     seed(1, 1)
+                    recentReport()
                     logs.list.clear()
                     assertTrue(runCatching { PurgeJob(store, clock, alarms = cancelling).runOnce() }.exceptionOrNull() is CancellationException)
                     assertTrue(logs.list.none { it.level == Level.WARN })
-                    for (table in tables.values) assertEquals(1, count(table, id))
+                    for (table in tables.values) assertEquals(if (table == "health_daily") 2 else 1, count(table, id))
                 } finally {
                     store.withdraw(id, hash)
                 }

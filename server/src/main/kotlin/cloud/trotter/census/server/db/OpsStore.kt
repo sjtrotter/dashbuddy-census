@@ -336,8 +336,10 @@ class OpsStore(private val db: Database, private val clock: Clock, private val p
             put("installsReporting", row.getInt("installs_reporting")); put("admitted", row.getLong("admitted")); put("unknown", row.getLong("unknown"))
             put("ruleCounts", Json.parseToJsonElement(row.getString("rule_counts")))
         } }
+        // #79 (Sol S5): per-install rows honour the retention deadline here, not only when the sweep has run.
         val installs = array("""SELECT left(install_id::text, 8) AS prefix, day, platform, platform_app_version, admitted, unknown, trips
-            FROM health_daily WHERE day >= ? AND day <= ? ORDER BY day DESC, install_id, platform, platform_app_version""", first, today) { row -> buildJsonObject {
+            FROM health_daily WHERE day >= ? AND day <= ? AND day + ? > ?
+            ORDER BY day DESC, install_id, platform, platform_app_version""", first, today, policy.retention.healthDailyDays, today) { row -> buildJsonObject {
             put("installIdPrefix", row.getString("prefix")); put("day", row.getString("day")); put("platform", row.getString("platform"))
             put("version", row.getString("platform_app_version")); put("admitted", row.getLong("admitted"))
             put("unknown", row.getLong("unknown")); put("trips", row.getLong("trips"))

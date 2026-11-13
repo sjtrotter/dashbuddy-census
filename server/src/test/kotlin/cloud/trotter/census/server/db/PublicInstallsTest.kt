@@ -378,6 +378,27 @@ class PublicInstallsTest : LifecycleTestDatabase() {
         }
     }
 
+    @Test fun `per-install health reads honour the 30-day deadline before the sweep runs`() = runBlocking {
+        Database.connect(config()).use { db ->
+            val id = install(trusted = true)
+            val store = HealthStore(db, clock)
+            val expired = day.minusDays(Policy().retention.healthDailyDays.toLong())
+            val kept = expired.plusDays(1)
+            for (reportDay in listOf(expired, kept)) {
+                assertEquals(HealthOutcome.Stored, store.upsert(id, key, day, listOf(report(reportDay, 10)), emptyMap(), 1, BudgetPolicy()))
+            }
+            val view = OpsStore(db, clock, Policy()).health(90)
+            assertEquals(listOf(kept.toString()), view.getValue("installs").jsonArray.map { it.jsonObject.getValue("day").jsonPrimitive.content })
+            assertEquals(2, view.getValue("fleet").jsonArray.size, "fleet totals carry no install and stay")
+            val history = requireNotNull(store.alarmInputs(id, key, listOf(report(kept, 10)), day)).history
+            assertEquals(listOf(kept), history.map { it.day })
+            assertEquals(kept, store.silenceInputs().single().lastReportDay)
+            sql { it.update("DELETE FROM health_daily WHERE day = ?", kept) }
+            // Only the expired row is left: silence sees no stored day at all.
+            assertNull(store.silenceInputs().single().lastReportDay)
+        }
+    }
+
     @Test fun `vocabulary provenance names no install`() = runBlocking {
         Database.connect(config()).use { db ->
             val ids = List(3) { install(trusted = true) }

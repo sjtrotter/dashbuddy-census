@@ -150,7 +150,7 @@ fun Application.module(
         val store = db?.let { InstallStore(it, clock) }
         val skeletons = db?.let { SkeletonStore(it, clock) }
         val envelopes = db?.let { EnvelopeStore(it, clock) }
-        val health = db?.let { HealthStore(it, clock) }
+        val health = db?.let { HealthStore(it, clock, policy.retention.healthDailyDays) }
         val pause = db?.let { PauseStore(it, clock) }
         val alarms = alarmEvaluator ?: health?.let { HealthAlarms(it, clock) }
         opsRoutes(config, db?.let { OpsStore(it, clock, policy) }, alarms, clock, policy, lifecycle = lifecycle, enrolStats = enrolStats, pause = pause)

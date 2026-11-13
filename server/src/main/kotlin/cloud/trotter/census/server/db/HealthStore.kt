@@ -2,6 +2,8 @@ package cloud.trotter.census.server.db
 
 import cloud.trotter.census.server.Clock
 import cloud.trotter.census.server.Database
+import cloud.trotter.census.server.Retention
+import cloud.trotter.census.server.today
 import cloud.trotter.census.server.ingest.BudgetPolicy
 import cloud.trotter.census.server.ingest.ConsumeOutcome
 import cloud.trotter.census.server.ingest.HealthReport
@@ -36,7 +38,15 @@ data class HealthAlarmInputs(
 
 data class SilenceInput(val id: UUID, val lastReportDay: LocalDate?, val platform: String, val version: String)
 
-class HealthStore(private val db: Database, private val clock: Clock) {
+/**
+ * Per-install health storage. Every per-install read applies the half-open retention deadline (`day + days > today`,
+ * #79, Sol S5) itself, so an overdue or failing sweep never extends what reads return.
+ */
+class HealthStore(
+    private val db: Database,
+    private val clock: Clock,
+    private val healthDailyDays: Int = Retention().healthDailyDays,
+) {
     private suspend fun <T> query(block: Connection.() -> T): T = withContext(Dispatchers.IO) {
         transaction(db.exposed) {
             maxAttempts = 1
@@ -108,8 +118,9 @@ class HealthStore(private val db: Database, private val clock: Clock) {
         val firstDay = reports.minOf { it.day }.minusDays(28)
         val lastDay = reports.maxOf { it.day }
         val history = select(
-            "SELECT * FROM health_daily WHERE install_id = ? AND day >= ? AND day <= ? ORDER BY day, platform, platform_app_version",
-            installId, firstDay, lastDay,
+            """SELECT * FROM health_daily WHERE install_id = ? AND day >= ? AND day <= ? AND day + ? > ?
+                ORDER BY day, platform, platform_app_version""",
+            installId, firstDay, lastDay, healthDailyDays, today,
         ) { rows -> buildList { do { add(rows.dayReport()) } while (rows.next()) } } ?: emptyList()
         val touched = reports.map { FleetKey(it.day, it.platform, it.platformAppVersion) }.toSet()
         val touchedDays = reports.map { it.platform to it.day }.toSet()
@@ -147,8 +158,10 @@ class HealthStore(private val db: Database, private val clock: Clock) {
             """SELECT i.install_id, h.day, h.platform, h.platform_app_version FROM installs i
                 LEFT JOIN LATERAL (
                     SELECT day, platform, platform_app_version FROM health_daily WHERE install_id = i.install_id
+                        AND day + ? > ?
                     ORDER BY day DESC, platform, platform_app_version LIMIT 1
                 ) h ON true WHERE i.trusted = true AND i.revoked_at IS NULL""",
+            healthDailyDays, clock.today(),
         ) { rows -> buildList {
             do {
                 add(SilenceInput(
