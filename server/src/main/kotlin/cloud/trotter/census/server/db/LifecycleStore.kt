@@ -59,6 +59,11 @@ class LifecycleStore(private val db: Database, private val clock: Clock, private
         // #80: slot sightings keep the cluster sightings' retention; their quarantine marks clear like token sightings'.
         result["slots"] = delete("slot_sightings", "last_day + ${policy.retention.clusterSightingsDays} <= ?", today)
         result["slot_quarantine_marks"] = quarantineMarks(today, "slot_sightings")
+        // #81: the contributor tier. A release is served on its own day only; an expired one goes even when today's
+        // build fails. The build runs after every slot deletion above, so it copies only rows that still count.
+        result["slot_release_expired"] = delete("slot_release_days", "release_day < ?", today)
+        result["slot_release"] = release(today)
+        for ((name, table, predicate) in contributorRetention()) result[name] = delete(table, predicate, *contributorArgs(name, today))
         for (kind in listOf("screen", "notification")) result["samples_$kind"] = samples(kind, today)
         result["vocabulary"] = vocabulary(today)
         result["catalogue"] = catalogue()
@@ -112,6 +117,39 @@ class LifecycleStore(private val db: Database, private val clock: Clock, private
         } },
     )
 
+    /** Builds today's slot release once ([SlotRelease]); `rewritten` counts the rows it copied. */
+    private suspend fun release(today: LocalDate): SweepResult = sweep(
+        { query { if (with(SlotRelease) { releaseDay(today) }) 0L else 1L } },
+        { query { 0 to (with(SlotRelease) { buildRelease(policy, today) } ?: 0) } },
+    )
+
+    /**
+     * #81: what the contributor tier keeps, and for how long. Confirmations, role tags and audit rows go after
+     * [cloud.trotter.census.server.ContributorPolicy.retentionDays]; an expired grant then too (a revoked one stays until
+     * the operator clears it or the install withdraws); a quarantine item at the start of its expiry day; a waiting word
+     * after the retention days, once its token is resolved, or once fewer than the gate's confirmations stand behind it.
+     */
+    private fun contributorRetention(): List<Triple<String, String, String>> {
+        val days = policy.contributor.retentionDays
+        return listOf(
+            Triple("confirmations", "slot_confirmations", "last_day + $days <= ?"),
+            Triple("roles", "slot_roles", "last_day + $days <= ?"),
+            Triple("contributor_reads", "contributor_reads", "day + $days <= ?"),
+            Triple("contributor_grants", "contributor_grants", "revoked_day IS NULL AND expires_day + $days <= ?"),
+            Triple("quarantine", "quarantine_items", "expires_day <= ?"),
+            Triple("contributor_words", "contributor_words", """received_day + $days <= ? OR EXISTS (SELECT 1 FROM vocabulary_v5 v
+                WHERE v.token_hash = contributor_words.value AND v.hash_domain = contributor_words.hash_domain
+                AND v.filter_rev = contributor_words.filter_rev) OR (SELECT COALESCE(max(per_epoch.n), 0) FROM (
+                    SELECT count(DISTINCT c.install_tag) AS n FROM slot_confirmations c
+                    WHERE c.fingerprint = contributor_words.fingerprint AND c.platform_app_version = contributor_words.platform_app_version
+                    AND c.hash_domain = contributor_words.hash_domain AND c.filter_rev = contributor_words.filter_rev
+                    AND c.layout = contributor_words.layout AND c.slot = contributor_words.slot AND c.value = contributor_words.value
+                    AND NOT c.trusted AND c.last_day + $days > ? GROUP BY c.epoch) per_epoch) < ${policy.contributor.gateConfirmations}"""),
+        )
+    }
+
+    private fun contributorArgs(name: String, today: LocalDate): Array<Any> = if (name == "contributor_words") arrayOf(today, today) else arrayOf(today)
+
     private data class Sample(val version: String, val received: LocalDate, val body: String, val domain: Int, val revision: Int, val deadline: LocalDate?)
 
     private fun vocabularyPredicate(): String = """NOT EXISTS (SELECT 1 FROM token_sightings_v5 t WHERE t.token_hash=vocabulary_v5.token_hash
@@ -143,6 +181,11 @@ class LifecycleStore(private val db: Database, private val clock: Clock, private
                     select("SELECT count(*) FROM cluster_samples s JOIN clusters c USING(fingerprint) WHERE c.kind=? AND ${sampleDue()}",kind,today,today) { it.getLong(1) }!!)
                 put("vocabulary", select("SELECT count(*) FROM vocabulary_v5 WHERE ${vocabularyPredicate()}",today,*VocabularyEligibility.args(today)) { it.getLong(1) }!!)
                 put("catalogue", select("SELECT count(*) FROM clusters WHERE $cataloguePredicate") { it.getLong(1) }!!)
+                put("slot_release_expired", select("SELECT count(*) FROM slot_release_days WHERE release_day < ?", today) { it.getLong(1) }!!)
+                put("slot_release", if (with(SlotRelease) { releaseDay(today) }) 0L else 1L)
+                for ((name, table, predicate) in contributorRetention()) {
+                    put(name, select("SELECT count(*) FROM $table WHERE $predicate", *contributorArgs(name, today)) { it.getLong(1) }!!)
+                }
             }
         } + InstallStore(db,clock).remainingDue(today,clock.now(),policy.retention)
     }

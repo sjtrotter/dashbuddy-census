@@ -230,9 +230,9 @@ class SlotConstancyStoreTest : LifecycleTestDatabase() {
             // Two slots, each a presence row and a value row.
             assertEquals(4L, sql { it.installRows("slot_sightings", target, day) })
             sql { it.update("""INSERT INTO slot_sightings (fingerprint, platform_app_version, hash_domain, filter_rev, layout, slot, value,
-                epoch, install_tag, trusted, last_day)
-                SELECT ?, '8.0', 1, 1, ?, 'root/' || n || '/text', 'present', ?, md5(n::text) || md5(n::text || 'x'), false, ?
-                FROM generate_series(1, 20000) n""", fingerprint, variant().layout, Epochs.of(day), day) }
+                epoch, install_tag, trusted, last_day, first_received, received_day)
+                SELECT ?, '8.0', 1, 1, ?, 'root/' || n || '/text', 'present', ?, md5(n::text) || md5(n::text || 'x'), false, ?, ?, ?
+                FROM generate_series(1, 20000) n""", fingerprint, variant().layout, Epochs.of(day), day, day, day) }
             var chunks = 0
             val deleted = db.exposed.let {
                 org.jetbrains.exposed.v1.jdbc.transactions.transaction(it) {

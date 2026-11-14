@@ -86,7 +86,86 @@ Per-install quotas apply at admission whether or not the switch is on: per UTC d
 
 ## Revoke, withdraw or delete an install's data
 
-`DELETE /v1/installs/me` lets an authenticated install withdraw; `DELETE /v1/installs/me/data` deletes its server data and keeps it enrolled (#79). The deletion erases every per-install row except the install row and today's ledger row (kept for the quota and batch replay protection, expiring with the 7-day ledger), writes the same tombstone and journal notice as a withdrawal, and is replayed the same way: after a restore from a backup older than the deletion, replay erases that install whole, and the app re-enrols. The response counts the rows erased. The operator can revoke credentials using the endpoint below. Revocation also deletes the install's token, cluster and slot sightings (#86, #80: they no longer name the install, so k counting cannot filter them by a join); its health rows stay until retention. Withdrawal deletes every row tied to the install in one transaction: install-keyed rows by id, content rows through its epoch tags under every stored key. See [Backup and restore](#backup-and-restore) for mandatory tombstone replay and journal recovery. Foreign keys currently do not cascade. Do not pretend a manual `DELETE FROM installs` is a complete withdrawal procedure.
+`DELETE /v1/installs/me` lets an authenticated install withdraw; `DELETE /v1/installs/me/data` deletes its server data and keeps it enrolled (#79). The deletion erases every per-install row except the install row and today's ledger row (kept for the quota and batch replay protection, expiring with the 7-day ledger), writes the same tombstone and journal notice as a withdrawal, and is replayed the same way: after a restore from a backup older than the deletion, replay erases that install whole, and the app re-enrols. The response counts the rows erased. The operator can revoke credentials using the endpoint below. Revocation also deletes the install's token, cluster and slot sightings (#86, #80: they no longer name the install, so k counting cannot filter them by a join) and its contributor rows (#81: confirmations, role tags, released slot rows, quarantine items); its health rows stay until retention. Withdrawal deletes every row tied to the install in one transaction: install-keyed rows by id, content rows through its epoch tags under every stored key. See [Backup and restore](#backup-and-restore) for mandatory tombstone replay and journal recovery. Foreign keys currently do not cascade. Do not pretend a manual `DELETE FROM installs` is a complete withdrawal procedure.
+
+## Contributor tier (#81)
+
+Contributors are opted-in installs that review a screen before sending it ([API](API.md#contributor-tier--81)). The
+server issues their grants on its own; the operator watches them, revokes abuse, approves gated words and handles the
+"Ask the developer" quarantine.
+
+### Operator key
+
+"Ask the developer" items are sealed on receipt to the operator's X25519 public key; the server holds no key that opens
+them. Generate the pair once on the operator workstation, never on the host:
+
+```sh
+java deploy/tools/QuarantineKey.java keygen ~/dashbuddy/secrets/census-quarantine.key
+```
+
+It writes the private key (base64 PKCS#8, mode 0600) and prints the public key. Keep the private key like the TOTP
+seed: the password manager and the mode-0600 file. Put the printed public key in `CENSUS_OPERATOR_PUBLIC_KEY`: on AWS
+the String parameter `/dashbuddy-census/census_operator_public_key` (the renderer adds it to `.env`; an existing host
+needs the renderer refresh, as for any new parameter), for self-hosters `.env`. Without it the server starts, and every
+quarantine request answers `503 quarantine_unconfigured`. Changing the key affects only items received afterwards;
+items sealed to a lost key cannot be opened by anyone, and expire within 72 hours.
+
+### Quarantine
+
+The quarantine page is `/ops/quarantine/view`; `GET /ops/quarantine` lists the same items as JSON. Nothing else reads
+`quarantine_items`: no cluster, count, draft, vocabulary queue, ledger view or agent route. An item expires at the
+start of its `expiresDay` (3 UTC days after receipt, at most 72 hours); reads stop showing it then and the next sweep
+deletes it. `backup.sh` never dumps its rows (`--exclude-table-data`), so a restore brings none back; an ad-hoc
+`pg_dump` would copy the ciphertext, so use `backup.sh`.
+
+Open one offline:
+
+```sh
+curl --fail-with-body "$CENSUS_URL/ops/quarantine/$ITEM_ID" -H "Authorization: Bearer $OPERATOR_TOKEN" > item.json
+java deploy/tools/QuarantineKey.java open ~/dashbuddy/secrets/census-quarantine.key item.json > artifact.json
+```
+
+`artifact.json` is exactly what the phone sent: the reviewed skeleton (hashes, never screen text), its confirmations,
+role tags and any gated words. Work on it on the workstation only; it never goes into a ticket or a pull request. Then
+either delete the item, or approve a sanitized copy: one skeleton item with anything doubtful removed, which the server
+validates like an upload and stores as a cluster sample with no sighting behind it, deleting the item in the same
+transaction.
+
+```sh
+curl --fail-with-body -X POST "$CENSUS_URL/ops/quarantine/$ITEM_ID/delete" \
+  -H "Authorization: Bearer $OPERATOR_TOKEN" -H "X-Census-Totp: $TOTP"
+
+curl --fail-with-body "$CENSUS_URL/ops/quarantine/$ITEM_ID/approve" \
+  -H "Authorization: Bearer $OPERATOR_TOKEN" -H "X-Census-Totp: $TOTP" \
+  -H 'Content-Type: application/json' --data-binary @sanitized-skeleton.json
+```
+
+Delete `item.json` and `artifact.json` when done.
+
+### Grants
+
+`GET /ops/contributors` lists grants (id, days, whether live, today's read items from the audit log). Revoke one when
+a contributor's confirmations, role tags or reads look wrong; that also deletes the install's confirmations and role
+tags, and its new grant requests are refused until the revocation is cleared:
+
+```sh
+curl --fail-with-body "$CENSUS_URL/ops/contributors/$GRANT_ID/revoke" \
+  -H "Authorization: Bearer $OPERATOR_TOKEN" -H "X-Census-Totp: $TOTP" \
+  -H 'Content-Type: application/json' -d '{"revoked":true}'
+```
+
+`{"revoked":false}` clears the revocation (the install may request again). Revoking the install itself
+(`/ops/installs/{uuid}/revoke`) deletes all its contributor rows too. The audit log (`contributor_reads`) names grants
+and clusters, never installs, and goes with the grant or after 30 days.
+
+### Contributor words
+
+A word that passed the gate (two independent confirmations and a slot constant at k installs, in the day's release and
+live) waits on the dashboard's "Contributor words" panel and in `GET /ops/contributors/words`. Constant is a candidate,
+not proof: a common first name or a local word can pass. Approve one into the working vocabulary with the resolve
+route, `source` `contributor`, using the `tokenHash`, `hashDomain` and `filterRev` from the JSON list; reject it with
+`"reject":true`. Either way the waiting copy is deleted. Nothing here ships a word: the shipped vocabulary still needs
+`k_ship` and the bundle review.
 
 ## Reinstall with a new signing key
 
@@ -283,7 +362,7 @@ characters and the optional resolved rule must match the wire rule-ID grammar. S
 to false to remove trust. Successful mutations return 204; missing target rows return 404.
 Revocation is idempotent and immediately blocks the install's signed requests.
 
-Vocabulary source is `trusted`, `corpus`, or `rule_anchor` (#79: provenance names no install; V6 rewrote older `trusted:<prefix>` rows and a CHECK refuses that form). Clear text is at
+Vocabulary source is `trusted`, `corpus`, `rule_anchor`, or `contributor` (a word that passed the contributor gate, #81; see [Contributor tier](#contributor-tier-81)) (#79: provenance names no install; V6 rewrote older `trusted:<prefix>` rows and a CHECK refuses that form). Clear text is at
 most 128 characters. `tokenHash` is the keyed value from `GET /ops/vocabulary/queue` (#85). Resolution proves
 `HMAC(pepper, CensusHash.of(clearText)) == tokenHash` (hash, key, then a constant-time compare); a mismatch, including a
 phone-side public hash, returns 422 `hash_mismatch`. Rejection stores NULL clear text. Resolution requires current non-trusted

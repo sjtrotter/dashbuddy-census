@@ -34,10 +34,10 @@ BEGIN
         OR (table_name='clusters' AND column_name='resolved_day' AND data_type <> 'date'))) THEN
         RAISE EXCEPTION 'Unexpected lifecycle column definition';
     END IF;
-    -- No content table names an install (#86); the install id stays in installs, nonces, the ledger and the trusted
-    -- envelopes (the operator's own devices).
+    -- No content table names an install (#86); the install id stays in installs, nonces, the ledger, the trusted
+    -- envelopes (the operator's own devices) and the contributor grants (#81, a permission, not content).
     IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND column_name='install_id'
-        AND table_name NOT IN ('installs','nonces','ingest_ledger','trusted_envelopes')) THEN
+        AND table_name NOT IN ('installs','nonces','ingest_ledger','trusted_envelopes','contributor_grants')) THEN
         RAISE EXCEPTION 'Unexpected install id column';
     END IF;
     FOR item IN SELECT * FROM (VALUES ('token_sightings_v5'),('cluster_sightings_v5'),('vocabulary_v5'),('health_daily')) AS expected(tab) LOOP

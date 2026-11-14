@@ -286,6 +286,23 @@ The server stores every word hash, and every value derived from one (a notificat
 
 **Epoch keys (#86) need no new parameter.** The per-epoch pseudonym keys are random keys the server generates and stores in the database, wrapped under a key derived from this pepper; deploying the #86 image runs V8 on first start (one transaction, before HTTP opens) and needs no SSM, Terraform, renderer or host-script change. The pepper therefore also guards those keys: without it a restored dump's epoch keys cannot be opened and startup fails. Dumps taken before the V8 deployment still hold install ids beside content rows until they expire (14 days, plus 14 for S3 noncurrent versions); a deleted epoch key likewise survives in older dumps for that long ([Operator: epoch keys](../../docs/OPERATOR.md#epoch-keys)).
 
+## Operator public key (#81)
+
+Optional. Contributor "Ask the developer" items are sealed to the operator's X25519 public key, the String parameter
+`/dashbuddy-census/census_operator_public_key` (`terraform apply` creates it as `CHANGE-ME`, which leaves the quarantine
+off: every item is refused with `503 quarantine_unconfigured`). Generate the key pair on the operator workstation and
+store only the public key:
+
+```sh
+java deploy/tools/QuarantineKey.java keygen ~/dashbuddy/secrets/census-quarantine.key > /tmp/census-quarantine.pub
+aws ssm put-parameter --name /dashbuddy-census/census_operator_public_key \
+  --type String --value "$(cat /tmp/census-quarantine.pub)" --overwrite
+```
+
+The renderer adds it to `.env` as `CENSUS_OPERATOR_PUBLIC_KEY`; an existing host needs the host-script refresh (step 3
+above) before the value takes effect, then a `census.service` restart. The private key never goes to AWS
+([Operator: contributor tier](../../docs/OPERATOR.md#contributor-tier-81)).
+
 ## 4. DNS and first start
 
 Create the DNS **A** record `census.dashbuddy.trotter.cloud` pointing to `terraform output -raw elastic_ip` (or use the configured `public_host`). Allow DNS to propagate so Caddy can complete ACME validation.

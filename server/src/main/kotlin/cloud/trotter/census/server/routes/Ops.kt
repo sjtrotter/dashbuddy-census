@@ -65,6 +65,8 @@ fun Route.opsRoutes(
     lifecycle: cloud.trotter.census.server.jobs.LifecycleReport? = null,
     enrolStats: EnrolStats = EnrolStats(),
     pause: PauseStore? = null,
+    contributors: cloud.trotter.census.server.db.ContributorStore? = null,
+    quarantine: cloud.trotter.census.server.db.QuarantineStore? = null,
 ) {
     route("/ops") {
         install(OpsAuth) {
@@ -113,7 +115,8 @@ fun Route.opsRoutes(
                 route("/{rest...}") { handle { call.respond(HttpStatusCode.ServiceUnavailable, ErrorResponse("db_unavailable")) } }
                 return@run
             }
-            dashboardRoute(store, alarms, clock, policy, config, lifecycle)
+            dashboardRoute(store, alarms, clock, policy, config, lifecycle, contributors)
+            if (contributors != null) opsContributorRoutes(contributors, quarantine, clock, policy, config)
             get("/lifecycle") { call.respond(lifecycleView(config, policy, store, lifecycle)) }
             get("/clusters") {
                 val kind = call.request.queryParameters["kind"]?.let {
@@ -175,7 +178,7 @@ fun Route.opsRoutes(
             post("/vocabulary/resolve") {
                 val request = call.opsBody<ResolveRequest>() ?: return@post
                 if (request.hashDomain !in policy.acceptedHashDomains || request.filterRev < policy.minimumFilterRev || !CensusHash.isWellFormed(request.tokenHash) || request.clearText != null && request.clearText.length > 128 ||
-                    !Regex("trusted|corpus|rule_anchor").matches(request.source) || !request.reject && request.clearText == null
+                    !Regex("trusted|corpus|rule_anchor|contributor").matches(request.source) || !request.reject && request.clearText == null
                 ) badRequest()
                 // #85: tokenHash is the stored (keyed) value from the queue; the candidate is hashed, keyed, then compared.
                 val candidate = request.clearText?.let { config.hashKeying.candidate(it) }

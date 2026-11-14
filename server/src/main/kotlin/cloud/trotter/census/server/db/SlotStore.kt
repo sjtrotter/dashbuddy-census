@@ -25,6 +25,9 @@ internal object SlotObject {
 
     const val SQL: String = "fingerprint::text || ':' || hash_domain::text || ':' || filter_rev::text || ':' || layout::text" +
         " || ':' || slot || ':' || value || ':' || platform_app_version"
+
+    /** [SQL] over a table whose value column is [column] (#81: a role tag's `role`). */
+    fun sql(column: String): String = SQL.replace("|| value ||", "|| $column ||")
 }
 
 /**
@@ -34,9 +37,12 @@ internal object SlotObject {
 @Serializable
 data class SlotVariant(val platformAppVersion: String, val hashDomain: Int, val filterRev: Int, val layout: String)
 
-/** One slot's class (#80) with the installs and distinct hashes of the epoch it was judged on: operator views only. */
+/**
+ * One slot's class (#80) with the installs and distinct hashes of the epoch it was judged on, and (#81) the role tags
+ * contributors gave it, as non-trusted installs per role in the epoch where most tagged it: operator views only.
+ */
 @Serializable
-data class SlotReading(val slot: String, val slotClass: SlotClass, val installs: Int, val hashes: Int)
+data class SlotReading(val slot: String, val slotClass: SlotClass, val installs: Int, val hashes: Int, val roles: Map<String, Int> = emptyMap())
 
 /** One cluster variant's slots (#80), sorted by slot id. */
 @Serializable
@@ -57,7 +63,7 @@ internal class SlotSighting(val item: CensusSkeletonDto, val variant: SlotVarian
  */
 internal fun Connection.recordSlotSightings(
     tagger: Tagger, installId: UUID, trusted: Boolean, countsFrom: LocalDate?, fingerprint: String,
-    sightings: List<SlotSighting>, slotLimit: Int,
+    sightings: List<SlotSighting>, slotLimit: Int, received: LocalDate,
 ) {
     data class Row(val variant: SlotVariant, val epoch: Int, val slot: String, val value: String)
     val lastDays = LinkedHashMap<Row, LocalDate>()
@@ -72,8 +78,13 @@ internal fun Connection.recordSlotSightings(
     var written = 0
     prepareStatement(
         """INSERT INTO slot_sightings (fingerprint, platform_app_version, hash_domain, filter_rev, layout, slot, value, epoch,
-                install_tag, trusted, counts_from, last_day) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                install_tag, trusted, counts_from, last_day, first_received, received_day)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (fingerprint, platform_app_version, hash_domain, filter_rev, layout, slot, epoch, value, install_tag) DO UPDATE SET
+                -- #81 (Sol S6): the first write on a new receipt day keeps the row's state before that day.
+                prev_last_day = CASE WHEN slot_sightings.received_day < EXCLUDED.received_day
+                    THEN slot_sightings.last_day ELSE slot_sightings.prev_last_day END,
+                received_day = GREATEST(slot_sightings.received_day, EXCLUDED.received_day),
                 last_day = GREATEST(slot_sightings.last_day, EXCLUDED.last_day),
                 counts_from = CASE WHEN slot_sightings.counts_from IS NULL OR EXCLUDED.counts_from IS NULL
                     THEN NULL ELSE LEAST(slot_sightings.counts_from, EXCLUDED.counts_from) END""",
@@ -83,7 +94,7 @@ internal fun Connection.recordSlotSightings(
             val tag = tagger.tag(TagPurpose.SLOT, installId, SlotObject.of(fingerprint, variant, row.slot, row.value), day)
             check(tag.epoch == row.epoch)
             listOf(fingerprint, variant.platformAppVersion, variant.hashDomain, variant.filterRev, variant.layout, row.slot,
-                row.value, tag.epoch, tag.tag, trusted, countsFrom, day)
+                row.value, tag.epoch, tag.tag, trusted, countsFrom, day, received, received)
                 .forEachIndexed { index, parameter -> statement.setObject(index + 1, parameter) }
             statement.addBatch()
             if (++written % 500 == 0) statement.executeBatch()
@@ -105,8 +116,8 @@ internal fun Policy.classify(counts: SlotCounts): SlotClass =
 /**
  * The operator's live read (#80): every variant's slot readings for the stored cluster keys in [fingerprints], from the
  * rows as they stand now. Support is counted per variant and slot within ONE epoch, as vocabulary k is (#86): distinct
- * epoch tags of non-trusted, out-of-quarantine rows. Operator views only: no app route serves classes until the contributor
- * tier (#81).
+ * epoch tags of non-trusted, out-of-quarantine rows. Operator views only: a contributor's phone reads the day's release,
+ * with its own rows left out ([SlotRelease], #81), never these live readings.
  */
 internal fun Connection.slotReadings(policy: Policy, today: LocalDate, fingerprints: List<String>): Map<String, List<SlotVariantReading>> {
     if (fingerprints.isEmpty()) return emptyMap()
@@ -150,6 +161,31 @@ internal fun Connection.slotReadings(policy: Policy, today: LocalDate, fingerpri
  * The rows k counting may use (#80, the vocabulary's rule, #86): non-trusted, past quarantine on the day bound to the
  * first parameter, inside retention on the day bound to the second, in an accepted domain at or above the floor.
  */
-internal fun Policy.countedSlotRows(): String = """NOT trusted AND (counts_from IS NULL OR counts_from <= ?)
-    AND last_day + ${retention.clusterSightingsDays} > ?
+internal fun Policy.countedSlotRows(lastDay: String = "last_day"): String = """NOT trusted AND (counts_from IS NULL OR counts_from <= ?)
+    AND $lastDay + ${retention.clusterSightingsDays} > ?
     AND hash_domain IN (${acceptedHashDomains.joinToString(",")}) AND filter_rev >= $minimumFilterRev"""
+
+/**
+ * #81: the role tags of one cluster, per variant and slot: for each role, the distinct non-trusted installs that gave it
+ * within one live epoch (the epoch where most did; never a sum across epochs), from rows inside retention.
+ */
+internal fun Connection.slotRoles(policy: Policy, today: LocalDate, fingerprint: String): Map<Pair<SlotVariant, String>, Map<String, Int>> {
+    val live = Epochs.live(today)
+    val counts = HashMap<Pair<SlotVariant, String>, MutableMap<String, Int>>()
+    prepareStatement(
+        """SELECT platform_app_version, hash_domain, filter_rev, layout, slot, role, max(installs) FROM (
+                SELECT platform_app_version, hash_domain, filter_rev, layout, slot, role, epoch, count(DISTINCT install_tag) AS installs
+                FROM slot_roles WHERE fingerprint = ? AND NOT trusted AND last_day + ? > ? AND epoch BETWEEN ? AND ?
+                GROUP BY platform_app_version, hash_domain, filter_rev, layout, slot, role, epoch
+            ) per_epoch GROUP BY platform_app_version, hash_domain, filter_rev, layout, slot, role""",
+    ).use { statement ->
+        listOf(fingerprint, policy.contributor.retentionDays, today, live.first, live.last).forEachIndexed { index, value -> statement.setObject(index + 1, value) }
+        statement.executeQuery().use { rows ->
+            while (rows.next()) {
+                val variant = SlotVariant(rows.getString(1), rows.getInt(2), rows.getInt(3), rows.getString(4))
+                counts.getOrPut(variant to rows.getString(5)) { sortedMapOf() }[rows.getString(6)] = rows.getInt(7)
+            }
+        }
+    }
+    return counts
+}

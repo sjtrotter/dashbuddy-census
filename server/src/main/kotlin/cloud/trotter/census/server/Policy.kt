@@ -29,7 +29,43 @@ data class Policy(
     val hashDomain: String = ContractCompatibility.HASH_DOMAIN,
     // #80: operator-side thresholds; nothing on the phone reads them, so they stay out of the published policy.
     @kotlinx.serialization.Transient val slotConstancy: SlotConstancyPolicy = SlotConstancyPolicy(),
+    // #81: contributor-tier limits; server-side only, like the slot thresholds, and documented in API.md.
+    @kotlinx.serialization.Transient val contributor: ContributorPolicy = ContributorPolicy(),
 )
+
+/**
+ * The contributor tier's limits (#81, ADR-0011 §15). Daily counts are per install and UTC day, kept on its ledger row,
+ * so they are per grant (an install holds one live grant) and a data deletion does not reset them.
+ */
+data class ContributorPolicy(
+    /** A grant lasts this many UTC days from the day it is issued. */
+    val grantDays: Int = 30,
+    /** Slot-class and gate items an install may read per day. */
+    val dailyReads: Int = 200,
+    /** Reviews (one screen's confirmations and role tags) per day; the app sends at most 3. */
+    val dailyReviews: Int = 10,
+    /** Plaintext word submissions per day. */
+    val dailyWords: Int = 30,
+    /** "Ask the developer" items per day. */
+    val dailyQuarantine: Int = 3,
+    /** A quarantine item expires at the start of the UTC day this many days after receipt: at most 72 hours. */
+    val quarantineDays: Int = 3,
+    /** Confirmations and role tags in one review, gate items in one query, words in one submission. */
+    val maxReviewItems: Int = 256,
+    val maxGateItems: Int = 64,
+    val maxWordItems: Int = 16,
+    /** The largest artifact (decoded bytes) a quarantine item may carry. */
+    val maxArtifactBytes: Int = 131_072,
+    /** Independent installs that must confirm one value before its gate can open. */
+    val gateConfirmations: Int = 2,
+    /** Days a confirmation, role tag, audit row or pending word is kept after its last day. */
+    val retentionDays: Int = 30,
+) {
+    init {
+        require(grantDays > 0 && quarantineDays in 1..3 && gateConfirmations >= 2 && retentionDays in 1..30)
+        require(listOf(dailyReads, dailyReviews, dailyWords, dailyQuarantine, maxReviewItems, maxGateItems, maxWordItems, maxArtifactBytes).all { it > 0 })
+    }
+}
 
 /**
  * The per-slot constancy thresholds (#80, ADR-0011 §14), in whole percent of the installs that saw the slot within one

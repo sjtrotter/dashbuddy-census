@@ -243,8 +243,12 @@ class OpsStore(private val db: Database, private val clock: Clock, private val p
                 ORDER BY e.received_day DESC, e.id DESC LIMIT 1""",
             fingerprint,
         ) { WireframeRender.render(it.getString("envelope"), it.getString("received_day"), it.getString("prefix")) } else null
+        // #81: each slot's role tags beside its class.
+        val roles = slotRoles(policy, clock.today(), row.fingerprint)
         row.copy(newWithVersion = newest != null && newWithVersion(row, newest, versionFirstDays()), samples = samples(row), wireframe = wireframe,
-            slots = slotReadings(policy, clock.today(), listOf(row.fingerprint))[row.fingerprint].orEmpty())
+            slots = slotReadings(policy, clock.today(), listOf(row.fingerprint))[row.fingerprint].orEmpty().map { reading ->
+                reading.copy(slots = reading.slots.map { it.copy(roles = roles[reading.variant to it.slot].orEmpty()) })
+            })
     }
 
     private fun Connection.clusterRows(today: LocalDate, status: String? = null, fingerprint: String? = null): List<OpsCluster> =
@@ -443,7 +447,7 @@ class OpsStore(private val db: Database, private val clock: Clock, private val p
         val today = clock.today()
         val locked = createArrayOf("text", cohort.toTypedArray())
         try {
-            update(
+            val resolved = update(
                 """INSERT INTO vocabulary_v5 (token_hash, kind, distinct_installs_at_promotion, promoted_day, clear_text, unblinded_day, source, status, hash_domain, filter_rev)
                     SELECT token_hash, kind, installs, ?, ?, ?, ?, ?, hash_domain, filter_rev FROM (${VocabularyEligibility.queue(policy, cohort = true)}) queue
                     WHERE token_hash = ? AND hash_domain=? AND filter_rev=?
@@ -451,6 +455,9 @@ class OpsStore(private val db: Database, private val clock: Clock, private val p
                 today, if (reject) null else clearText, if (reject) null else today, source,
                 if (reject) "rejected" else "unblinded", *queueArgs(), locked, tokenHash, hashDomain, filterRev,
             ) == 1
+            // #81: a resolved token's waiting contributor words go with the decision; the plaintext is kept no longer.
+            if (resolved) update("DELETE FROM contributor_words WHERE value = ? AND hash_domain = ? AND filter_rev = ?", tokenHash, hashDomain, filterRev)
+            resolved
         } finally {
             locked.free()
         }

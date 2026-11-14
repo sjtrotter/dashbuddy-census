@@ -41,8 +41,20 @@ enum class TagPurpose(val label: String) {
     /** Per-install health: no object, so the alarms can read one install's own history within the epoch. */
     HEALTH("health"),
 
-    /** A slot sighting (#80): the object is the whole row identity, value included ([cloud.trotter.census.server.db.SlotObject]). */
+    /**
+     * A slot sighting (#80): the object is the whole row identity, value included ([cloud.trotter.census.server.db.SlotObject]).
+     * A released copy of a slot sighting (#81) carries the same tag.
+     */
     SLOT("slot"),
+
+    /** A contributor's confirmation of a slot's value (#81): the object is the slot sighting's identity for that value. */
+    CONFIRMATION("confirm"),
+
+    /** A contributor's role tag on a slot (#81): the object is the slot's identity with the role in place of a value. */
+    ROLE("role"),
+
+    /** A quarantine item (#81): the object is the item's random id. */
+    QUARANTINE("quarantine"),
 }
 
 /**

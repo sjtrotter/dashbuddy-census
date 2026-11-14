@@ -1,11 +1,13 @@
 package cloud.trotter.census.server
 
 import cloud.trotter.census.server.auth.AuthenticatedInstallKey
+import cloud.trotter.census.server.db.ContributorStore
 import cloud.trotter.census.server.db.EnvelopeStore
 import cloud.trotter.census.server.db.HealthStore
 import cloud.trotter.census.server.db.InstallStore
 import cloud.trotter.census.server.db.OpsStore
 import cloud.trotter.census.server.db.PauseStore
+import cloud.trotter.census.server.db.QuarantineStore
 import cloud.trotter.census.server.db.SkeletonStore
 import cloud.trotter.census.server.jobs.HealthAlarms
 import cloud.trotter.census.server.ops.ClustersPageHtml
@@ -13,6 +15,7 @@ import cloud.trotter.census.server.ops.OpsLogging
 import cloud.trotter.census.server.ops.isOpsHtmlPath
 import cloud.trotter.census.server.ops.isOpsPath
 import cloud.trotter.census.server.routes.EnrolStats
+import cloud.trotter.census.server.routes.contributorRoutes
 import cloud.trotter.census.server.routes.envelopeRoutes
 import cloud.trotter.census.server.routes.healthReportRoutes
 import cloud.trotter.census.server.routes.healthRoutes
@@ -153,9 +156,14 @@ fun Application.module(
         val health = db?.let { HealthStore(it, clock, policy.retention.healthDailyDays) }
         val pause = db?.let { PauseStore(it, clock) }
         val alarms = alarmEvaluator ?: health?.let { HealthAlarms(it, clock) }
-        opsRoutes(config, db?.let { OpsStore(it, clock, policy) }, alarms, clock, policy, lifecycle = lifecycle, enrolStats = enrolStats, pause = pause)
+        // #81: the contributor tier; the quarantine needs the operator's public key, or it refuses every item.
+        val contributors = db?.let { ContributorStore(it, clock, policy) }
+        val quarantine = db?.let { database -> config.operatorPublicKey?.let { QuarantineStore(database, clock, policy, it) } }
+        opsRoutes(config, db?.let { OpsStore(it, clock, policy) }, alarms, clock, policy, lifecycle = lifecycle, enrolStats = enrolStats, pause = pause,
+            contributors = contributors, quarantine = quarantine)
         identityRoutes(store, clock, policy, alarms, enrolStats) {
             if (store != null && skeletons != null && pause != null) skeletonRoutes(store, skeletons, clock, policy, pause)
+            if (contributors != null && pause != null) contributorRoutes(contributors, quarantine, config.hashKeying, clock, policy, pause)
             if (envelopes != null) envelopeRoutes(envelopes, clock, policy)
             if (health != null && alarms != null && pause != null) healthReportRoutes(health, alarms, clock, policy, pause)
         }
@@ -165,6 +173,9 @@ fun Application.module(
 private val LOGGABLE_PATHS = setOf(
     "/healthz", "/readyz", "/v1/policy", "/v1/enroll", "/v1/rotate", "/v1/nonce", "/v1/installs/me", "/v1/installs/me/data", "/v1/me", "/v1/skeletons",
     "/v1/envelopes", "/v1/health", "/ops",
+    // #81: the contributor tier.
+    "/v1/contributor/grant", "/v1/contributor/classes", "/v1/contributor/gates", "/v1/contributor/review", "/v1/contributor/words",
+    "/v1/contributor/quarantine",
 )
 
 @Serializable

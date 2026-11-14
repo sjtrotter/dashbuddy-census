@@ -177,3 +177,47 @@ Use the actual reporting day. Send 1–30 reports with no batch ID; empty is `40
 Success is `200 {"status":"accepted","accepted":N,"rejected":{"reason":N}}`. Health is upserted by `(install, day, platform, platformAppVersion)`: repeated content leaves daily and fleet totals unchanged. Running-day counters use the greatest admitted/unknown/trips values seen, while the latest accepted report replaces `ruleCounts` and `rulesetVersion`. Send the full running rule-count map on each update. `appVersion` is validated but is not a stored health dimension. Every accepted request, including a content-identical retry, consumes its raw byte count from the shared ledger; it consumes zero item allowance and no batch slots. Each accepted report also counts against the per-install `dailyHealthReportBudget` (60 per UTC receipt day, #79), checked before any byte is spent; a request whose reports would pass it stores nothing. Report or byte exhaustion returns `429 budget_exhausted` with `Retry-After` until UTC midnight.
 
 Fleet totals are recomputed for each touched day/platform/version inside the same transaction as the daily upserts and budget reservation. Accepted reports then trigger health alarm evaluation. Per-install health rows are keyed by an epoch pseudonym that changes every 30 days, not the install ID (#86), retained for 30 days, then folded into the fleet totals and deleted (#79); withdrawal and data deletion delete the install's health rows and recompute the fleet rows they still fed. Fleet rollups have no install identifier and retain their aggregate history.
+
+## Contributor tier (#81)
+
+The routes, bodies and error codes are listed in [API.md](API.md#contributor-tier--81). This section is the order the
+phone follows (gig.log#1625–#1627).
+
+1. **Grant.** Compute eligibility on the phone and send only the answer: signed `POST /v1/contributor/grant` with
+   `{"eligible":true}`. The server issues a grant to an install enrolled at least 8 UTC days ago; it lasts 30 days.
+   Read its state with `GET /v1/contributor/grant` (`granted`, `expired`, `revoked`, `none`) before each review
+   session. On `expired`, request again; on `revoked` or `403 grant_revoked`, stop every contributor upload and clear
+   pending reviews until a later request succeeds. Withdrawal ends the grant; "delete my data" ends a live one (request
+   again afterwards).
+2. **Upload, then read classes.** The server answers only about a variant this install has uploaded itself (a live
+   sighting of one of its slots, within 30 days), so the reviewed skeleton must have gone through `POST
+   /v1/skeletons` first. For the screen under review, send its variant and the slot ids of its own skeleton (`slots`,
+   at most 1024) to `POST /v1/contributor/classes`; only those slots are answered. The variant is the skeleton's public
+   fingerprint and kind, its `platformAppVersion` (`unknown` when it has none), `hashDomain`, `filterRev`, and its
+   layout id, computed exactly as `SlotWalk.layout` describes (the raw tree as sent, wrappers included). Slot ids are
+   the #80 ids ([API.md](API.md#slot-constancy--80)). A slot that is not listed is `unknown`: grey it like `varying`
+   and `regional`. Only a `constant` slot may show its word and be confirmed. The classes come from the day's release
+   with this install's own rows left out, so the phone's own uploads never change what it reads; a release holds the
+   rows as they stood at the end of the previous day, so a screen first uploaded today has classes from tomorrow. On
+   `503 release_unavailable`, retry after the `Retry-After` seconds; treat every slot as unknown meanwhile.
+3. **The review.** A confirmation or role tag counts only for a slot (and value) this install has a live sighting of
+   (the skeleton uploaded in step 2), so send `POST /v1/contributor/review` with the confirmations (slot and the slot's public census hash) and role tags. Items the
+   server skipped are counted in `skipped`. Never send a word here.
+4. **The gate.** Before sending a confirmed word, ask `POST /v1/contributor/gates` for each (slot, hash) this install
+   confirmed. Hold the word on the phone until the answer is `open: true`; then send it with `POST
+   /v1/contributor/words` (slot, hash, the word as displayed). The server refuses a word whose gate is closed, so the
+   phone's own check is not the only gate. A word the gate accepts is a candidate for the operator, not shipped
+   wording.
+5. **Ask the developer.** Build the artifact once, in the canonical form [API.md](API.md#contributor-tier--81)
+   defines: `{"skeleton":…,"confirmations":[…],"roles":[…],"words":[…]}`, the skeleton as the contract serializes it,
+   keys in that order, every array present, compact, where `words` holds only words whose gate is open (every other
+   confirmed slot stays a hash). Base64url-encode those bytes into `{"artifact":…,"note":…}` and send `POST
+   /v1/contributor/quarantine`. The server validates the artifact and seals its canonical form to the operator's key;
+   check that the response's `artifactSha256` equals the SHA-256 of the bytes the review screen described (it does
+   when they were canonical). Never repeat a key: a repeated key anywhere is refused. Show the contributor
+   `expiresDay` (the item is gone by 00:00 UTC that day).
+   `409 gate_closed` means a word in it was not cleared: drop the word and send it as a hash.
+
+Every contributor route is signed like the rest of `/v1`, spends the install's own daily quotas, and answers `403
+grant_required` without a live grant. The pause switch refuses review, words and quarantine with `503 paused` and
+`Retry-After: 3600`.

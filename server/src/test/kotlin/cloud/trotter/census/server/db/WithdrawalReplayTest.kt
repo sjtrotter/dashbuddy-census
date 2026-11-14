@@ -48,7 +48,7 @@ class WithdrawalReplayTest {
 
     @BeforeEach
     fun clear() {
-        sql { it.update("TRUNCATE installs, clusters, withdrawals, health_daily, token_sightings_v5, epoch_keys CASCADE") }
+        sql { it.update("TRUNCATE installs, clusters, withdrawals, health_daily, token_sightings_v5, epoch_keys, slot_release_days, quarantine_items CASCADE") }
     }
 
     @Test
@@ -268,8 +268,9 @@ class WithdrawalReplayTest {
             fingerprint, cluster.epoch, cluster.tag, day)
         // #80: one slot sighting, tagged like ingest tags it.
         val slot = connection.testTag(TagPurpose.SLOT, id, SlotObject.of(fingerprint, SlotVariant("1.0", 1, 1, "a".repeat(64)), "root/text", "present"), day)
-        connection.update("INSERT INTO slot_sightings (fingerprint, platform_app_version, hash_domain, filter_rev, layout, slot, value, epoch, install_tag, trusted, last_day) VALUES (?, '1.0', 1, 1, repeat('a', 64), 'root/text', 'present', ?, ?, false, ?)",
-            fingerprint, slot.epoch, slot.tag, day)
+        connection.update("INSERT INTO slot_sightings (fingerprint, platform_app_version, hash_domain, filter_rev, layout, slot, value, epoch, install_tag, trusted, last_day, first_received, received_day) VALUES (?, '1.0', 1, 1, repeat('a', 64), 'root/text', 'present', ?, ?, false, ?, ?, ?)",
+            fingerprint, slot.epoch, slot.tag, day, day, day)
+        connection.seedContributorRows(id, fingerprint, day)
         connection.update("INSERT INTO ingest_ledger (install_id, day) VALUES (?, ?)", id, day)
         connection.update("INSERT INTO nonces (nonce, install_id, issued_at) VALUES (?, ?, ?)", UUID.randomUUID().toString().replace("-", ""), id, t0.atOffset(ZoneOffset.UTC))
     }
