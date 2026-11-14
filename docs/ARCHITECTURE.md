@@ -66,7 +66,8 @@ name (`operator`; the agent token, #84, adds its own, `AnchorCaller`). `AnchorCh
 transaction: the pure chrome filter (`ChromeShape.anchorCandidate`) first, then the budget, then, only for a query
 with no refused candidate, the slot's live counted rows (`SlotRelease.liveRows`, classified like the operator views
 with nobody left out), the keyed compare of every case variant (`anchorMatches`) and the audit row, which keeps
-no candidate's text (on a match, the text the slot holds) and is read only inside its 30 days. Every slot class
+no text and is read only inside its 30 days. Only as-sent, lower and sentence case are compared for a phrase
+(`ChromeShape.caseVariants`), and a phrase with two capitalized words in a row is refused. Every slot class
 runs the same statements and the same hashing; only `constant` supplies a value to compare against.
 
 Configuration is injected, stdout carries logs, and PostgreSQL holds durable state. The runtime is non-root, drops capabilities in Compose, and writes only under `/tmp`. Flyway coordination handles concurrent migration attempts, but operators must still review backward compatibility for rolling deployments.

@@ -56,14 +56,11 @@ sealed interface AnchorOutcome {
     data class BudgetExhausted(val retryAfterSeconds: Long) : AnchorOutcome
 }
 
-/**
- * One audit row as the operator reads it (#82). No candidate's text is kept; [matched] is the text the slot holds, on a
- * match only.
- */
+/** One audit row as the operator reads it (#82): who asked about which slot, how many candidates, the answer class. No text. */
 @Serializable
 data class AnchorAuditRow(
     val caller: String, val day: String, val fingerprint: String, val variant: SlotVariant, val slot: String,
-    val candidates: Int, val result: String, val matched: List<String>? = null,
+    val candidates: Int, val result: String,
 )
 
 /**
@@ -80,7 +77,7 @@ data class AnchorAuditRow(
  *    more, yields a value; `unknown`, `varying`, `regional`, `withheld` and `shape` yield none;
  * 5. every case variant of every candidate is hashed (public census hash), keyed and compared in constant time, against
  *    the constant value or, when there is none, a placeholder whose result is discarded ([anchorMatches]);
- * 6. one audit row records the query: never a candidate's text; on a match, the text the slot holds.
+ * 6. one audit row records the query, with no text: neither a candidate nor what a matched slot holds.
  *
  * So below-k, regional, varying, withheld and shape slots answer exactly as a constant slot that holds none of the
  * candidates does ("no answer"), after the same statements and the same hashing. The audit row and the log carry the
@@ -102,17 +99,16 @@ class AnchorCheckStore(private val db: Database, private val clock: Clock, priva
         val today = clock.today()
         return query {
             if (!spend(caller, today, candidates.size)) {
-                audit(caller, today, scope, slot, candidates.size, AnchorResult.BUDGET_EXHAUSTED, null)
+                audit(caller, today, scope, slot, candidates.size, AnchorResult.BUDGET_EXHAUSTED)
                 return@query AnchorOutcome.BudgetExhausted(secondsToUtcMidnight(clock.now()))
             }
             val refused = admitted.indices.filter { admitted[it] == null }
             if (refused.isNotEmpty()) {
-                audit(caller, today, scope, slot, candidates.size, AnchorResult.REFUSED, null)
+                audit(caller, today, scope, slot, candidates.size, AnchorResult.REFUSED)
                 return@query AnchorOutcome.Refused(refused)
             }
             val matches = anchorMatches(db.keying, constantValue(today, scope, slot), admitted.requireNoNulls())
-            val matched = matches.filterNotNull().distinct().takeIf { it.isNotEmpty() }
-            audit(caller, today, scope, slot, candidates.size, if (matched != null) AnchorResult.MATCH else AnchorResult.NO_ANSWER, matched)
+            audit(caller, today, scope, slot, candidates.size, if (matches.any { it != null }) AnchorResult.MATCH else AnchorResult.NO_ANSWER)
             AnchorOutcome.Answered(matches)
         }
     }
@@ -120,7 +116,7 @@ class AnchorCheckStore(private val db: Database, private val clock: Clock, priva
     /** The newest audit rows inside retention first (#82): a row past its deadline is never read, swept or not. */
     suspend fun auditLog(limit: Int): List<AnchorAuditRow> = query {
         prepareStatement(
-            """SELECT caller, day, fingerprint, platform_app_version, hash_domain, filter_rev, layout, slot, candidates, result, matched
+            """SELECT caller, day, fingerprint, platform_app_version, hash_domain, filter_rev, layout, slot, candidates, result
                 FROM anchor_checks WHERE day + ? > ? ORDER BY id DESC LIMIT ?""",
         ).use { statement ->
             statement.setInt(1, policy.anchorCheck.auditDays)
@@ -132,7 +128,6 @@ class AnchorCheckStore(private val db: Database, private val clock: Clock, priva
                         rows.getString(1), rows.getString(2), rows.getString(3),
                         SlotVariant(rows.getString(4), rows.getInt(5), rows.getInt(6), rows.getString(7)), rows.getString(8),
                         rows.getInt(9), rows.getString(10),
-                        rows.getArray(11)?.let { array -> try { (array.array as Array<*>).map { it as String } } finally { array.free() } },
                     ))
                 }
             }
@@ -158,18 +153,13 @@ class AnchorCheckStore(private val db: Database, private val clock: Clock, priva
     }
 
     private fun Connection.audit(
-        caller: AnchorCaller, today: LocalDate, scope: SlotScope, slot: String, candidates: Int, result: AnchorResult, matched: List<String>?,
+        caller: AnchorCaller, today: LocalDate, scope: SlotScope, slot: String, candidates: Int, result: AnchorResult,
     ) {
-        val array = matched?.let { createArrayOf("text", it.toTypedArray()) }
-        try {
-            update(
-                """INSERT INTO anchor_checks (caller, day, fingerprint, platform_app_version, hash_domain, filter_rev, layout, slot,
-                        candidates, result, matched) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                caller.id, today, *scope.args(), slot, candidates, result.wire, array,
-            )
-        } finally {
-            array?.free()
-        }
+        update(
+            """INSERT INTO anchor_checks (caller, day, fingerprint, platform_app_version, hash_domain, filter_rev, layout, slot,
+                    candidates, result) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            caller.id, today, *scope.args(), slot, candidates, result.wire,
+        )
     }
 
     /** Test seam: receives the SQL of every statement this store prepares, so a test can compare query sequences. */

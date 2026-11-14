@@ -146,51 +146,58 @@ raw screen text; its limits are what keep it from being a way to guess customer 
   sensitive marker, `@`, web address or square bracket, and none of its case variants may have a name, address or code
   shape (a first name and an initial, a customer or code lead-in with a tail, a street line). The shapes read words
   and letter runs, never raw characters, so punctuation (`brandon c,`, `Deliver to: Sam`, `Main St!`) never hides one.
-  A query with any refused candidate is refused
-  whole, as `not_chrome`, and none of its candidates is compared. The phone's own filter (ADR-0011 §2) uses PII shapes
+  A candidate with two capitalized words in a row in any compared variant is refused as well (next point). A query
+  with any refused candidate is refused whole, as `not_chrome`, and none of its candidates is compared. The phone's own filter (ADR-0011 §2) uses PII shapes
   and customer markers that live in the app, outside the Apache-2.0 contract, so the server cannot run it; its check
   (`ChromeShape`) is built from the contract's predicates and a short server list of shapes, and errs toward refusing.
-  Every slot value was hashed only after the phone's full filter passed it, so a name the phone withholds is never a
-  slot hash to find.
+  The phone hashes a slot value only after its own full filter passed it, so a name that filter withholds is never a
+  slot hash; a name it misses can be (risk 1).
 - **Only constant slots answer.** A slot answers only when it is `constant` (one hash on 90% of the installs that saw
   it and on at least k of them, counted within one epoch, trusted and quarantined installs excluded). `unknown`,
   `regional`, `varying`, `withheld` and `shape` slots, and slots nobody uploaded, return the same `no_answer` as a
   wrong word on a constant slot, after the same statements (budget, the slot's live rows, the audit row) and the same
   hashing (each variant is compared against a placeholder whose result is discarded); tests compare the statement
   sequences. Neither the answer, the audit row nor the log names the slot's class.
-- **Exact text, bounded variants.** Five case variants per candidate at most (as sent, lower, upper, sentence, title),
-  because `hasText` ignores case and the hash keeps it. No fragment, prefix or pattern is ever hashed here; those
+- **No two capitalized words are ever compared.** Capitalization cannot tell app wording (`Accept Order`) from a
+  person's name (`Riley Smith`, `Jane A Smith`), so the check never compares a form with two consecutive words that
+  start with a capital (Sol round 2, S1). A phrase is compared as sent, in lower case and in sentence case only; a
+  single word also in upper case and capitalized. A candidate whose as-sent form has such a pair is refused. A phrase
+  typed in lower case (`riley smith`) is compared only as `riley smith` and `Riley smith`, so it cannot reach a slot
+  that holds `Riley Smith`. Title-case and all-caps chrome is confirmed through contributor-approved vocabulary (#81)
+  or on-phone probes (ADR-0011 §17) instead. These variants are all ones `hasText` accepts, since it ignores case and
+  the hash keeps it. No fragment, prefix or pattern is ever hashed here; those
   questions go to phones as probes (ADR-0011 §17).
 - **Budgets and audit.** At most 8 candidates per query and 200 per caller per UTC day, refused ones included. Every
   operator query also needs a fresh TOTP code (one use per code), so a stolen bearer token alone asks nothing, and the
   process-wide operator bucket (60 per minute) applies. Every query writes an audit row: caller, day, variant, slot,
   candidate count and answer class.
 
-**The audit keeps no candidate's text.** A guess can be a name, and a stored guess would be a plaintext store of
-whatever names were tried, so the server keeps none (Sol round 1, S2): a refused or non-matching candidate leaves no
-trace of what it said, in the database, a backup or the log. A match keeps `matched`, the text the slot holds; by
-construction that is a value constant on at least 90% of at least k installs, which is app wording the operator is
-about to put in a rule. Rows name a caller (`operator`, later the agent's), never an install, keep 30 days, are never
+**The audit keeps no text.** A guess can be a name, and so can what a constant slot holds (below), so the server keeps
+neither (Sol rounds 1 and 2, S2): the audit row records the caller, day, cluster key, variant, slot, candidate count
+and answer class, and no candidate or matched text reaches the database, a backup or the log. The response returns
+the matched text to the caller, who copies it into a draft. Rows name a caller (`operator`, later the agent's), never an install, keep 30 days, are never
 read after that whether or not the sweep has run, and are in `backup.sh`'s dump. Logs carry the candidate count and
 the answer class only.
 
 **What it does not stop.**
 
-- **Risk 12, constant is not chrome.** A common first name, a store or a place name can be constant on k installs.
-  The filter passes a lone first name (`Riley`) and two capitalized words (`Riley Smith`): refusing every title-case
-  pair would refuse the apps' own buttons (`Accept Order`, `Order Details`). We accept that because only a slot
-  constant on at least 90% of at least k installs ever answers. One customer's name appears on the screens of the
-  dashers who delivered to that customer, never on 90% of k dashers' screens of one slot, so no single customer's name
-  can be what such a slot holds; and a guess that does not match leaves nothing behind. What can answer is a value
-  that many dashers share, such as a store or a very common word, which is chrome-like by construction. The controls
-  are the regional class, the 90% share, the audit and the human review before anything ships; a match is evidence for
-  a draft, never approval.
+- **Constancy is frequency evidence, not proof of app wording (risk 12).** A `constant` slot holds one hash on 90% of
+  at least k installs. That says many installs saw the same value there; it does not say the delivery app wrote it. A
+  store name, a place name or a very common first name can be constant on k honest installs, and a match on one is
+  evidence for a draft, never approval: the regional class, the audit and the human review before anything ships are
+  the controls.
+- **Sybils can make a victim's value constant (risk 5).** Someone with k − 1 aged installs of their own can upload a
+  guessed value (a customer's name) to a slot that one victim's install shows. With the victim's row the slot holds the
+  guess on every install that saw it, turns `constant`, and the check answers `match`; without it, the slot stays
+  below k and answers `no_answer`. So the check can confirm one install's value. What bounds this: the route is
+  operator-only (a bearer token and a fresh TOTP code per query); it refuses name-, address- and code-shaped
+  candidates and never compares two capitalized words in a row, which is how a full name renders; the candidates
+  spend a daily budget; and nothing about the query's text is stored. What it does not remove: a name that passes the
+  filter (a lone first name, `Riley`, or a name rendered in lower or sentence case), confirmed by someone holding the
+  operator credentials and k − 1 aged installs. The cluster page's class and counts give that same person the same
+  answer without the check, so the check adds speed, not a new answer.
 - **Risk 14, the tool binds the tool.** These limits bind this route, the dashboard and the agent token (#84). The
   live operator holds the database and the pepper and can compare any guess outside the route (risk 7).
-- **Aged Sybils (risk 5).** Someone holding the operator token and k − 1 aged installs of their own can upload a
-  guess to a slot and ask the check: the slot turns constant, and answers, exactly when one other install holds the
-  same guess. The cluster page's class and counts already show the operator that change, so the check adds speed, not
-  a new answer; it costs aged installs, TOTP codes and the daily budget, and every query is audited.
 
 ## Edge admission (#1178)
 

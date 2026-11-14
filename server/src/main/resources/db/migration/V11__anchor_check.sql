@@ -13,9 +13,9 @@ CREATE TABLE anchor_check_budget (
 );
 
 -- One row per query: the caller, the day, the cluster variant and slot asked about, how many candidates, and the
--- answer class. No candidate's text is stored (Sol round 1, S2): a refused or non-matching candidate leaves no trace
--- of what it said. A match stores `matched`, the text the slot holds, which is by definition a value constant on at
--- least 90% of at least k installs (app wording the operator is about to put in a rule). Kept 30 days.
+-- answer class. No text is stored, neither a candidate nor the text a matched slot holds (Sol rounds 1 and 2, S2): a
+-- constant slot can hold a customer's value (ADR-0011 risks 5 and 12), so a stored match could be a stored name. Kept
+-- 30 days.
 CREATE TABLE anchor_checks (
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     caller text NOT NULL CHECK (caller ~ '^[a-z][a-z0-9:_-]{0,63}$'),
@@ -27,9 +27,6 @@ CREATE TABLE anchor_checks (
     layout char(64) NOT NULL CHECK (layout ~ '^[0-9a-f]{64}$'),
     slot text NOT NULL CHECK (slot ~ '^[A-Za-z0-9/]+$' AND length(slot) <= 512),
     candidates integer NOT NULL CHECK (candidates BETWEEN 1 AND 64),
-    result text NOT NULL CHECK (result IN ('match', 'no_answer', 'refused', 'budget_exhausted')),
-    matched text[] NULL,
-    CHECK ((result = 'match') = (matched IS NOT NULL)),
-    CHECK (matched IS NULL OR cardinality(matched) BETWEEN 1 AND candidates)
+    result text NOT NULL CHECK (result IN ('match', 'no_answer', 'refused', 'budget_exhausted'))
 );
 CREATE INDEX anchor_checks_day_idx ON anchor_checks (day);

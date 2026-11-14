@@ -182,19 +182,25 @@ curl --fail-with-body "$CENSUS_URL/ops/anchor-check" \
   -d "{\"variant\":{\"fingerprint\":\"$FINGERPRINT\",\"platformAppVersion\":\"8.0\",\"hashDomain\":1,\"filterRev\":1,\"layout\":\"$LAYOUT\"},\"slot\":\"root/0/text\",\"candidates\":[\"Heads up\",\"Pick up by\"]}"
 ```
 
+Send phrases as they read in sentence or lower case (`Pick up by`, `accept order`); a single word in any case. The
+check compares a phrase only as sent, in lower case and in sentence case, and refuses a phrase with two capitalized
+words in a row (`Accept Order`, `PICK UP BY`) as `not_chrome`, because capitalization cannot tell app wording from a
+person's name. Title-case or all-caps chrome is confirmed another way: through contributor-approved vocabulary (the
+contributor word gate, #81, then the resolve route) or with an on-phone probe rule (gig.log#1630), never here.
+
 - `match` with a `text`: the slot holds that text, in that case. A `hasText` anchor with the candidate will match it
   (`hasText` ignores case); use `text` as the `clearText` when you resolve the slot's token in the vocabulary queue.
   Verify spacing and unusual glyphs on a phone with a probe before the rule ships: the check compares canonical
   forms, `hasText` the raw string.
 - `no_answer`: the slot does not hold that word, or the slot does not answer. Nothing more can be read from it.
-- `422 not_chrome`: a candidate looks like a name, an address, a code or a contact (`refused` lists which). Nothing
-  was compared. App wording that trips the filter (a label ending in a single capital, `Plan B`) cannot be checked
+- `422 not_chrome`: a candidate looks like a name, an address, a code or a contact, or has two capitalized words in a
+  row (`refused` lists which). Nothing was compared. App wording that trips the filter (a label ending in a single capital, `Plan B`) cannot be checked
   here; draft it from a trusted capture or a probe instead.
 - `429 budget_exhausted`: the day's 200 candidates are spent, refused ones included.
 
 Do not use the check to learn what a varying or regional slot holds; it cannot answer there by design. Every query is
-in the audit log (`GET /ops/anchor-checks`): who asked, which slot, how many candidates and the answer class. Only a
-match keeps text, the text the slot holds; a refused or non-matching candidate leaves no trace of what it said. When
+in the audit log (`GET /ops/anchor-checks`): who asked, which slot, how many candidates and the answer class. No text
+is kept, not even a match's: copy the `text` from the response when you draft. When
 the agent token (#84) starts calling the check, watch its query counts and refusals per day.
 
 ## Reinstall with a new signing key

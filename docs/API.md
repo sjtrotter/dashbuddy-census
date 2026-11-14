@@ -267,8 +267,11 @@ Each query runs, in this order:
    no square bracket or web address, and none of its case variants (below) has a name, address or code shape: a first
    name and an initial (`Brandon C`, `brandon c,`, `Brandon, C`), a customer or code lead-in with a tail, whatever
    separates them (`Deliver to: Sam`, `Pick-up for …`, `Gate code: …`, `Apt B`), or a street line (`Main St!`,
-   `Oak Ave, Springfield`). The shapes read words, not characters, so punctuation never hides one. A refusal is an answer of its own, never "no match": `422 {"error":"not_chrome","refused":[<indexes>]}`,
-   and no candidate of that query is compared.
+   `Oak Ave, Springfield`). The shapes read words, not characters, so punctuation never hides one. A candidate whose
+   compared variants (step 4) hold two consecutive words that both start with a capital is refused too: capitalization
+   cannot tell `Accept Order` from `Riley Smith`, so neither is ever compared (`Accept order` is). A refusal is an
+   answer of its own, never "no match": `422 {"error":"not_chrome","refused":[<indexes>]}`, and no candidate of that
+   query is compared.
 2. **The budget.** Each caller has a daily budget of candidates per UTC day (`Policy.anchorCheck`: 200 for the
    operator), refused ones included. Over it: `429 {"error":"budget_exhausted"}` with `Retry-After` to the next UTC
    midnight.
@@ -276,9 +279,11 @@ Each query runs, in this order:
    hash on 90% of the installs that saw it and on at least k of them. `unknown` (below k), `regional`, `varying`,
    `withheld` and `shape` slots, and a cluster or slot nobody uploaded, answer exactly as a constant slot that holds
    none of the candidates does, after the same statements and the same hashing.
-4. **The compare.** For each candidate, each case variant the app's `hasText` accepts (`hasText` compares
-   case-insensitively, the census hash keeps case): as sent, all lower case, all upper case, sentence case and title
-   case, each mapped one character to one character. Each variant is hashed the phone's way (`CensusHash.of`), keyed
+4. **The compare.** For each candidate, the case variants below, each one the app's `hasText` accepts (`hasText`
+   compares case-insensitively, the census hash keeps case), each mapped one character to one character. A single
+   word: as sent, all lower case, all upper case and capitalized (`Heads`, `heads`, `HEADS`). Several words: as sent,
+   all lower case and sentence case only (`pick up by`, `Pick up by`); never all caps or title case, so no compared
+   variant has two capitalized words in a row. A slot that holds a title-case or all-caps phrase is not found here. Each variant is hashed the phone's way (`CensusHash.of`), keyed
    (`HMAC(pepper, …)`, #85) and compared in constant time with the slot's value.
 
 `200 {"results":[{"answer":"match","text":"Pick up by"},{"answer":"no_answer"}]}`, one result per candidate in order.
@@ -289,14 +294,12 @@ relies on it. Exact text only: "contains" and pattern candidates are answered on
 
 Every query, refused and over-budget ones included, writes one audit row (`anchor_checks`): caller, UTC day, the
 variant, slot, the number of candidates and the answer class (`match`, `no_answer`, `refused`, `budget_exhausted`),
-never which class the slot had. No candidate's text is stored: a refused or non-matching candidate leaves no trace of
-what it said. A match stores `matched`, the text the slot holds, which is a value constant on at least 90% of at least
-k installs (app wording about to go into a rule). Rows keep 30 days and are not read after that, swept or not; budget
+never which class the slot had. No text is stored: neither a candidate nor what a matched slot holds (the response
+returns that to the caller and nothing keeps it). Rows keep 30 days and are not read after that, swept or not; budget
 rows keep 7. Logs carry the candidate count and the answer class only.
 
 `GET /ops/anchor-checks?limit=N` (1 to 200, default 50) lists the audit rows, newest first:
-`[{"caller":"operator","day":"YYYY-MM-DD","fingerprint":…,"variant":{…},"slot":…,"candidates":2,"result":"match","matched":["Pick up by"]}]`
-(`matched` on a match only).
+`[{"caller":"operator","day":"YYYY-MM-DD","fingerprint":…,"variant":{…},"slot":…,"candidates":2,"result":"match"}]`.
 
 ## Skeleton v2: value shapes, click flags, notification actions — #78
 

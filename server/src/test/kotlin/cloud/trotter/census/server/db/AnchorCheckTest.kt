@@ -40,7 +40,6 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
-import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.slf4j.LoggerFactory
@@ -97,12 +96,29 @@ class AnchorCheckTest : LifecycleTestDatabase() {
             val store = store(db)
             assertEquals(answered(wordText), store.ask("8.0", wordText))
             // hasText compares case-insensitively; the census hash keeps case, so each case variant is compared.
-            assertEquals(answered(wordText, wordText, wordText), store.ask("8.0", "pick up by", "PICK UP BY", "Pick Up By"))
+            assertEquals(answered(wordText, wordText), store.ask("8.0", "pick up by", "PICK up by"))
+            // Sol round 2, S1: two capitalized words in a row are never compared, so all caps and title case are refused.
+            assertEquals(AnchorOutcome.Refused(listOf(0, 1)), store.ask("8.0", "PICK UP BY", "Pick Up By"))
             assertEquals(answered(null, null), store.ask("8.0", "Got it", "Pick up at"))
             // The chrome slot's own word is not the value slot's.
             assertEquals(answered(null), store.ask("8.0", "Order details"))
             // A contains-style fragment of the word is not a match: exact hasText only.
             assertEquals(answered(null), store.ask("8.0", "Pick up"))
+        }
+    }
+
+    @Test fun `a slot constant on two capitalized words is never compared, whatever case the candidate takes`() = runBlocking {
+        Database.connect(config()).use { db ->
+            // Sol round 2, S1 and S4: nine Sybils and one victim can make a name constant; the check cannot reach it.
+            seen(db, "8.4", 11) { slotOf("Riley Smith") }
+            val store = store(db)
+            assertEquals(answered(null, null, null, null), store.ask("8.4", "riley smith", "Riley smith", "riley Smith", "RILEY smith"))
+            assertEquals(AnchorOutcome.Refused(listOf(0, 1)), store.ask("8.4", "Riley Smith", "RILEY SMITH"))
+            seen(db, "8.5", 11) { slotOf("Accept Order") }
+            assertEquals(AnchorOutcome.Refused(listOf(0)), store.ask("8.5", "Accept Order"))
+            assertEquals(answered(null), store.ask("8.5", "Accept order"))
+            seen(db, "8.6", 11) { slotOf("Accept order") }
+            assertEquals(answered("Accept order"), store.ask("8.6", "accept order"))
         }
     }
 
@@ -153,7 +169,6 @@ class AnchorCheckTest : LifecycleTestDatabase() {
             val row = store.auditLog(10).single()
             assertEquals("refused", row.result)
             assertEquals(3, row.candidates)
-            assertNull(row.matched)
             assertEquals(3, sql { it.select("SELECT candidates FROM anchor_check_budget WHERE caller = 'operator'") { r -> r.getInt(1) } })
         }
     }
@@ -180,19 +195,18 @@ class AnchorCheckTest : LifecycleTestDatabase() {
         }
     }
 
-    @Test fun `the audit keeps no candidate text, only the text a matched slot holds, and stops reading at its deadline`() = runBlocking {
+    @Test fun `the audit keeps no text and stops reading at its deadline`() = runBlocking {
         Database.connect(config()).use { db ->
             constant(db)
             val store = store(db)
-            store.ask("8.0", "pick up by", "  Got\u00A0it ", "PICK UP BY")
-            store.ask("8.0", "Got it", "Riley Smith")
+            assertEquals(answered(wordText, null), store.ask("8.0", "pick up by", "  Got\u00A0it "))
+            store.ask("8.0", "Got it", "riley smith")
             val (miss, match) = store.auditLog(10)
-            assertEquals(AnchorAuditRow("operator", day.toString(), scope("8.0").fingerprint, scope("8.0").variant, slot, 3, "match",
-                listOf(wordText)), match)
+            assertEquals(AnchorAuditRow("operator", day.toString(), scope("8.0").fingerprint, scope("8.0").variant, slot, 2, "match"), match)
             assertEquals(AnchorAuditRow("operator", day.toString(), scope("8.0").fingerprint, scope("8.0").variant, slot, 2, "no_answer"), miss)
-            // Sol round 1, S2: no column anywhere holds a candidate that did not match.
-            val text = sql { it.select("SELECT string_agg(t::text, ' ') FROM anchor_checks t") { r -> r.getString(1) }!! }
-            for (candidate in listOf("pick up by", "Got it", "Riley", "PICK UP BY")) assertFalse(text.contains(candidate), text)
+            // Sol rounds 1 and 2, S2: no column holds a candidate or the text a matched slot holds.
+            val text = sql { it.select("SELECT string_agg(t::text, ' ') FROM anchor_checks t") { r -> r.getString(1) }!! }.lowercase()
+            for (candidate in listOf("pick up by", "got it", "riley")) assertFalse(text.contains(candidate), text)
 
             // Audit rows go after 30 days, budget rows with the ingest ledger's 7.
             instant = instant.plusSeconds(8 * 86_400L)
@@ -259,9 +273,7 @@ class AnchorCheckTest : LifecycleTestDatabase() {
                     }
                     val audit = Json.parseToJsonElement(client.ops("/ops/anchor-checks?limit=10").bodyAsText()).jsonArray
                     assertEquals(listOf("refused", "no_answer", "match"), audit.map { it.jsonObject.getValue("result").jsonPrimitive.content })
-                    assertFalse(audit.first().jsonObject.containsKey("matched"))
-                    assertFalse(audit[1].jsonObject.containsKey("matched"))
-                    assertEquals("[\"Pick up by\"]", audit[2].jsonObject.getValue("matched").toString())
+                    assertTrue(audit.all { it.jsonObject.keys == setOf("caller", "day", "fingerprint", "variant", "slot", "candidates", "result") })
                     assertError(client.ops("/ops/anchor-checks?limit=0"), 400, "bad_request")
                 }
                 val lines = logs.list.map { it.formattedMessage }
