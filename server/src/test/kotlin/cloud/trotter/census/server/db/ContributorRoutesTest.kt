@@ -127,7 +127,7 @@ class ContributorRoutesTest : LifecycleTestDatabase() {
                     assertEquals(granted.bodyAsText(), client.signed(clock, id, key, HttpMethod.Get, "/v1/contributor/grant").bodyAsText())
 
                     // No release yet: classes are refused with a retry; another install has no grant.
-                    val classesBody = body("variant" to variant())
+                    val classesBody = body("variant" to variant(), "slots" to JsonArray(listOf(JsonPrimitive("root/0/text"))))
                     val pending = post("/v1/contributor/classes", classesBody)
                     assertError(pending, 503, "release_unavailable")
                     assertEquals("3600", pending.headers[HttpHeaders.RetryAfter])

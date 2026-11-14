@@ -65,12 +65,18 @@ internal object SlotRelease {
     /** One released or live row a contributor read is answered from. */
     class Row(val slot: String, val epoch: Int, val value: String, val tag: String)
 
-    /** Today's released rows of one cluster variant, optionally of one slot. */
-    fun Connection.releasedRows(today: LocalDate, scope: SlotScope, slot: String? = null): List<Row> = rows(
-        """SELECT slot, epoch, value, install_tag FROM slot_release WHERE release_day = ? AND ${scope.where()}
-            AND (?::text IS NULL OR slot = ?)""",
-        today, *scope.args(), slot, slot,
-    )
+    /** Today's released rows of [slots] of one cluster variant. */
+    fun Connection.releasedRows(today: LocalDate, scope: SlotScope, slots: Collection<String>): List<Row> {
+        val array = createArrayOf("text", slots.toTypedArray())
+        try {
+            return rows(
+                "SELECT slot, epoch, value, install_tag FROM slot_release WHERE release_day = ? AND ${scope.where()} AND slot = ANY(?)",
+                today, *scope.args(), array,
+            )
+        } finally {
+            array.free()
+        }
+    }
 
     /** The live counted rows of one slot of one cluster variant: what the operator's classifier reads. */
     fun Connection.liveRows(policy: Policy, today: LocalDate, scope: SlotScope, slot: String): List<Row> {

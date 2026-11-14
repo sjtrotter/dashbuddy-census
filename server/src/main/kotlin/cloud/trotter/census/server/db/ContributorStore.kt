@@ -91,7 +91,8 @@ class ContributorStore(private val db: Database, private val clock: Clock, priva
                 result = runCatching {
                     transaction(db.exposed, isolation, readOnly) {
                         maxAttempts = 1
-                        (connection.connection as Connection).block()
+                        val raw = connection.connection as Connection
+                        (statementSeam?.let { listening(raw, it) } ?: raw).block()
                     }
                 }
                 // A REPEATABLE READ transaction that meets a concurrent commit is refused (40001); run it again on a
@@ -214,7 +215,9 @@ class ContributorStore(private val db: Database, private val clock: Clock, priva
      * reader's own rows left out ([SlotRelease]); classes only, never a hash or a count, and nothing below k (an
      * `unknown` slot is omitted). Sorted by slot id.
      */
-    suspend fun classes(installId: UUID, keyHash: String, today: LocalDate, scope: SlotScope): ContributorOutcome<List<Pair<String, SlotClass>>> {
+    suspend fun classes(
+        installId: UUID, keyHash: String, today: LocalDate, scope: SlotScope, slots: Collection<String>,
+    ): ContributorOutcome<List<Pair<String, SlotClass>>> {
         val admitted = admitRead(installId, keyHash, today, "classes", scope, 1, "contributor_reads", limits.dailyReads)
         admitted.refusal()?.let { return it }
         return snapshot {
@@ -223,13 +226,12 @@ class ContributorStore(private val db: Database, private val clock: Clock, priva
             if (!releaseDay(today)) return@snapshot ContributorOutcome.ReleaseUnavailable
             readSeam?.invoke(this)
             val keys = liveKeysByEpoch(db.keying, today)
-            val rows = releasedRows(today, scope)
-            // Sol S3: a reader is answered only about a variant it has itself uploaded (a live sighting of one of its
-            // slots); otherwise it reads nothing, as if the variant had no evidence.
-            if (!sightedAny(keys.values, installId, scope, rows.map { it.slot }.toSet(), today, policy.retention.clusterSightingsDays)) {
+            // Sol S3: ownership first, from the slots the caller named and its own rows only. A reader that has not
+            // uploaded the variant reads nothing, and no peer evidence is touched on that path.
+            if (!sightedAny(keys.values, installId, scope, slots, today, policy.retention.clusterSightingsDays)) {
                 return@snapshot ContributorOutcome.Ok(emptyList())
             }
-            val evidence = leaveOneOut(rows, scope, installId, keys)
+            val evidence = leaveOneOut(releasedRows(today, scope, slots), scope, installId, keys)
             ContributorOutcome.Ok(evidence.mapNotNull { (slot, counts) ->
                 policy.classify(counts).takeIf { it != SlotClass.UNKNOWN }?.let { slot to it }
             }.sortedBy { it.first })
@@ -282,6 +284,19 @@ class ContributorStore(private val db: Database, private val clock: Clock, priva
             })
         }
     }
+
+    /** Test seam: receives the SQL of every statement this store prepares, so a test can compare query sequences. */
+    internal var statementSeam: ((String) -> Unit)? = null
+
+    private fun listening(raw: Connection, seam: (String) -> Unit): Connection =
+        java.lang.reflect.Proxy.newProxyInstance(Connection::class.java.classLoader, arrayOf(Connection::class.java)) { _, method, args ->
+            if (method.name == "prepareStatement" || method.name == "createStatement") seam((args?.firstOrNull() as? String) ?: method.name)
+            try {
+                method.invoke(raw, *(args ?: emptyArray()))
+            } catch (failure: java.lang.reflect.InvocationTargetException) {
+                throw failure.targetException
+            }
+        } as Connection
 
     /** Test seam: runs inside a read's snapshot after its install and grant checks, before its evidence is read. */
     internal var readSeam: ((Connection) -> Unit)? = null

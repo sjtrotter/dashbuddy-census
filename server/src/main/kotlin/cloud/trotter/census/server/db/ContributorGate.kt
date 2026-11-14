@@ -79,16 +79,21 @@ internal object ContributorGate {
         table: TaggedTable, keys: Collection<EpochKey>, installId: UUID, scope: SlotScope, slot: String, value: String,
         today: LocalDate, days: Int,
     ): Boolean = keys.any { key ->
+        // Sol S3: found by the tag alone (its object names the cluster, the variant, the slot and the value), so the
+        // lookup reads the install's own rows only and costs the same however many peers share the cluster.
         val tag = key.tag(table.purpose, installId, SlotObject.of(scope.fingerprint, scope.variant, slot, value))
         select(
-            "SELECT 1 FROM ${table.table} WHERE epoch = ? AND install_tag = ? AND fingerprint = ? AND last_day + ? > ? LIMIT 1",
-            key.epoch, tag, scope.fingerprint, days, today,
+            "SELECT 1 FROM ${table.table} WHERE install_tag = ? AND epoch = ? AND last_day + ? > ? LIMIT 1",
+            tag, key.epoch, days, today,
         ) { true } ?: false
     }
 
     /**
      * Whether [reader] holds a live sighting of any of [slots] in [scope] (Sol S3): one query over its presence tags
-     * under each live key. A reader is answered only about a variant (or slot) it has itself uploaded.
+     * under each live key. A reader is answered only about a variant (or slot) it has itself uploaded. The slots come
+     * from the caller, never from peer evidence, and the lookup is by tag alone (a tag's object names the cluster and
+     * the variant), so its work depends on the reader's own rows only: nothing about a cluster the reader never sent
+     * is touched before this answers.
      */
     fun Connection.sightedAny(keys: Collection<EpochKey>, reader: UUID, scope: SlotScope, slots: Collection<String>, today: LocalDate, days: Int): Boolean {
         if (slots.isEmpty() || keys.isEmpty()) return false
@@ -98,8 +103,8 @@ internal object ContributorGate {
         val array = createArrayOf("text", tags.toTypedArray())
         try {
             return select(
-                "SELECT 1 FROM slot_sightings WHERE fingerprint = ? AND install_tag = ANY(?::bpchar[]) AND last_day + ? > ? LIMIT 1",
-                scope.fingerprint, array, days, today,
+                "SELECT 1 FROM slot_sightings WHERE install_tag = ANY(?::bpchar[]) AND last_day + ? > ? LIMIT 1",
+                array, days, today,
             ) { true } ?: false
         } finally {
             array.free()
@@ -110,11 +115,15 @@ internal object ContributorGate {
      * The gate (#81, ADR-0011 §15): open for [value] in [slot] only when, in the caller's snapshot,
      * 0. [reader] holds a live sighting of the slot (Sol S3),
      * 1. [reader] itself confirmed that value (so the gate answers no one about values they have not confirmed),
-     * 2. at least [cloud.trotter.census.server.ContributorPolicy.gateConfirmations] independent, non-trusted installs
-     *    confirmed it within ONE epoch (one install's confirmations are one row per epoch, so it counts once), and
-     * 3. the slot is constant on that very value, at k installs or more, both in today's release and in the live rows,
+     * 2. the slot is constant on that very value, at k installs or more, both in today's release and in the live rows,
      *    each judged with [reader]'s own rows left out ([SlotRelease.leaveOneOut]): the reader's uploads never decide
-     *    its own gate, and a value uploaded today reaches the release no sooner than tomorrow.
+     *    its own gate, and a value uploaded today reaches the release no sooner than tomorrow, and
+     * 3. at least [cloud.trotter.census.server.ContributorPolicy.gateConfirmations] independent, non-trusted installs
+     *    confirmed it within ONE epoch (one install's confirmations are one row per epoch, so it counts once).
+     *
+     * Sol S8: 0 and 1 read the reader's own rows only. Both conditions of 2 are always evaluated, and the confirmations
+     * of 3 are read only once both hold, so every refusal below k runs the same statements whether or not other installs
+     * confirmed the value.
      */
     fun Connection.gateOpen(
         policy: Policy, keys: Map<Int, EpochKey>, reader: UUID, today: LocalDate, scope: SlotScope, slot: String, value: String,
@@ -122,11 +131,12 @@ internal object ContributorGate {
         val days = policy.contributor.retentionDays
         if (!sightedAny(keys.values, reader, scope, listOf(slot), today, policy.retention.clusterSightingsDays)) return false
         if (!ownRow(TaggedTable.CONFIRMATIONS, keys.values, reader, scope, slot, value, today, days)) return false
-        if (confirmations(policy, today, scope, slot, value) < policy.contributor.gateConfirmations) return false
-        if (!releaseDay(today)) return false
         val constant = SlotClass.CONSTANT to value
-        if (policy.classWithValue(leaveOneOut(releasedRows(today, scope, slot), scope, reader, keys)[slot]) != constant) return false
-        return policy.classWithValue(leaveOneOut(liveRows(policy, today, scope, slot), scope, reader, keys)[slot]) == constant
+        val released = releaseDay(today) &&
+            policy.classWithValue(leaveOneOut(releasedRows(today, scope, listOf(slot)), scope, reader, keys)[slot]) == constant
+        val live = policy.classWithValue(leaveOneOut(liveRows(policy, today, scope, slot), scope, reader, keys)[slot]) == constant
+        if (!released || !live) return false
+        return confirmations(policy, today, scope, slot, value) >= policy.contributor.gateConfirmations
     }
 
     /** Distinct non-trusted installs that confirmed [value] in [slot], in the live epoch where most did. */

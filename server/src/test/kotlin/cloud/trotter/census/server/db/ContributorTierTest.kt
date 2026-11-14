@@ -39,6 +39,8 @@ class ContributorTierTest : LifecycleTestDatabase() {
     private val word = TextSlot(requireNotNull(CensusHash.of(wordText)), "words:3")
     private val title = "root/text"
     private val value = "root/0/text"
+    /** The slot ids of every screen here, as the phone names them when it asks for classes. */
+    private val slots = setOf(title, value)
 
     private fun other(n: Int): TextSlot = TextSlot("%016x".format(n.toLong() + 0x5000), "words:2")
 
@@ -85,7 +87,7 @@ class ContributorTierTest : LifecycleTestDatabase() {
     private fun nextDay(): Int? { at(day.plusDays(1)); return publish() }
 
     private suspend fun classes(db: Database, id: UUID, store: ContributorStore = contributors(db)): Map<String, SlotClass>? =
-        (store.classes(id, key, day, scope) as? ContributorOutcome.Ok)?.value?.toMap()
+        (store.classes(id, key, day, scope, slots) as? ContributorOutcome.Ok)?.value?.toMap()
 
     private suspend fun gate(db: Database, id: UUID, slot: String = value, hash: String = word.h!!): Boolean =
         (contributors(db).gates(id, key, day, scope, listOf(slot to hash)) as ContributorOutcome.Ok).value.single()
@@ -115,7 +117,7 @@ class ContributorTierTest : LifecycleTestDatabase() {
             // An expired grant is refused, in the transaction that would write.
             at(day.plusDays(30))
             assertEquals(ContributorOutcome.NoGrant, confirm(db, id))
-            assertEquals(ContributorOutcome.NoGrant, store.classes(id, key, day, scope))
+            assertEquals(ContributorOutcome.NoGrant, store.classes(id, key, day, scope, slots))
             assertEquals(ContributorStore.EXPIRED, store.grantStatus(id, key, day)?.status)
             assertEquals(day.plusDays(30), grant(db, id).expiresDay)
             see(db, id, word)
@@ -282,6 +284,52 @@ class ContributorTierTest : LifecycleTestDatabase() {
         }
     }
 
+    @Test fun `a reader that never uploaded a variant gets the same statements whether or not peers sent it`() = runBlocking {
+        Database.connect(config()).use { db ->
+            // Round 2, S3: the not-owned path must not touch peer evidence, so its work cannot reveal whether even
+            // one peer sent a guessed screen (a notification's fingerprint folds word hashes in).
+            for (id in installs(1)) see(db, id, word)
+            val r = install(age = 40)
+            grant(db, r)
+            nextDay()
+            fun recorded(of: SlotScope): List<String> {
+                val sql = mutableListOf<String>()
+                val store = contributors(db).apply { statementSeam = { sql += it } }
+                assertEquals(ContributorOutcome.Ok(emptyList<Pair<String, SlotClass>>()), runBlocking { store.classes(r, key, day, of, slots) })
+                return sql
+            }
+            val sent = recorded(scope)
+            val never = recorded(SlotScope("f".repeat(64), scope.variant))
+            assertEquals(sent, never)
+            assertTrue(sent.none { Regex("FROM slot_release\\b(?!_days)").containsMatchIn(it) || "slot_confirmations" in it }, sent.toString())
+            assertTrue(sent.none { "slot_sightings" in it && "install_tag = ANY" !in it }, sent.toString())
+        }
+    }
+
+    @Test fun `every gate refusal below k runs the same statements whether or not another install confirmed`() = runBlocking {
+        Database.connect(config()).use { db ->
+            // Round 2, S8: three installs, far below k. A confirms; the gate's statements must not change when B does.
+            val ids = installs(3)
+            for (id in ids) see(db, id, word)
+            val (a, b) = ids
+            grant(db, a); grant(db, b)
+            confirm(db, a)
+            nextDay()
+            fun recorded(): List<String> {
+                val sql = mutableListOf<String>()
+                val store = contributors(db).apply { statementSeam = { sql += it } }
+                val open = runBlocking { store.gates(a, key, day, scope, listOf(value to word.h!!)) as ContributorOutcome.Ok }.value
+                assertEquals(listOf(false), open)
+                return sql
+            }
+            val alone = recorded()
+            confirm(db, b)
+            assertEquals(2, sql { ContributorGate.run { it.confirmations(policy, day, scope, value, testKeying().token(word.h!!)) } })
+            assertEquals(alone, recorded())
+            assertTrue(alone.none { "slot_confirmations" in it && "count(DISTINCT" in it }, alone.toString())
+        }
+    }
+
     @Test fun `a reader is answered only about a variant and slot it has uploaded itself`() = runBlocking {
         Database.connect(config()).use { db ->
             // Sol S3 (mitigation): eleven installs share the word; R holds a grant but never uploaded this screen.
@@ -302,13 +350,13 @@ class ContributorTierTest : LifecycleTestDatabase() {
             for (id in ids) see(db, id, word)
             val reader = ids.first()
             grant(db, reader)
-            assertEquals(ContributorOutcome.ReleaseUnavailable, contributors(db).classes(reader, key, day, scope))
+            assertEquals(ContributorOutcome.ReleaseUnavailable, contributors(db).classes(reader, key, day, scope, slots))
             nextDay()
             assertEquals(mapOf(title to SlotClass.CONSTANT, value to SlotClass.CONSTANT), classes(db, reader))
             val built = day
             at(day.plusDays(1))
             // No build today (a failed sweep): yesterday's release is refused from midnight.
-            assertEquals(ContributorOutcome.ReleaseUnavailable, contributors(db).classes(reader, key, day, scope))
+            assertEquals(ContributorOutcome.ReleaseUnavailable, contributors(db).classes(reader, key, day, scope, slots))
             LifecycleStore(db, clock, policy).runOnce()
             assertEquals(0L, sql { it.select("SELECT count(*) FROM slot_release WHERE release_day = ?", built) { r -> r.getLong(1) }!! })
             assertTrue(sql { it.select("SELECT count(*) FROM slot_release WHERE release_day = ?", day) { r -> r.getLong(1) }!! } > 0)
@@ -341,9 +389,9 @@ class ContributorTierTest : LifecycleTestDatabase() {
             assertEquals(0L, sql { it.installRows("slot_release", x, day) })
             store.readSeam = null
             // The deletion took the live grant; a missing install fails closed.
-            assertEquals(ContributorOutcome.NoGrant, store.classes(x, key, day, scope))
+            assertEquals(ContributorOutcome.NoGrant, store.classes(x, key, day, scope, slots))
             InstallStore(db, clock).withdraw(x, key)
-            assertEquals(ContributorOutcome.Stale, store.classes(x, key, day, scope))
+            assertEquals(ContributorOutcome.Stale, store.classes(x, key, day, scope, slots))
         }
     }
 
@@ -446,19 +494,19 @@ class ContributorTierTest : LifecycleTestDatabase() {
             val id = install(age = 40)
             see(db, id, word)
             val store = contributors(db, ContributorPolicy(dailyReads = 2))
-            assertEquals(ContributorOutcome.NoGrant, store.classes(id, key, day, scope))
+            assertEquals(ContributorOutcome.NoGrant, store.classes(id, key, day, scope, slots))
             assertEquals(0L, count("contributor_reads"))
             grant(db, id)
             nextDay()
-            repeat(2) { assertTrue(store.classes(id, key, day, scope) is ContributorOutcome.Ok) }
-            assertTrue(store.classes(id, key, day, scope) is ContributorOutcome.BudgetExhausted)
+            repeat(2) { assertTrue(store.classes(id, key, day, scope, slots) is ContributorOutcome.Ok) }
+            assertTrue(store.classes(id, key, day, scope, slots) is ContributorOutcome.BudgetExhausted)
             assertTrue(store.gates(id, key, day, scope, listOf(value to word.h!!)) is ContributorOutcome.BudgetExhausted)
             assertEquals(2L, sql { it.select("SELECT count(*) FROM contributor_reads WHERE grant_id = ? AND kind = 'classes'", grantId(id)) { r -> r.getLong(1) }!! })
             // A deletion keeps today's ledger row, so it does not reset the budget for a new grant.
             InstallStore(db, clock).deleteData(id, key, day)
             assertEquals(0L, count("contributor_reads"))
             grant(db, id)
-            assertTrue(store.classes(id, key, day, scope) is ContributorOutcome.BudgetExhausted)
+            assertTrue(store.classes(id, key, day, scope, slots) is ContributorOutcome.BudgetExhausted)
         }
     }
 
@@ -472,7 +520,7 @@ class ContributorTierTest : LifecycleTestDatabase() {
                 contributors(db).review(id, key, day, scope, listOf(value to word.h!!), listOf(value to SlotRole.TIP))
             }
             nextDay()
-            for (id in ids) contributors(db).classes(id, key, day, scope)
+            for (id in ids) contributors(db).classes(id, key, day, scope, slots)
             val tables = listOf("slot_confirmations", "slot_roles", "slot_release")
             for (id in ids) for (table in tables) assertEquals(1L, sql { it.installRows(table, id, day) }.coerceAtMost(1), table)
             assertTrue(contributors(db).setRevoked(grantId(revoked), true))
@@ -511,7 +559,7 @@ class ContributorTierTest : LifecycleTestDatabase() {
             grant(db, id)
             contributors(db).review(id, key, day, scope, listOf(value to word.h!!), listOf(value to SlotRole.TIP))
             nextDay()
-            contributors(db).classes(id, key, day, scope)
+            contributors(db).classes(id, key, day, scope, slots)
             sql { it.update("""INSERT INTO contributor_words (fingerprint, platform_app_version, hash_domain, filter_rev, layout, slot, value,
                 clear_text, received_day) VALUES (?, '8.0', 1, 1, ?, ?, ?, ?, ?)""", scope.fingerprint, scope.variant.layout, value,
                 testKeying().token(word.h!!), wordText, day) }

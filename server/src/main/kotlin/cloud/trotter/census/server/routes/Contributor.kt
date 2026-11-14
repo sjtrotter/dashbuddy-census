@@ -82,7 +82,10 @@ fun Route.contributorRoutes(
     post("/contributor/classes") {
         val request = decodeContributor<ClassesRequest>(call.attributes[AuthenticatedBodyKey])
         val scope = request.variant.scope(keying, policy) ?: badRequest()
-        call.answer(contributors.classes(call.installId(), call.keyHash(), call.today(clock), scope)) { classes ->
+        // Sol S3: the caller names the slots it asks about (its own skeleton's); ownership is checked on them first.
+        if (request.slots.isEmpty() || request.slots.size > policy.slotConstancy.maxSlotsPerSkeleton ||
+            request.slots.any { !slotPattern.matches(it) }) badRequest()
+        call.answer(contributors.classes(call.installId(), call.keyHash(), call.today(clock), scope, request.slots.toSet())) { classes ->
             contributorLog.info("contributor classes answered={}", classes.size)
             ClassesResponse(call.today(clock).toString(), classes.map { (slot, slotClass) -> SlotClassDto(slot, slotClass.wire) })
         }
@@ -267,7 +270,7 @@ internal data class VariantDto(
 
 @Serializable private data class GrantRequest(val eligible: Boolean)
 @Serializable private data class GrantResponse(val status: String, val grantedDay: String? = null, val expiresDay: String? = null)
-@Serializable private data class ClassesRequest(val variant: VariantDto)
+@Serializable private data class ClassesRequest(val variant: VariantDto, val slots: List<String>)
 @Serializable private data class SlotClassDto(val slot: String, @SerialName("class") val slotClass: String)
 @Serializable private data class ClassesResponse(val releaseDay: String, val slots: List<SlotClassDto>)
 @Serializable internal data class SlotHashDto(val slot: String, val hash: String)
