@@ -134,7 +134,8 @@ opens, and send a screen to the operator's quarantine. Contributor status is sep
 tags and quarantine items carry epoch tags (#86), and confirmed values are keyed hashes (#85).
 
 Every route below is authenticated like the other `/v1` routes (bearer and HMAC signature over the exact body, the
-install rate limit) and takes a JSON body decoded strictly (an unknown key is `400 bad_request`). Each request that
+install rate limit) and takes a JSON body decoded strictly (an unknown key, or a key repeated at any depth, is `400
+bad_request`). Each request that
 writes checks the install and its grant in the transaction that writes. The pause switch refuses `review`, `words` and
 `quarantine` like any upload (`503 paused`); grants, classes and gates are not uploads.
 
@@ -158,7 +159,7 @@ the phone.
 | `POST /v1/contributor/review` | `{"variant":{…},"confirmations":[{"slot":…,"hash":…}],"roles":[{"slot":…,"role":"tip"}]}`, 1 to 256 items | `200 {"confirmations":N,"roles":N,"skipped":N}` |
 | `POST /v1/contributor/gates` | `{"variant":{…},"slots":[{"slot":…,"hash":…}]}`, 1 to 64 items | `200 {"slots":[{"slot":…,"hash":…,"open":false}]}` |
 | `POST /v1/contributor/words` | `{"variant":{…},"words":[{"slot":…,"hash":…,"word":"Pick up by"}]}`, 1 to 16 items | `200 {"words":[{"slot":…,"status":"accepted"}]}` |
-| `POST /v1/contributor/quarantine` | `{"artifact":"<base64url of the artifact bytes>","note":"might_contain_customer"}` (note optional) | `200 {"status":"quarantined","expiresDay":"YYYY-MM-DD"}` |
+| `POST /v1/contributor/quarantine` | `{"artifact":"<base64url of the artifact bytes>","note":"might_contain_customer"}` (note optional) | `200 {"status":"quarantined","expiresDay":"YYYY-MM-DD","artifactSha256":"<64 hex>"}` |
 
 **Grants.** A grant is issued to an install past the server's quarantine (enrolled at least 8 UTC days ago, the
 vocabulary rule) that sends `eligible: true`. It lasts 30 UTC days (`expiresDay` is the first day it no longer works).
@@ -168,12 +169,14 @@ live grant (a revoked one stays, so a deletion cannot lift a revocation), and th
 
 **Classes** (#80's classes, released to contributors). Only `constant`, `regional`, `varying`, `withheld` and `shape`
 appear; an `unknown` slot (below k) is left out, and no hash or count is ever returned. They come from the day's
-release, never the live rows: once per UTC day the lifecycle sweep copies the counted slot rows into `slot_release`
-(one statement, one transaction), and a read is answered from that copy with the reader's own rows left out, found
-through its epoch tags in the same REPEATABLE READ snapshot as the install, grant and release checks. A release is
-served only on its own UTC day; until today's is built (the first sweep after midnight) the answer is `503
-release_unavailable` with `Retry-After: 3600`. An upload reaches another reader's answer the next day at the earliest,
-and never moves the uploader's own.
+release, never the live rows: once per UTC day the lifecycle sweep copies the slot rows as they stood at the end of the
+previous day into `slot_release` (one statement, one transaction; a row first received today is left out and a row
+written again today counts with its earlier last day), and a read is answered from that copy with the reader's own
+rows left out, found through its epoch tags in the same REPEATABLE READ snapshot as the install, grant and release
+checks. A release is served only on its own UTC day; until today's is built (the first sweep after midnight) the answer
+is `503 release_unavailable` with `Retry-After: 3600`. An upload reaches another reader's answer the next day at the
+earliest, whenever the build runs, and never moves the uploader's own. A reader is answered only about a variant it has
+itself uploaded: without a live sighting of one of the variant's slots the answer is an empty list.
 
 **Review.** A confirmation says a slot holds the app's own wording; its hash is keyed and stored, never the word. A
 role is one of `total_pay`, `tip`, `base_pay`, `deadline`, `distance`, `item_count`, `customer_info`, `store_name`,
@@ -181,8 +184,8 @@ role is one of `total_pay`, `tip`, `base_pay`, `deadline`, `distance`, `item_cou
 role: of that slot), so send the skeleton through `POST /v1/skeletons` first; other items count in `skipped`.
 Confirming the same value again in the same 30-day epoch changes nothing: one install counts once.
 
-**The word gate.** `gates` answers `open: true` for a (slot, hash) only when, in one snapshot: the asker itself
-confirmed that value; at least 2 non-trusted installs confirmed it within one epoch; and the slot is constant on that
+**The word gate.** `gates` answers `open: true` for a (slot, hash) only when, in one snapshot: the asker holds a live
+sighting of the slot and itself confirmed that value; at least 2 non-trusted installs confirmed it within one epoch; and the slot is constant on that
 value, at k installs or more, both in today's release and in the live rows, each judged with the asker's own rows left
 out. A plaintext word is accepted only then. `words` answers per item: `accepted` (stored for the operator; never
 auto-approved), `gate_closed`, `hash_mismatch` (the word's census hash is not `hash`), or `not_chrome` (not 1 to 8
@@ -191,12 +194,17 @@ logged. An accepted word waits in `contributor_words` until the operator resolve
 /ops/vocabulary/resolve`, `source: "contributor"`) into the working vocabulary, or rejects it; the sweep also drops it
 after 30 days or once fewer than 2 confirmations stand behind it.
 
-**Quarantine.** The artifact is the outbound review exactly as the review screen described it, a JSON object:
+**Quarantine.** The artifact is the outbound review as the review screen described it, a JSON object:
 `{"skeleton":<one skeleton item, validated like an upload>,"confirmations":[…],"roles":[…],"words":[…]}` (the last three
 optional, shaped as above). A word in it must pass the same checks and find its gate open, else `409 gate_closed` and
-nothing is stored; any other invalid artifact is `422 bad_artifact`; decoded artifacts are at most 128 KiB. The note is
-one of `might_contain_customer`, `might_contain_my_info`, `unsure_what_screen`. The server seals the exact bytes to the
-operator's public key (`CENSUS_OPERATOR_PUBLIC_KEY`, [QuarantineCrypto](../server/src/main/kotlin/cloud/trotter/census/server/QuarantineCrypto.kt))
+nothing is stored; any other invalid artifact, a key repeated at any depth included, is `422 bad_artifact`; decoded
+artifacts are at most 128 KiB. The note is one of `might_contain_customer`, `might_contain_my_info`,
+`unsure_what_screen`. The server never seals the bytes as received: it seals the validated artifact re-serialized in
+its **canonical form**, `{"skeleton":<the contract's canonical serialization of the skeleton>,"confirmations":[…],
+"roles":[…],"words":[…]}`, keys in that order, every array present, items `{"slot","hash"}`, `{"slot","role"}`,
+`{"slot","hash","word"}`, compact JSON; the response's `artifactSha256` is the SHA-256 of exactly those bytes. A phone
+that sends the canonical form gets back the hash of its own bytes, so the quarantined copy is byte-identical to what it
+sent. It seals them to the operator's public key (`CENSUS_OPERATOR_PUBLIC_KEY`, [QuarantineCrypto](../server/src/main/kotlin/cloud/trotter/census/server/QuarantineCrypto.kt))
 and can never read them back; without that key it answers `503 quarantine_unconfigured`. The item expires at the start
 of `expiresDay` (3 UTC days after receipt, at most 72 hours) and is never clustered, counted, drafted from or backed up.
 
@@ -206,6 +214,12 @@ ledger row (so a data deletion and a new grant do not reset them): 200 class and
 30 words, 3 quarantine items (`Policy.contributor`, server configuration, not published in `/v1/policy`). Every class,
 gate and word request writes an audit row: the grant id, the day, the kind, the cluster key, the layout and the item
 count; it goes with the grant or after 30 days. Logs carry counts and outcomes only.
+
+**What the classes and the gate reveal.** Both are an equality oracle restricted to values constant across at least k
+installs: a class answers `constant` and a gate opens only for a value one hash holds on at least 90% of at least k
+installs in that slot (with the asker left out), which is the delivery app's own wording, shown on every dasher's
+screen. Varying and regional slots never answer with a value, and customer and name values are withheld on the phone
+before hashing. See [Security](SECURITY.md#contributor-tier-81) for what an attacker can and cannot learn.
 
 Operator routes (bearer or session; every POST also needs `X-Census-Totp`):
 

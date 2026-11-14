@@ -42,12 +42,17 @@ contributor reads, keyed by grant id and deleted with the grant. Contributor quo
 `ingest_ledger` row. `slot_confirmations` and `slot_roles` are tagged like slot sightings (`TagPurpose.CONFIRMATION`,
 `ROLE`; the object is the slot identity with the confirmed keyed hash or the role in the value's place), carry
 `trusted`, and keep 30 days. `slot_release` (with its day header `slot_release_days`) is the day's copy of the counted
-slot rows under their own slot tags: `SlotRelease.buildRelease` copies them in one `INSERT … SELECT` inside a
-transaction holding the table's EXCLUSIVE lock, and every erasure of the table takes ROW EXCLUSIVE first
+slot rows as they stood at the end of the previous day, under their own slot tags: V10 adds `first_received`,
+`received_day` and `prev_last_day` to `slot_sightings` (ingest keeps the last day a row had before its latest receipt
+day), and `SlotRelease.buildRelease` copies the rows first received before today, each with that earlier last day when
+it was written again today, in one `INSERT … SELECT` inside a transaction holding the table's EXCLUSIVE lock, and every erasure of the table takes ROW EXCLUSIVE first
 (`TaggedTable.RELEASE`), so an erasure either precedes the copy or deletes the copied rows after it commits. Contributor
-reads (`ContributorStore.classes`, the gate) run in one REPEATABLE READ snapshot and leave the reader's rows out by
-recomputing its tags over the rows they read (`SlotRelease.leaveOneOut`); the quota and audit row are written first, in
-their own transaction. `contributor_words` holds gated words, unlinked to any install, until the operator resolves them.
+reads (`ContributorStore.classes`, the gate) run in one REPEATABLE READ snapshot, answer only a reader with a live
+sighting of the variant (or slot), and leave the reader's rows out by recomputing its tags over the rows they read
+(`SlotRelease.leaveOneOut`); the quota and audit row are written first, in their own transaction. Contributor request
+bodies refuse a repeated JSON key (`hasDuplicateKeys`), and the quarantine seals the validated artifact's canonical
+form. Writing transactions share-lock the install row before the grant. Erasure deletes quarantine items before
+trusted envelopes (whose deletion locks clusters), the order approval takes (item, then cluster). `contributor_words` holds gated words, unlinked to any install, until the operator resolves them.
 `quarantine_items` holds "Ask the developer" artifacts sealed to the operator's X25519 key (`QuarantineCrypto`; the
 offline opener is `deploy/tools/QuarantineKey.java`), tagged by item id for erasure, and nothing outside the quarantine
 routes reads it; `backup.sh` dumps it, `slot_release` and `slot_release_days` without rows. Withdrawal, data deletion,

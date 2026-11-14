@@ -189,27 +189,32 @@ phone follows (gig.log#1625–#1627).
    session. On `expired`, request again; on `revoked` or `403 grant_revoked`, stop every contributor upload and clear
    pending reviews until a later request succeeds. Withdrawal ends the grant; "delete my data" ends a live one (request
    again afterwards).
-2. **Classes.** For the screen under review, send its variant to `POST /v1/contributor/classes`: the skeleton's public
+2. **Upload, then read classes.** The server answers only about a variant this install has uploaded itself (a live
+   sighting of one of its slots, within 30 days), so the reviewed skeleton must have gone through `POST
+   /v1/skeletons` first. For the screen under review, send its variant to `POST /v1/contributor/classes`: the skeleton's public
    fingerprint and kind, its `platformAppVersion` (`unknown` when it has none), `hashDomain`, `filterRev`, and its
    layout id, computed exactly as `SlotWalk.layout` describes (the raw tree as sent, wrappers included). Slot ids are
    the #80 ids ([API.md](API.md#slot-constancy--80)). A slot that is not listed is `unknown`: grey it like `varying`
    and `regional`. Only a `constant` slot may show its word and be confirmed. The classes come from the day's release
-   with this install's own rows left out, so the phone's own uploads never change what it reads. On `503
-   release_unavailable`, retry after the `Retry-After` seconds; treat every slot as unknown meanwhile.
-3. **Send the skeleton first, then the review.** A confirmation or role tag counts only for a slot (and value) this
-   install has a live sighting of, so upload the reviewed skeleton through `POST /v1/skeletons`, then `POST
-   /v1/contributor/review` with the confirmations (slot and the slot's public census hash) and role tags. Items the
+   with this install's own rows left out, so the phone's own uploads never change what it reads; a release holds the
+   rows as they stood at the end of the previous day, so a screen first uploaded today has classes from tomorrow. On
+   `503 release_unavailable`, retry after the `Retry-After` seconds; treat every slot as unknown meanwhile.
+3. **The review.** A confirmation or role tag counts only for a slot (and value) this install has a live sighting of
+   (the skeleton uploaded in step 2), so send `POST /v1/contributor/review` with the confirmations (slot and the slot's public census hash) and role tags. Items the
    server skipped are counted in `skipped`. Never send a word here.
 4. **The gate.** Before sending a confirmed word, ask `POST /v1/contributor/gates` for each (slot, hash) this install
    confirmed. Hold the word on the phone until the answer is `open: true`; then send it with `POST
    /v1/contributor/words` (slot, hash, the word as displayed). The server refuses a word whose gate is closed, so the
    phone's own check is not the only gate. A word the gate accepts is a candidate for the operator, not shipped
    wording.
-5. **Ask the developer.** Build the artifact once: the JSON object `{"skeleton":…,"confirmations":[…],"roles":[…],
-   "words":[…]}` that the review screen described, where `words` holds only words whose gate is open (every other
-   confirmed slot stays a hash). Base64url-encode those exact bytes into `{"artifact":…,"note":…}` and send `POST
-   /v1/contributor/quarantine`. The server seals the bytes it received to the operator's key, so the quarantined copy is
-   byte-identical to the artifact; show the contributor `expiresDay` (the item is gone by 00:00 UTC that day).
+5. **Ask the developer.** Build the artifact once, in the canonical form [API.md](API.md#contributor-tier--81)
+   defines: `{"skeleton":…,"confirmations":[…],"roles":[…],"words":[…]}`, the skeleton as the contract serializes it,
+   keys in that order, every array present, compact, where `words` holds only words whose gate is open (every other
+   confirmed slot stays a hash). Base64url-encode those bytes into `{"artifact":…,"note":…}` and send `POST
+   /v1/contributor/quarantine`. The server validates the artifact and seals its canonical form to the operator's key;
+   check that the response's `artifactSha256` equals the SHA-256 of the bytes the review screen described (it does
+   when they were canonical). Never repeat a key: a repeated key anywhere is refused. Show the contributor
+   `expiresDay` (the item is gone by 00:00 UTC that day).
    `409 gate_closed` means a word in it was not cleared: drop the word and send it as a hash.
 
 Every contributor route is signed like the rest of `/v1`, spends the install's own daily quotas, and answers `403

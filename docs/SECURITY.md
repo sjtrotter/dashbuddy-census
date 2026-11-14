@@ -67,8 +67,15 @@ the guess is right. The released classes are built against it:
   out).
 - A release is served on its UTC day only and counts only rows inside retention on that day. A failed build leaves no
   release, never yesterday's (Sol N2).
-- The release is one consistent copy of the counted rows, so every presence it holds has a value behind it and the
-  regional lower bound holds on it (Sol N3).
+- A release built on day D holds the slot rows as they stood at the end of D-1: a row first received on D is left out,
+  and a row written again on D counts with the last day it had before (each slot sighting keeps its first and latest
+  receipt days and its earlier last day). An upload therefore reaches another reader's answer on the next day at the
+  earliest, whatever hour the day's build runs (Sol S6).
+- The release is one consistent copy of those rows, so every presence it holds has a value behind it and the regional
+  lower bound holds on it (Sol N3); a presence refreshed on D by a value received on D counts with its earlier last
+  day, so it goes when its earlier values have.
+- A reader is answered only about a variant it has uploaded itself (a live sighting of one of its slots), and the gate
+  only for a slot it has a live sighting of; otherwise it reads an empty answer (Sol S3).
 - Only grant holders read, so a fresh install cannot be the reading half of a pair (Sol N4); reads are capped per
   install and day (200 class and gate items) and every read writes an audit row (grant, day, cluster, layout, items).
 - Classes only; `unknown` (below k) is omitted; no hash or count is returned.
@@ -77,6 +84,19 @@ The word gate uses the same discipline: it opens for a value only when the asker
 confirmed it within one epoch, and the slot is constant on it in both today's release and the live rows, each with the
 asker's own rows left out. A plaintext word is refused until then, and the quarantine refuses an artifact carrying a
 word whose gate is closed.
+
+**What the classes and the gate are: an equality oracle restricted to constant values.** A class answers `constant`,
+and a gate opens, only for a value one hash holds on at least 90% of at least k installs in that slot, counted within
+one epoch with the asker left out. By construction that is the delivery app's own wording, shown on every dasher's
+screen; revealing it is the purpose of the tier. What an attacker who holds a grant and has uploaded the screen can
+learn: whether a guessed word equals a slot's constant value (by confirming it with a second install and asking the
+gate), and whether a slot is constant, regional, varying, withheld or shape. What it cannot learn: any value of a
+`varying` or `regional` slot (no class reveals one, and no gate opens on one), any value held by fewer than k installs,
+any hash or count, or anything about a variant it has not uploaded. Customer names, addresses and codes are withheld on
+the phone before anything is hashed (the chrome filter, ADR-0011 §2), so they reach no slot as a hash. The daily read,
+review and word quotas cap the rate of guesses. Risk 12 still applies: a customer word common enough to be constant on
+k installs can be mistaken for chrome, which is why a gated word reaches the operator's review and never the shipped
+vocabulary.
 
 **Residual: a ring of colluding contributors.** Leaving the reader out defeats one install, not several. Two
 contributors past quarantine can split the work: one uploads a guess for a slot where k−1 others share a value, the
@@ -95,11 +115,16 @@ Gated words are stored as text, unlinked to any install, until the operator reso
 `contributor_grants` names the install (a permission, like the quota ledger). The audit log names a grant, not an
 install, but a grant maps to one install while it exists, so for up to 30 days it records which clusters one
 contributor read. That is a contributor-only linkage the second disclosure must state (gig.log#1625); it goes with the
-grant on withdrawal or data deletion. Contributor quotas live on the install's daily ledger row (7 days).
+grant on withdrawal, and with every grant of the install on data deletion (a revoked grant stays as a bare revocation
+marker, with no audit rows, Sol S5). Contributor quotas live on the install's daily ledger row (7 days).
 
 **The quarantine.** An "Ask the developer" artifact is the skeleton the review screen described: validated like an
-upload, so it holds no screen text, with only words whose gate is open. The server process sees those bytes while it
-validates them, as it sees any upload, then seals them to the operator's X25519 public key (X25519, HKDF-SHA256,
+upload, so it holds no screen text, with only words whose gate is open. A key repeated anywhere in it is refused, and
+the server seals only the validated artifact re-serialized canonically, never the bytes as received, so nothing the
+validation did not see can be sealed (Sol S1). The submission share-locks the install row before the grant in the
+transaction that writes, the row every erasure locks first, so an item never survives an erasure that raced it (Sol
+S4). The server process sees the artifact while it validates it, as it sees any upload, then seals it to the
+operator's X25519 public key (X25519, HKDF-SHA256,
 AES-256-GCM bound to the item id, JDK only) and stores only the ciphertext. The private key stays on the operator's
 workstation; nothing on the server, in the database or in a backup can open an item. Items expire within 72 hours, are
 read only by the quarantine routes, and are never dumped by `backup.sh`. Encryption limits who reads an item after it
