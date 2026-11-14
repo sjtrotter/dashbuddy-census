@@ -140,7 +140,7 @@ internal fun isOpsPath(path: String): Boolean = path == "/ops" || path.startsWit
 internal fun isOpsHtmlPath(path: String): Boolean {
     val segments = decodedOpsSegments(path) ?: return false
     return segments.isEmpty() ||
-        (segments.size == 2 && segments[0] == "clusters" && segments[1] == "view") ||
+        (segments.size == 2 && segments[0] in setOf("clusters", "quarantine") && segments[1] == "view") ||
         (segments.size == 3 && segments[0] == "clusters" && segments[2] in setOf("view", "draft")) ||
         (segments.size == 4 && segments[0] == "clusters" && segments[2] == "draft" && segments[3] in setOf("preview", "shape"))
 }
@@ -148,7 +148,8 @@ internal fun isOpsHtmlPath(path: String): Boolean {
 /** Unknown first segments are also suppressed: an arbitrary path segment can itself be a credential. */
 internal fun opsLogPath(path: String): String {
     val segment = path.removePrefix("/ops").trimStart('/').substringBefore('/')
-    return if (segment in setOf("clusters", "installs", "health", "alarms", "enrol", "ledger", "vocabulary", "lifecycle", "login", "logout", "pause")) "/ops/$segment" else "/ops"
+    return if (segment in setOf("clusters", "installs", "health", "alarms", "enrol", "ledger", "vocabulary", "lifecycle", "login", "logout", "pause",
+        "contributors", "quarantine")) "/ops/$segment" else "/ops"
 }
 
 /** Application scope includes routing failures; CallLogging excludes these to produce exactly one INFO line. */

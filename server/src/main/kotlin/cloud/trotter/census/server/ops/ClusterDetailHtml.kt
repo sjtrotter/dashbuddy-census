@@ -108,7 +108,7 @@ object ClusterDetailHtml {
             }
             panel("slots", "Slot constancy") {
                 p("muted") {
-                    +"Each slot's class per app version, filter revision and raw layout, from the live rows of installs counted within one epoch (trusted and quarantined installs excluded). The app reads the daily release instead. Constant is candidate chrome, never proof; regional and varying slots hold values."
+                    +"Each slot's class per app version, filter revision and raw layout, from the live rows of installs counted within one epoch (trusted and quarantined installs excluded). A contributor's phone reads classes from the day's release instead, with its own rows left out. Constant is candidate chrome, never proof; regional and varying slots hold values. Roles are contributors' role tags (installs per role), never values."
                 }
                 val variants = cluster.slots.orEmpty()
                 if (variants.isEmpty()) emptyState("No slot sightings counted for this cluster yet.")
@@ -116,9 +116,10 @@ object ClusterDetailHtml {
                     val variant = reading.variant
                     dataTable(
                         "Version ${version(variant.platformAppVersion)} · filter revision ${number(variant.filterRev)} · layout ${safe(variant.layout.take(8))}",
-                        listOf("Slot", "Class", "Installs", "Distinct hashes"),
+                        listOf("Slot", "Class", "Installs", "Distinct hashes", "Roles"),
                         reading.slots.map { slot ->
-                            listOf(cell { code { +safe(slot.slot) } }, cell { slotClassChip(slot.slotClass) }, numeric(slot.installs), numeric(slot.hashes))
+                            listOf(cell { code { +safe(slot.slot) } }, cell { slotClassChip(slot.slotClass) }, numeric(slot.installs), numeric(slot.hashes),
+                                cell { +slot.roles.entries.joinToString(", ") { (role, installs) -> "${validated(role, ROLE_WIRES)} ${number(installs)}" }.ifEmpty { "None" } })
                         },
                     )
                 }
@@ -188,3 +189,6 @@ object ClusterDetailHtml {
         }
     }
 }
+
+/** #81: the closed role list, the only role text the operator page renders. */
+private val ROLE_WIRES: Set<String> = cloud.trotter.census.server.SlotRole.entries.map { it.wire }.toSet()

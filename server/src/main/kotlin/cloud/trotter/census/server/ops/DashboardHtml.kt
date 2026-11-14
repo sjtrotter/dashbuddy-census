@@ -72,6 +72,7 @@ object DashboardHtml {
         vocabularyCount: Long,
         vocabularyRows: List<OpsVocabularyDisplay> = emptyList(),
         lifecycle: cloud.trotter.census.server.jobs.LifecycleView? = null,
+        contributorWords: List<cloud.trotter.census.server.db.PendingWord>? = null,
     ): String = opsPage(headerContent = {
         h1 { +"Census operator" }
         panel("identity", "Reporting context", hiddenHeading = true) { metadata(serverVersion, k, today) }
@@ -89,7 +90,7 @@ object DashboardHtml {
             }
             nav("section-nav") {
                 attributes["aria-label"] = "Sections"
-                listOf("Alarms", "Health", "Clusters", "Ledger", "Installs", "Vocabulary").forEach {
+                (listOf("Alarms", "Health", "Clusters", "Ledger", "Installs", "Vocabulary") + listOfNotNull("Contributors".takeIf { contributorWords != null })).forEach {
                     a(href = "#${it.lowercase(Locale.ROOT)}") { +it }
                 }
             }
@@ -152,8 +153,31 @@ object DashboardHtml {
                 })
             }
         }
+        if (contributorWords != null) contributorSection(contributorWords)
     }
 }
+
+/**
+ * #81: words that passed the contributor gate, waiting for the operator, and the way to the quarantine page. A word
+ * here is the app's own wording on a constant slot; approving it into the working vocabulary is a resolve call with
+ * source `contributor` (docs/OPERATOR.md). Quarantined items are listed on their own page only.
+ */
+private fun FlowContent.contributorSection(words: List<cloud.trotter.census.server.db.PendingWord>) =
+    panel("contributors", "Contributor words", badge = number(words.size)) {
+        p("muted") {
+            +"Words that passed the gate (two confirmations and a constant slot at k installs). Candidates, not proof. "
+            a(href = "/ops/quarantine/view") { +"Quarantine" }
+        }
+        if (words.isEmpty()) emptyState("No contributor words waiting.")
+        else dataTable("Contributor words · oldest first · maximum 50", listOf("Word", "Slot", "Cluster", "Received"), words.map { word ->
+            listOf(
+                cell { code { +safe(word.clearText) } },
+                cell { code { +safe(word.slot) } },
+                cell { a(href = "/ops/clusters/${safeAttribute(word.fingerprint)}/view") { +"Open" } },
+                cell { date(word.receivedDay.toString()) },
+            )
+        })
+    }
 
 /** Shared shell for the dashboard, detail, missing-cluster and login pages. */
 internal fun opsPage(
