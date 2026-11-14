@@ -191,7 +191,8 @@ phone follows (gig.log#1625–#1627).
    again afterwards).
 2. **Upload, then read classes.** The server answers only about a variant this install has uploaded itself (a live
    sighting of one of its slots, within 30 days), so the reviewed skeleton must have gone through `POST
-   /v1/skeletons` first. For the screen under review, send its variant to `POST /v1/contributor/classes`: the skeleton's public
+   /v1/skeletons` first. For the screen under review, send its variant and the slot ids of its own skeleton (`slots`,
+   at most 1024) to `POST /v1/contributor/classes`; only those slots are answered. The variant is the skeleton's public
    fingerprint and kind, its `platformAppVersion` (`unknown` when it has none), `hashDomain`, `filterRev`, and its
    layout id, computed exactly as `SlotWalk.layout` describes (the raw tree as sent, wrappers included). Slot ids are
    the #80 ids ([API.md](API.md#slot-constancy--80)). A slot that is not listed is `unknown`: grey it like `varying`

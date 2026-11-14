@@ -74,8 +74,12 @@ the guess is right. The released classes are built against it:
 - The release is one consistent copy of those rows, so every presence it holds has a value behind it and the regional
   lower bound holds on it (Sol N3); a presence refreshed on D by a value received on D counts with its earlier last
   day, so it goes when its earlier values have.
-- A reader is answered only about a variant it has uploaded itself (a live sighting of one of its slots), and the gate
-  only for a slot it has a live sighting of; otherwise it reads an empty answer (Sol S3).
+- A reader is answered only about a variant it has uploaded itself (a live sighting of one of the slots it names), and
+  the gate only for a slot it has a live sighting of; otherwise it reads an empty answer (Sol S3). Ownership is checked
+  first, by the reader's own tags alone, and the not-owned path reads no peer evidence, so its timing cannot tell
+  whether even one peer sent a guessed screen (a notification's fingerprint folds word hashes in; round 2). The gate
+  reads other installs' confirmations only after both constant-at-k checks pass, so a refusal below k runs the same
+  statements whether or not anyone else confirmed (round 2, S8). Tests compare the statement sequences.
 - Only grant holders read, so a fresh install cannot be the reading half of a pair (Sol N4); reads are capped per
   install and day (200 class and gate items) and every read writes an audit row (grant, day, cluster, layout, items).
 - Classes only; `unknown` (below k) is omitted; no hash or count is returned.

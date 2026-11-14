@@ -44,7 +44,7 @@ contributor reads, keyed by grant id and deleted with the grant. Contributor quo
 `trusted`, and keep 30 days. `slot_release` (with its day header `slot_release_days`) is the day's copy of the counted
 slot rows as they stood at the end of the previous day, under their own slot tags: V10 adds `first_received`,
 `received_day` and `prev_last_day` to `slot_sightings` (ingest keeps the last day a row had before its latest receipt
-day), and `SlotRelease.buildRelease` copies the rows first received before today, each with that earlier last day when
+day; rows written before V10 take the migration day as their receipt), and `SlotRelease.buildRelease` copies the rows first received before today, each with that earlier last day when
 it was written again today, in one `INSERT … SELECT` inside a transaction holding the table's EXCLUSIVE lock, and every erasure of the table takes ROW EXCLUSIVE first
 (`TaggedTable.RELEASE`), so an erasure either precedes the copy or deletes the copied rows after it commits. Contributor
 reads (`ContributorStore.classes`, the gate) run in one REPEATABLE READ snapshot, answer only a reader with a live

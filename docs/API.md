@@ -155,7 +155,7 @@ the phone.
 | --- | --- | --- |
 | `POST /v1/contributor/grant` | `{"eligible":true}`: a yes or no only, no counts | `200 {"status":"granted","grantedDay":"YYYY-MM-DD","expiresDay":"YYYY-MM-DD"}`. Idempotent while the grant is live; a new grant after it expires |
 | `GET /v1/contributor/grant` | none | `200 {"status":"granted"\|"expired"\|"revoked"\|"none", …days}` |
-| `POST /v1/contributor/classes` | `{"variant":{…}}` | `200 {"releaseDay":"YYYY-MM-DD","slots":[{"slot":"root/text","class":"constant"}]}` |
+| `POST /v1/contributor/classes` | `{"variant":{…},"slots":["root/text",…]}`, the slot ids of the reader's own skeleton, 1 to 1024 | `200 {"releaseDay":"YYYY-MM-DD","slots":[{"slot":"root/text","class":"constant"}]}` |
 | `POST /v1/contributor/review` | `{"variant":{…},"confirmations":[{"slot":…,"hash":…}],"roles":[{"slot":…,"role":"tip"}]}`, 1 to 256 items | `200 {"confirmations":N,"roles":N,"skipped":N}` |
 | `POST /v1/contributor/gates` | `{"variant":{…},"slots":[{"slot":…,"hash":…}]}`, 1 to 64 items | `200 {"slots":[{"slot":…,"hash":…,"open":false}]}` |
 | `POST /v1/contributor/words` | `{"variant":{…},"words":[{"slot":…,"hash":…,"word":"Pick up by"}]}`, 1 to 16 items | `200 {"words":[{"slot":…,"status":"accepted"}]}` |
@@ -175,8 +175,10 @@ written again today counts with its earlier last day), and a read is answered fr
 rows left out, found through its epoch tags in the same REPEATABLE READ snapshot as the install, grant and release
 checks. A release is served only on its own UTC day; until today's is built (the first sweep after midnight) the answer
 is `503 release_unavailable` with `Retry-After: 3600`. An upload reaches another reader's answer the next day at the
-earliest, whenever the build runs, and never moves the uploader's own. A reader is answered only about a variant it has
-itself uploaded: without a live sighting of one of the variant's slots the answer is an empty list.
+earliest, whenever the build runs, and never moves the uploader's own. A reader is answered only about the slots it
+names, and only for a variant it has itself uploaded: ownership is checked first, against the reader's own live
+sightings of those slots (found by its epoch tags alone), and without one the answer is an empty list and no peer
+evidence is read at all, so the work done cannot reveal whether any other install sent that variant.
 
 **Review.** A confirmation says a slot holds the app's own wording; its hash is keyed and stored, never the word. A
 role is one of `total_pay`, `tip`, `base_pay`, `deadline`, `distance`, `item_count`, `customer_info`, `store_name`,
@@ -185,9 +187,11 @@ role: of that slot), so send the skeleton through `POST /v1/skeletons` first; ot
 Confirming the same value again in the same 30-day epoch changes nothing: one install counts once.
 
 **The word gate.** `gates` answers `open: true` for a (slot, hash) only when, in one snapshot: the asker holds a live
-sighting of the slot and itself confirmed that value; at least 2 non-trusted installs confirmed it within one epoch; and the slot is constant on that
-value, at k installs or more, both in today's release and in the live rows, each judged with the asker's own rows left
-out. A plaintext word is accepted only then. `words` answers per item: `accepted` (stored for the operator; never
+sighting of the slot and itself confirmed that value; the slot is constant on that value, at k installs or more, both
+in today's release and in the live rows, each judged with the asker's own rows left out; and at least 2 non-trusted
+installs confirmed it within one epoch. The checks run in that order, both constancy checks always, and the
+confirmations are read only when both hold, so a refusal below k does the same work whether or not anyone else
+confirmed. A plaintext word is accepted only then. `words` answers per item: `accepted` (stored for the operator; never
 auto-approved), `gate_closed`, `hash_mismatch` (the word's census hash is not `hash`), or `not_chrome` (not 1 to 8
 words, no canonical form, longer than 128 characters, or a sensitive marker). A refused word is neither stored nor
 logged. An accepted word waits in `contributor_words` until the operator resolves its token (`POST
