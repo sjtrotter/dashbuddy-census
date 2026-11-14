@@ -241,6 +241,60 @@ Operator routes (bearer or session; every POST also needs `X-Census-Totp`):
 The cluster page's slot table shows each slot's role tags as non-trusted installs per role (within one epoch), and the
 dashboard lists waiting contributor words.
 
+## Anchor check — #82
+
+The anchor check answers whether a candidate word is what a constant slot holds (ADR-0011 §16). It hashes the
+candidate, keys it with the pepper and compares it with the slot's stored value: a dictionary lookup, which is why it
+answers only inside the limits below. It is an operator route (bearer or session, and `X-Census-Totp` like every
+operator POST); the agent token (#84) will call it under its own caller and budget.
+
+`POST /ops/anchor-check`, body:
+
+```json
+{"variant":{"fingerprint":"<64 hex, the stored cluster key>","platformAppVersion":"8.0","hashDomain":1,"filterRev":1,"layout":"<64 hex>"},
+ "slot":"root/0/text","candidates":["Pick up by","Heads up"]}
+```
+
+`fingerprint` is the cluster key as `/ops/clusters` lists it (a screen's public fingerprint, a notification's keyed
+one); the other variant fields and `slot` are the ones the cluster page's slot table shows. 1 to 8 candidates, each 1 to
+128 characters. The body is decoded strictly; anything malformed or out of bounds is `400 bad_request` and is not
+counted or audited.
+
+Each query runs, in this order:
+
+1. **The chrome filter**, on every candidate, before anything is hashed or read. A candidate is refused unless its
+   census canonical form is 1 to 40 characters of 1 to 8 words with no digit, carries no sensitive marker, no `@` and
+   no square bracket, and none of its case variants (below) has a name or address shape: a first name and an initial
+   (`Brandon C`, `Jane S.`), a customer lead-in with a tail (`Deliver to Sam`, `Pickup for …`), or a street line
+   (`Main St`). A refusal is an answer of its own, never "no match": `422 {"error":"not_chrome","refused":[<indexes>]}`,
+   and no candidate of that query is compared.
+2. **The budget.** Each caller has a daily budget of candidates per UTC day (`Policy.anchorCheck`: 200 for the
+   operator), refused ones included. Over it: `429 {"error":"budget_exhausted"}` with `Retry-After` to the next UTC
+   midnight.
+3. **The slot.** Only a slot classified `constant` (#80, from the live rows, every counted row included) answers: one
+   hash on 90% of the installs that saw it and on at least k of them. `unknown` (below k), `regional`, `varying`,
+   `withheld` and `shape` slots, and a cluster or slot nobody uploaded, answer exactly as a constant slot that holds
+   none of the candidates does, after the same statements and the same hashing.
+4. **The compare.** For each candidate, each case variant the app's `hasText` accepts (`hasText` compares
+   case-insensitively, the census hash keeps case): as sent, all lower case, all upper case, sentence case and title
+   case, each mapped one character to one character. Each variant is hashed the phone's way (`CensusHash.of`), keyed
+   (`HMAC(pepper, …)`, #85) and compared in constant time with the slot's value.
+
+`200 {"results":[{"answer":"match","text":"Pick up by"},{"answer":"no_answer"}]}`, one result per candidate in order.
+`text` is the case variant the slot holds, the clear text the vocabulary resolve route needs. A match means the slot's
+canonical text equals that variant; `hasText` compares the node's raw string, so a slot whose raw text differs in
+spacing or in a folded glyph (a no-break space, a fullwidth letter) still needs a probe (ADR-0011 §17) before a rule
+relies on it. Exact text only: "contains" and pattern candidates are answered on phones by probes, never here.
+
+Every query, refused and over-budget ones included, writes one audit row (`anchor_checks`): caller, UTC day, the
+variant, slot, the number of candidates and the answer class (`match`, `no_answer`, `refused`, `budget_exhausted`),
+never which class the slot had. A query that passed the filter also stores its candidates' canonical text (operator-
+chosen app wording, kept so the audit shows what was guessed); a refused or over-budget one stores no text. Rows keep
+30 days, budget rows 7. Logs carry the candidate count and the answer class only.
+
+`GET /ops/anchor-checks?limit=N` (1 to 200, default 50) lists the audit rows, newest first:
+`[{"caller":"operator","day":"YYYY-MM-DD","fingerprint":…,"variant":{…},"slot":…,"candidates":2,"result":"match","words":[…]}]`.
+
 ## Skeleton v2: value shapes, click flags, notification actions — #78
 
 The policy lists `uinode.skeleton.v2` beside `uinode.skeleton.v1`, and, while notifications are enabled, `notification.skeleton.v2` beside `notification.skeleton.v1`. The order is the contract's: oldest version first, each version's screen id before its notification id. The app sends the newest version the list names, so a server without v2 keeps receiving v1, and v1 items from older apps stay accepted. The server lists only the versions it validates (`SERVED_SKELETON_VERSIONS`), never every version a newer contract pin defines.

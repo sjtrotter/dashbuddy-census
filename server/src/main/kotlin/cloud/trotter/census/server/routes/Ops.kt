@@ -67,6 +67,7 @@ fun Route.opsRoutes(
     pause: PauseStore? = null,
     contributors: cloud.trotter.census.server.db.ContributorStore? = null,
     quarantine: cloud.trotter.census.server.db.QuarantineStore? = null,
+    anchorChecks: cloud.trotter.census.server.db.AnchorCheckStore? = null,
 ) {
     route("/ops") {
         install(OpsAuth) {
@@ -117,6 +118,7 @@ fun Route.opsRoutes(
             }
             dashboardRoute(store, alarms, clock, policy, config, lifecycle, contributors)
             if (contributors != null) opsContributorRoutes(contributors, quarantine, clock, policy, config)
+            if (anchorChecks != null) opsAnchorCheckRoutes(anchorChecks, policy)
             get("/lifecycle") { call.respond(lifecycleView(config, policy, store, lifecycle)) }
             get("/clusters") {
                 val kind = call.request.queryParameters["kind"]?.let {

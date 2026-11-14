@@ -28,7 +28,7 @@ The phone's census word hash is public and unsalted on purpose, so every install
 
 The pepper is 32 random bytes held outside the database: an SSM SecureString on the AWS host, an `.env` secret for self-hosters. It never enters the database, a backup or a log line. Startup refuses a missing pepper, and refuses a pepper that differs from the one the database was keyed under (V7 stores an HMAC check value, not the pepper). It is not rotated: a new pepper is a new hash domain.
 
-**What it protects:** a stolen database, dump or backup, read without the pepper. A guess list hashed the phone's way matches nothing in it (`KeyedStorageTest`). **What it does not protect:** the live server and whoever operates it. They hold the pepper and can hash, key and compare any guess; the vocabulary resolve route does exactly that (`HMAC(pepper, CensusHash.of(clearText))` against the stored value). Anyone who obtains both a dump and the pepper (the SSM parameter, the host's `.env`, or the operator's offline copy) is in the operator's position. Backups taken before V7 hold public hashes until they expire (14 days, plus 14 for S3 noncurrent versions). Stored values that stay unkeyed, and why: screen fingerprints (class and id, no text); trusted envelopes, which are redacted plaintext captures from the operator's own device (the trusted-install exception) and carry no census hashes, and the draft's `envelopeSha256`, a digest of one of them; withdrawal tombstones (`sha256` of a random install UUID, which a restore must recompute from the UUID and the off-host journal carries); credential digests of high-entropy secrets; reason codes, rule ids and counts. Install IDs at rest are covered next (#86).
+**What it protects:** a stolen database, dump or backup, read without the pepper. A guess list hashed the phone's way matches nothing in it (`KeyedStorageTest`). **What it does not protect:** the live server and whoever operates it. They hold the pepper and can hash, key and compare any guess; the vocabulary resolve route does exactly that (`HMAC(pepper, CensusHash.of(clearText))` against the stored value), and so does the anchor check, inside its limits ([below](#anchor-check-82)). Anyone who obtains both a dump and the pepper (the SSM parameter, the host's `.env`, or the operator's offline copy) is in the operator's position. Backups taken before V7 hold public hashes until they expire (14 days, plus 14 for S3 noncurrent versions). Stored values that stay unkeyed, and why: screen fingerprints (class and id, no text); trusted envelopes, which are redacted plaintext captures from the operator's own device (the trusted-install exception) and carry no census hashes, and the draft's `envelopeSha256`, a digest of one of them; withdrawal tombstones (`sha256` of a random install UUID, which a restore must recompute from the UUID and the off-host journal carries); credential digests of high-entropy secrets; reason codes, rule ids and counts. Install IDs at rest are covered next (#86).
 
 ## Epoch pseudonyms at rest (#86)
 
@@ -133,6 +133,56 @@ AES-256-GCM bound to the item id, JDK only) and stores only the ciphertext. The 
 workstation; nothing on the server, in the database or in a backup can open an item. Items expire within 72 hours, are
 read only by the quarantine routes, and are never dumped by `backup.sh`. Encryption limits who reads an item after it
 leaves the phone; it does not make customer text safe to send, which is why the artifact may carry none.
+
+## Anchor check (#82)
+
+**It is a dictionary lookup.** `POST /ops/anchor-check` takes a candidate word, hashes it the phone's way, keys it with
+the pepper and compares it with the value a slot holds. That is the operation an attacker with the database and the
+pepper would run to guess what the hashes hide (ADR-0011 §16). The route exists so drafting an anchor does not need
+raw screen text; its limits are what keep it from being a way to guess customer text:
+
+- **The chrome filter runs first, before anything is hashed or read.** A candidate must canonicalize to 1 to 40
+  characters of 1 to 8 words with no digit (no phone number, code, PIN, house number, ZIP or price), carry no
+  sensitive marker, `@` or square bracket, and none of its case variants may have a name or address shape (a first
+  name and an initial, a customer lead-in with a tail, a street line). A query with any refused candidate is refused
+  whole, as `not_chrome`, and none of its candidates is compared. The phone's own filter (ADR-0011 §2) uses PII shapes
+  and customer markers that live in the app, outside the Apache-2.0 contract, so the server cannot run it; its check
+  (`ChromeShape`) is built from the contract's predicates and a short server list of shapes, and errs toward refusing.
+  Every slot value was hashed only after the phone's full filter passed it, so a name the phone withholds is never a
+  slot hash to find.
+- **Only constant slots answer.** A slot answers only when it is `constant` (one hash on 90% of the installs that saw
+  it and on at least k of them, counted within one epoch, trusted and quarantined installs excluded). `unknown`,
+  `regional`, `varying`, `withheld` and `shape` slots, and slots nobody uploaded, return the same `no_answer` as a
+  wrong word on a constant slot, after the same statements (budget, the slot's live rows, the audit row) and the same
+  hashing (each variant is compared against a placeholder whose result is discarded); tests compare the statement
+  sequences. Neither the answer, the audit row nor the log names the slot's class.
+- **Exact text, bounded variants.** Five case variants per candidate at most (as sent, lower, upper, sentence, title),
+  because `hasText` ignores case and the hash keeps it. No fragment, prefix or pattern is ever hashed here; those
+  questions go to phones as probes (ADR-0011 §17).
+- **Budgets and audit.** At most 8 candidates per query and 200 per caller per UTC day, refused ones included. Every
+  operator query also needs a fresh TOTP code (one use per code), so a stolen bearer token alone asks nothing, and the
+  process-wide operator bucket (60 per minute) applies. Every query writes an audit row: caller, day, variant, slot,
+  candidate count and answer class.
+
+**The audit keeps the candidates' text.** A query that passed the filter stores its candidates' canonical forms in
+`anchor_checks.words`. They are operator-chosen guesses at app wording, not data a phone sent, and the audit exists to
+show what was guessed: a reviewer reading a run of name-like words that slipped the filter can only do so if the words
+are there (a keyed hash would hide exactly that). A refused query stores no text, because a refused candidate is by
+definition one that looked like a name, an address or a code. Rows name a caller (`operator`, later the agent's), never
+an install, keep 30 days, and are in `backup.sh`'s dump. Logs carry the candidate count and the answer class only.
+
+**What it does not stop.**
+
+- **Risk 12, constant is not chrome.** A common first name, a store or a place name can be constant on k installs.
+  The filter passes a lone first name (`Riley`) and a title-case full name (`Riley Smith`), so such a guess answers
+  `match` on a slot that constant. The controls are the regional class, the 90% share, the audit and the human review
+  before anything ships; a match is evidence for a draft, never approval.
+- **Risk 14, the tool binds the tool.** These limits bind this route, the dashboard and the agent token (#84). The
+  live operator holds the database and the pepper and can compare any guess outside the route (risk 7).
+- **Aged Sybils (risk 5).** Someone holding the operator token and k − 1 aged installs of their own can upload a
+  guess to a slot and ask the check: the slot turns constant, and answers, exactly when one other install holds the
+  same guess. The cluster page's class and counts already show the operator that change, so the check adds speed, not
+  a new answer; it costs aged installs, TOTP codes and the daily budget, and every query is audited.
 
 ## Edge admission (#1178)
 

@@ -31,7 +31,26 @@ data class Policy(
     @kotlinx.serialization.Transient val slotConstancy: SlotConstancyPolicy = SlotConstancyPolicy(),
     // #81: contributor-tier limits; server-side only, like the slot thresholds, and documented in API.md.
     @kotlinx.serialization.Transient val contributor: ContributorPolicy = ContributorPolicy(),
+    // #82: the anchor check's limits; operator-side, documented in API.md.
+    @kotlinx.serialization.Transient val anchorCheck: AnchorCheckPolicy = AnchorCheckPolicy(),
 )
+
+/**
+ * The anchor check's limits (#82, ADR-0011 §16). A budget counts candidates, refused ones included, per caller and UTC
+ * day; each caller brings its own daily limit ([cloud.trotter.census.server.db.AnchorCaller]).
+ */
+data class AnchorCheckPolicy(
+    /** Candidates the operator may check per UTC day. */
+    val operatorDailyCandidates: Int = 200,
+    /** Candidates in one query. */
+    val maxCandidates: Int = 8,
+    /** Days an audit row is kept after its day. */
+    val auditDays: Int = 30,
+) {
+    init {
+        require(operatorDailyCandidates > 0 && maxCandidates in 1..64 && auditDays in 1..30)
+    }
+}
 
 /**
  * The contributor tier's limits (#81, ADR-0011 §15). Daily counts are per install and UTC day, kept on its ledger row,

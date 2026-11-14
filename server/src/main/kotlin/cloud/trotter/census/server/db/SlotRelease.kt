@@ -102,14 +102,20 @@ internal object SlotRelease {
      */
     fun leaveOneOut(rows: List<Row>, scope: SlotScope, reader: UUID, keys: Map<Int, EpochKey>): Map<String, SlotCounts> {
         val own = HashMap<Triple<String, String, Int>, String>()
-        val present = HashMap<Pair<String, Int>, Int>()
-        val values = HashMap<Pair<String, Int>, MutableMap<String, Int>>()
-        for (row in rows) {
-            val key = keys[row.epoch] ?: continue
+        return counts(rows.filter { row ->
+            val key = keys[row.epoch] ?: return@filter false
             val readerTag = own.getOrPut(Triple(row.slot, row.value, row.epoch)) {
                 key.tag(TagPurpose.SLOT, reader, SlotObject.of(scope.fingerprint, scope.variant, row.slot, row.value))
             }
-            if (readerTag == row.tag) continue
+            readerTag != row.tag
+        })
+    }
+
+    /** Per slot, the evidence of the epoch it is judged on ([bestEpoch]), from every row given (#82: the operator's). */
+    fun counts(rows: List<Row>): Map<String, SlotCounts> {
+        val present = HashMap<Pair<String, Int>, Int>()
+        val values = HashMap<Pair<String, Int>, MutableMap<String, Int>>()
+        for (row in rows) {
             val group = row.slot to row.epoch
             if (row.value == SlotValues.PRESENT) present.merge(group, 1, Int::plus)
             else values.getOrPut(group) { HashMap() }.merge(row.value, 1, Int::plus)

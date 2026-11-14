@@ -77,7 +77,7 @@ abstract class LifecycleTestDatabase {
     @BeforeEach fun reset() {
         instant = Instant.parse("2026-10-06T12:00:00Z")
         Database.migrate(config())
-        sql { it.update("TRUNCATE installs, clusters, withdrawals, vocabulary_v5, filter_floor, health_fleet_daily, token_sightings_v5, health_daily, epoch_keys, slot_release_days, quarantine_items CASCADE") }
+        sql { it.update("TRUNCATE installs, clusters, withdrawals, vocabulary_v5, filter_floor, health_fleet_daily, token_sightings_v5, health_daily, epoch_keys, slot_release_days, quarantine_items, anchor_checks, anchor_check_budget CASCADE") }
     }
     companion object {
         @Container @JvmField val postgres = PostgreSQLContainer("postgres:17-alpine")

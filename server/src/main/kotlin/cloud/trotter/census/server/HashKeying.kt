@@ -20,7 +20,7 @@ import javax.crypto.spec.SecretKeySpec
  * label, so a keyed token never equals a keyed fingerprint or the [keyCheck].
  *
  * This protects data at rest only. The live server, and the operator who runs it, hold the pepper and can still
- * test a guess (the vocabulary resolve route does exactly that, [candidate]).
+ * test a guess (the vocabulary resolve route does exactly that, [candidate]; so does the #82 anchor check).
  *
  * The pepper is never rotated: a new pepper is a new hash domain, and every stored value would have to be rewritten
  * under it. [keyCheck] lets startup refuse a pepper that differs from the one the database was keyed under.

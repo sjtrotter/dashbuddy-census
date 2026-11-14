@@ -92,7 +92,7 @@ class ContributorStore(private val db: Database, private val clock: Clock, priva
                     transaction(db.exposed, isolation, readOnly) {
                         maxAttempts = 1
                         val raw = connection.connection as Connection
-                        (statementSeam?.let { listening(raw, it) } ?: raw).block()
+                        (statementSeam?.let { raw.listening(it) } ?: raw).block()
                     }
                 }
                 // A REPEATABLE READ transaction that meets a concurrent commit is refused (40001); run it again on a
@@ -287,16 +287,6 @@ class ContributorStore(private val db: Database, private val clock: Clock, priva
 
     /** Test seam: receives the SQL of every statement this store prepares, so a test can compare query sequences. */
     internal var statementSeam: ((String) -> Unit)? = null
-
-    private fun listening(raw: Connection, seam: (String) -> Unit): Connection =
-        java.lang.reflect.Proxy.newProxyInstance(Connection::class.java.classLoader, arrayOf(Connection::class.java)) { _, method, args ->
-            if (method.name == "prepareStatement" || method.name == "createStatement") seam((args?.firstOrNull() as? String) ?: method.name)
-            try {
-                method.invoke(raw, *(args ?: emptyArray()))
-            } catch (failure: java.lang.reflect.InvocationTargetException) {
-                throw failure.targetException
-            }
-        } as Connection
 
     /** Test seam: runs inside a read's snapshot after its install and grant checks, before its evidence is read. */
     internal var readSeam: ((Connection) -> Unit)? = null

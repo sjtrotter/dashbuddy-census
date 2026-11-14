@@ -167,6 +167,36 @@ route, `source` `contributor`, using the `tokenHash`, `hashDomain` and `filterRe
 `"reject":true`. Either way the waiting copy is deleted. Nothing here ships a word: the shipped vocabulary still needs
 `k_ship` and the bundle review.
 
+## Anchor check (#82)
+
+While drafting an anchor from a skeleton, the anchor check tells you whether a word you think a slot holds is what it
+holds ([API](API.md#anchor-check--82)). Use it on slots the cluster page's "Slot constancy" panel shows as `constant`;
+every other slot answers `no_answer` whatever you send, the same answer as a wrong word. Take the cluster key, the
+variant (the panel shows only a layout prefix; `GET /ops/clusters/$FINGERPRINT` carries the full one under `slots`)
+and the slot id, set `TOTP` to a fresh code, and send up to eight candidates:
+
+```sh
+curl --fail-with-body "$CENSUS_URL/ops/anchor-check" \
+  -H "Authorization: Bearer $OPERATOR_TOKEN" -H "X-Census-Totp: $TOTP" \
+  -H 'Content-Type: application/json' \
+  -d "{\"variant\":{\"fingerprint\":\"$FINGERPRINT\",\"platformAppVersion\":\"8.0\",\"hashDomain\":1,\"filterRev\":1,\"layout\":\"$LAYOUT\"},\"slot\":\"root/0/text\",\"candidates\":[\"Heads up\",\"Pick up by\"]}"
+```
+
+- `match` with a `text`: the slot holds that text, in that case. A `hasText` anchor with the candidate will match it
+  (`hasText` ignores case); use `text` as the `clearText` when you resolve the slot's token in the vocabulary queue.
+  Verify spacing and unusual glyphs on a phone with a probe before the rule ships: the check compares canonical
+  forms, `hasText` the raw string.
+- `no_answer`: the slot does not hold that word, or the slot does not answer. Nothing more can be read from it.
+- `422 not_chrome`: a candidate looks like a name, an address, a code or a contact (`refused` lists which). Nothing
+  was compared. App wording that trips the filter (a label ending in a single capital, `Plan B`) cannot be checked
+  here; draft it from a trusted capture or a probe instead.
+- `429 budget_exhausted`: the day's 200 candidates are spent, refused ones included.
+
+Do not use the check to learn what a varying or regional slot holds; it cannot answer there by design. Every query is
+in the audit log with its candidates' text (refused queries without text): `GET /ops/anchor-checks`. Review it when
+the agent token (#84) starts calling the check; a run of name-like guesses that slipped the filter is the thing to
+look for.
+
 ## Reinstall with a new signing key
 
 The app seals its census credential with an Android Keystore key, and a reinstall that changes the app's signing key loses it. Before such a reinstall, let the census spool drain, then reset the census identity in the app's Developer options (which withdraws it), then reinstall; the new install enrols a fresh identity. If the key is lost without a reset, the phone mints a new identity on its own: trust the new one through `/ops/installs/{uuid}/trust`, then revoke the old one through `/ops/installs/{uuid}/revoke`, which also ends the old identity's `silence` alarm.

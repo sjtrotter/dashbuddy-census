@@ -1,6 +1,7 @@
 package cloud.trotter.census.server
 
 import cloud.trotter.census.server.auth.AuthenticatedInstallKey
+import cloud.trotter.census.server.db.AnchorCheckStore
 import cloud.trotter.census.server.db.ContributorStore
 import cloud.trotter.census.server.db.EnvelopeStore
 import cloud.trotter.census.server.db.HealthStore
@@ -160,7 +161,7 @@ fun Application.module(
         val contributors = db?.let { ContributorStore(it, clock, policy) }
         val quarantine = db?.let { database -> config.operatorPublicKey?.let { QuarantineStore(database, clock, policy, it) } }
         opsRoutes(config, db?.let { OpsStore(it, clock, policy) }, alarms, clock, policy, lifecycle = lifecycle, enrolStats = enrolStats, pause = pause,
-            contributors = contributors, quarantine = quarantine)
+            contributors = contributors, quarantine = quarantine, anchorChecks = db?.let { AnchorCheckStore(it, clock, policy) })
         identityRoutes(store, clock, policy, alarms, enrolStats) {
             if (store != null && skeletons != null && pause != null) skeletonRoutes(store, skeletons, clock, policy, pause)
             if (contributors != null && pause != null) contributorRoutes(contributors, quarantine, config.hashKeying, clock, policy, pause)
