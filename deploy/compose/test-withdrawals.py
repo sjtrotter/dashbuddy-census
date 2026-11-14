@@ -39,12 +39,25 @@ class WithdrawalScriptsTest(unittest.TestCase):
         self.bin.mkdir()
         self.log = self.root / "commands.jsonl"
         self.staged = self.root / "staged.json"
+        self.uploads_log = self.root / "uploads.jsonl"
         mock = '''#!/usr/bin/env python3
-import json, os, sys
+import gzip, json, os, subprocess, sys
 from pathlib import Path
 args = sys.argv[1:]
 with open(os.environ['COMMAND_LOG'], 'a') as log:
     log.write(json.dumps([Path(sys.argv[0]).name] + args) + '\\n')
+if Path(sys.argv[0]).name == 'aws':
+    # `aws s3 cp SOURCE TARGET`: the source must already be complete when it is uploaded. Record what was read.
+    source = Path(args[2])
+    if not source.is_file():
+        print(f'stub aws: {source} does not exist', file=sys.stderr)
+        sys.exit(1)
+    data = source.read_bytes()
+    with open(os.environ['UPLOAD_LOG'], 'a') as log:
+        log.write(json.dumps({'source': args[2], 'target': args[3], 'mode': oct(source.stat().st_mode & 0o777),
+                              'content': (gzip.decompress(data) if source.suffix == '.gz' else data).decode()}) + '\\n')
+    # UPLOAD_STATUS fails the withdrawal JOURNAL upload only; the dump's own upload is never failed here.
+    sys.exit(int(os.environ.get('UPLOAD_STATUS', '0')) if 'withdrawals/' in args[3] else 0)
 if any('FROM filter_floor' in arg for arg in args):
     if os.environ.get('FAIL_FLOOR') == '1':
         sys.exit(1)
@@ -63,17 +76,18 @@ elif any('SELECT count(*) FROM pg_class' in arg for arg in args):
 elif '--single-transaction' in args:
     sys.stdin.read()
 elif 'run' in args:
-    # The restore pre-check (`--entrypoint /bin/sh … test -r`) always passes in the stub; REPLAY_STATUS drives the replay.
+    host, container = args[args.index('-v') + 1].rsplit(':', 2)[:2]
     if '--entrypoint' in args:
-        sys.exit(0)
-    staged = Path(args[args.index('-v') + 1].rsplit(':', 2)[0])
+        # The readability pre-check runs for real against the staged directory. UNREADABLE names a journal the
+        # container cannot read; it is taken away before the check runs.
+        if os.environ.get('UNREADABLE'):
+            os.remove(Path(host) / os.environ['UNREADABLE'])
+        command = [args[args.index('--entrypoint') + 1]] + args[args.index('census') + 1:]
+        sys.exit(subprocess.run([arg.replace(container, host) for arg in command]).returncode)
     with open(os.environ['STAGED_LOG'], 'w') as out:
-        json.dump({name: [oct(os.stat(staged / name).st_mode & 0o777), (staged / name).read_text()]
+        json.dump({name: [oct(os.stat(Path(host) / name).st_mode & 0o777), (Path(host) / name).read_text()]
                    for name in ('withdrawals.csv', 'filter-floor.csv')}, out)
     sys.exit(int(os.environ.get('REPLAY_STATUS', '0')))
-elif Path(sys.argv[0]).name == 'aws':
-    # UPLOAD_STATUS fails the withdrawal JOURNAL upload only; the dump's own upload is never failed here.
-    sys.exit(int(os.environ.get('UPLOAD_STATUS', '0')) if any('withdrawals/' in arg for arg in args) else 0)
 '''
         for name in ("docker", "aws"):
             script = self.bin / name
@@ -81,18 +95,56 @@ elif Path(sys.argv[0]).name == 'aws':
             script.chmod(0o700)
         self.env = dict(
             os.environ, PATH=f"{self.bin}:{os.environ['PATH']}", COMMAND_LOG=str(self.log),
-            STAGED_LOG=str(self.staged), DUMP=DUMP,
+            STAGED_LOG=str(self.staged), UPLOAD_LOG=str(self.uploads_log), DUMP=DUMP,
         )
         self.env.pop("BACKUP_BUCKET", None)
 
-    def run_script(self, name, *args, **environment):
+    def run_script(self, name, *args, answer="RESTORE", **environment):
         return subprocess.run(
-            [str(self.root / name), *map(str, args)], input="RESTORE\n", text=True,
+            [str(self.root / name), *map(str, args)], input=f"{answer}\n", text=True,
             capture_output=True, env=dict(self.env, **environment), check=False,
         )
 
     def commands(self):
         return [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
+
+    def uploads(self):
+        return [json.loads(line) for line in self.uploads_log.read_text().splitlines()] if self.uploads_log.exists() else []
+
+    def backup_steps(self):
+        """The backup's commands in order, by what each one does."""
+        def step(command):
+            if command[0] == "aws":
+                target = command[-1]
+                return "upload " + ("withdrawals" if "/withdrawals/" in target else "floor" if "/filter-floor/" in target else "dump")
+            if "pg_dump" in command:
+                return "dump"
+            if "FROM filter_floor" in command[-1]:
+                return "export floor"
+            if "COPY (SELECT install_id_hash" in command[-1]:
+                return "export withdrawals"
+            return " ".join(command)
+        return [step(command) for command in self.commands()]
+
+    def restore_steps(self):
+        """The restore's commands in order, by what each one does."""
+        def step(command):
+            if "--entrypoint" in command:
+                return "precheck"
+            if command[1:] == ["compose", "stop", "census"]:
+                return "stop"
+            if any("FROM pg_class" in arg for arg in command):
+                return "inspect"
+            if "--single-transaction" in command:
+                return "sql"
+            if "run" in command and "--reapply-withdrawals" in command:
+                return "replay"
+            return " ".join(command)
+        return [step(command) for command in self.commands()]
+
+    def reset_logs(self):
+        for log in (self.log, self.uploads_log, self.staged):
+            log.unlink(missing_ok=True)
 
     def dumps(self):
         return list((self.root / "backups").glob("census-*.sql.gz"))
@@ -125,16 +177,28 @@ elif Path(sys.argv[0]).name == 'aws':
             written = stream.read()
         self.assertEqual(DUMP.replace("1\tcc\tx\n2\taa\ty\n3\tbb\tz\n", "2\taa\ty\n3\tbb\tz\n1\tcc\tx\n"), written)
         self.assertEqual(0o600, dump.stat().st_mode & 0o777)
-        uploads = [command[-1] for command in commands if command[0] == "aws"]
-        self.assertEqual(f"s3://example/{dump.name}", uploads[0])
-        self.assertTrue(uploads[1].startswith("s3://example/withdrawals/"), uploads)
-        self.assertTrue(uploads[2].startswith("s3://example/filter-floor/"), uploads)
-        withdrawals = next(i for i, command in enumerate(commands) if "COPY (SELECT install_id_hash" in command[-1])
-        floor = next(i for i, command in enumerate(commands) if "FROM filter_floor" in command[-1])
-        self.assertLess(0, withdrawals)
-        self.assertLess(withdrawals, floor)
-        for directory in ("withdrawals", "filter-floor"):
-            [journal] = (self.root / "backups" / directory).glob("*.csv")
+        # Each upload follows its own export and reads the finished, restricted file.
+        self.assertEqual(
+            ["dump", "upload dump", "export withdrawals", "upload withdrawals", "export floor", "upload floor"],
+            self.backup_steps(),
+        )
+        uploads = self.uploads()
+        [withdrawals] = (self.root / "backups/withdrawals").glob("*.csv")
+        [floor] = (self.root / "backups/filter-floor").glob("*.csv")
+        # The published files themselves, never a temporary, under their own names.
+        self.assertEqual(
+            [(f"backups/{dump.name}", f"s3://example/{dump.name}"),
+             (f"backups/withdrawals/{withdrawals.name}", f"s3://example/withdrawals/{withdrawals.name}"),
+             (f"backups/filter-floor/{floor.name}", f"s3://example/filter-floor/{floor.name}")],
+            [(upload["source"], upload["target"]) for upload in uploads],
+        )
+        self.assertEqual(
+            [written, "install_id_hash,withdrawn_at\n" + "a" * 64 + ",2026-10-03 12:00:00+00\n",
+             "min_filter_rev,changed_day\n3,2026-10-03\n"],
+            [upload["content"] for upload in uploads],
+        )
+        self.assertEqual(["0o600"] * 3, [upload["mode"] for upload in uploads])
+        for journal in (withdrawals, floor):
             self.assertEqual(0o600, journal.stat().st_mode & 0o777)
         self.assertIn("(1 rows)", result.stdout)
         self.assertIn("Backup recovery journals exported successfully.", result.stdout)
@@ -177,13 +241,11 @@ elif Path(sys.argv[0]).name == 'aws':
                 self.assertEqual([], self.commands())
         result = self.run_script("restore.sh", dump, journal, floor)
         self.assertEqual(0, result.returncode, result.stderr)
+        # Readability is proven before census stops; the database is inspected while census is stopped and before
+        # any SQL; the replay runs last. Nothing else is run (no `up`).
+        self.assertEqual(["precheck", "stop", "inspect", "sql", "replay"], self.restore_steps())
         commands = self.commands()
-        # Astra review: readability is PROVEN before any SQL — the pre-check precedes the restore transaction,
-        # and the mount is a private STAGED copy (0600, owned by the invoker), never the operator's own file.
-        precheck = next(i for i, command in enumerate(commands) if "--entrypoint" in command)
-        restore = next(i for i, command in enumerate(commands) if "--single-transaction" in command)
-        self.assertLess(precheck, restore)
-        self.assertIn("--single-transaction", commands[-2])
+        # Astra review: the mount is a private STAGED copy (0600, owned by the invoker), never the operator's own file.
         mount = commands[-1][commands[-1].index("-v") + 1]
         self.assertTrue(mount.endswith(":/recovery:ro") and "census-recovery." in mount, mount)
         self.assertFalse(any(str(journal) in arg or str(floor) in arg for command in commands for arg in command))
@@ -195,20 +257,34 @@ elif Path(sys.argv[0]).name == 'aws':
         self.assertEqual(["0o600", journal.read_text()], staged["withdrawals.csv"])
         self.assertEqual(["0o600", floor.read_text()], staged["filter-floor.csv"])
         self.assertIn("Restore complete", result.stdout)
-        self.assertFalse(any("up" in command for command in commands))
         self.assertFalse(Path(mount.rsplit(":", 2)[0]).exists())
 
-    def test_restore_replay_failure_is_fatal_and_a_used_database_is_refused(self):
+    def test_restore_stops_at_an_unreadable_journal(self):
+        dump, journal, floor = self.restore_inputs()
+        for name in ("withdrawals.csv", "filter-floor.csv"):
+            with self.subTest(unreadable=name):
+                self.reset_logs()
+                result = self.run_script("restore.sh", dump, journal, floor, UNREADABLE=name)
+                self.assertNotEqual(0, result.returncode)
+                self.assertIn("recovery journals are not readable", result.stderr)
+                self.assertEqual(["precheck"], self.restore_steps())
+                self.assertFalse(self.staged.exists())
+
+    def test_restore_failures_keep_census_stopped_and_run_nothing_after_them(self):
         dump, journal, floor = self.restore_inputs()
         result = self.run_script("restore.sh", dump, journal, floor, REPLAY_STATUS="1")
         self.assertNotEqual(0, result.returncode)
         self.assertNotIn("Restore complete", result.stdout)
-        self.log.unlink()
+        self.assertEqual(["precheck", "stop", "inspect", "sql", "replay"], self.restore_steps())
+        self.reset_logs()
         result = self.run_script("restore.sh", dump, journal, floor, OBJECTS="4")
         self.assertNotEqual(0, result.returncode)
         self.assertIn("census must be a fresh database", result.stderr)
-        self.assertFalse(any("--single-transaction" in command for command in self.commands()))
-
+        self.assertEqual(["precheck", "stop", "inspect"], self.restore_steps())
+        self.reset_logs()
+        result = self.run_script("restore.sh", dump, journal, floor, answer="no")
+        self.assertNotEqual(0, result.returncode)
+        self.assertEqual(["precheck"], self.restore_steps())
 
 if __name__ == "__main__":
     unittest.main()
