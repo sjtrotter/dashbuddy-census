@@ -39,7 +39,8 @@ object ChromeShape {
     /**
      * #82: the canonical form of an anchor candidate, or null when it is refused. First, on the text as sent, every code
      * point must be a Latin-script letter, a space or one of [ANCHOR_PUNCTUATION] ([latinOnly], Sol round 4, S1):
-     * another script, a supplementary-plane code point, a combining mark, a zero-width or control character is refused,
+     * another script, a combining mark, a zero-width or control character is refused, as is a supplementary-plane code
+     * point unless it is a Latin letter (U+10780 and its few neighbours pass, and every check below reads code points),
      * because the checks below read letters, and delivery-app chrome here is English, Spanish and French. Then, on top of
      * [wordsCanonical]: at most [MAX_CANONICAL_LENGTH] characters; a phrase whose as-sent form has a capitalized word
      * anywhere after its first ([laterCapital]: `Accept Order`, `Riley Smith`, `Maria de Souza`, `Can I help`) is
