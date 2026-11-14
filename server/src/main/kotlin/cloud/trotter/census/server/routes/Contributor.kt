@@ -28,7 +28,9 @@ import cloud.trotter.census.server.ingest.ItemVerdict
 import cloud.trotter.census.server.ingest.SkeletonValidator
 import cloud.trotter.census.server.ingest.SlotWalk
 import cloud.trotter.census.server.ingest.WireGrammars
+import cloud.trotter.census.server.ingest.hasDuplicateKeys
 import cloud.trotter.census.server.ingest.parseBounded
+import cloud.trotter.census.server.auth.sha256Hex
 import cloud.trotter.census.server.ingest.storedKey
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
@@ -41,6 +43,7 @@ import io.ktor.server.routing.post
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.SerializationException
+import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -137,12 +140,13 @@ fun Route.contributorRoutes(
             call.respond(HttpStatusCode.UnprocessableEntity, ErrorResponse("bad_artifact"))
             return@post
         }
-        val result = quarantine.submit(call.installId(), call.keyHash(), today, bytes, note, artifact.words)
+        // Sol S1: only the validated artifact, in its canonical form, is sealed; never the bytes as received.
+        val result = quarantine.submit(call.installId(), call.keyHash(), today, artifact.canonical, note, artifact.words)
         call.answer(result) { stored ->
             when (stored) {
                 is QuarantineResult.Stored -> {
-                    contributorLog.info("contributor quarantine stored=1 bytes={}", bytes.size)
-                    QuarantineResponse(expiresDay = stored.expiresDay.toString())
+                    contributorLog.info("contributor quarantine stored=1 bytes={}", artifact.canonical.size)
+                    QuarantineResponse(expiresDay = stored.expiresDay.toString(), artifactSha256 = sha256Hex(artifact.canonical))
                 }
                 QuarantineResult.GateClosed -> {
                     call.respond(HttpStatusCode.Conflict, ErrorResponse("gate_closed"))
@@ -154,15 +158,22 @@ fun Route.contributorRoutes(
 }
 
 /**
- * The quarantine artifact (#81, gig.log#1627): the outbound review exactly as the review screen described it, a JSON
- * object holding the skeleton (any accepted schema, validated like an upload, so it holds no screen text), and the
- * review's confirmations, role tags and words. A word in it must pass the same checks and find its gate open, or
- * nothing is stored: the quarantine is not a way around the gate.
+ * The quarantine artifact (#81, gig.log#1627): the outbound review as the review screen described it, a JSON object
+ * holding the skeleton (any accepted schema, validated like an upload, so it holds no screen text), and the review's
+ * confirmations, role tags and words. A word in it must pass the same checks and find its gate open, or nothing is
+ * stored: the quarantine is not a way around the gate.
+ *
+ * Sol S1: a JSON parser keeps one of two values under a repeated key, so validating the parsed object and sealing the
+ * bytes as received could seal the other (ungated text). A repeated key at any depth is therefore refused, and what
+ * is sealed is [canonical]: the validated object re-serialized, `{"skeleton":<the contract's canonical skeleton>,
+ * "confirmations":[{"slot","hash"}],"roles":[{"slot","role"}],"words":[{"slot","hash","word"}]}`, keys in that order,
+ * compact, every array present. A phone that sends this form gets back the SHA-256 of exactly its bytes.
  */
-internal class QuarantineArtifact(val words: List<Triple<SlotScope, String, String>>) {
+internal class QuarantineArtifact(val words: List<Triple<SlotScope, String, String>>, val canonical: ByteArray) {
     companion object {
         fun parse(bytes: ByteArray, keying: HashKeying, policy: Policy, today: LocalDate): QuarantineArtifact? {
             val element = parseBounded(bytes) as? JsonObject ?: return null
+            if (hasDuplicateKeys(bytes.decodeToString())) return null
             val body = try {
                 contributorJson.decodeFromJsonElement(ArtifactDto.serializer(), element)
             } catch (_: SerializationException) {
@@ -182,7 +193,14 @@ internal class QuarantineArtifact(val words: List<Triple<SlotScope, String, Stri
                 if (ContributorGate.checkWord(word.word, word.hash).second != null) return null
                 Triple(scope, word.slot, keying.token(word.hash))
             }
-            return QuarantineArtifact(words)
+            val canonical = buildString {
+                append("{\"skeleton\":").append(accepted.canonicalJson)
+                append(",\"confirmations\":").append(contributorJson.encodeToString(ListSerializer(SlotHashDto.serializer()), body.confirmations))
+                append(",\"roles\":").append(contributorJson.encodeToString(ListSerializer(RoleDto.serializer()), body.roles))
+                append(",\"words\":").append(contributorJson.encodeToString(ListSerializer(WordDto.serializer()), body.words))
+                append('}')
+            }
+            return QuarantineArtifact(words, canonical.toByteArray(Charsets.UTF_8))
         }
     }
 }
@@ -215,6 +233,8 @@ private fun badRequest(): Nothing = throw BadRequestException("Invalid contribut
 
 private inline fun <reified T> decodeContributor(bytes: ByteArray): T = try {
     val element = parseBounded(bytes) ?: throw BadRequestException("Invalid JSON")
+    // Sol S1: a request with a repeated key means two things; refuse it rather than let the parser pick one.
+    if (hasDuplicateKeys(bytes.decodeToString())) throw BadRequestException("Duplicate key")
     Json.decodeFromJsonElement<T>(element)
 } catch (_: SerializationException) {
     throw BadRequestException("Invalid JSON")
@@ -250,21 +270,21 @@ internal data class VariantDto(
 @Serializable private data class ClassesRequest(val variant: VariantDto)
 @Serializable private data class SlotClassDto(val slot: String, @SerialName("class") val slotClass: String)
 @Serializable private data class ClassesResponse(val releaseDay: String, val slots: List<SlotClassDto>)
-@Serializable private data class SlotHashDto(val slot: String, val hash: String)
+@Serializable internal data class SlotHashDto(val slot: String, val hash: String)
 @Serializable private data class GatesRequest(val variant: VariantDto, val slots: List<SlotHashDto>)
 @Serializable private data class GateDto(val slot: String, val hash: String, val open: Boolean)
 @Serializable private data class GatesResponse(val slots: List<GateDto>)
-@Serializable private data class RoleDto(val slot: String, val role: String)
+@Serializable internal data class RoleDto(val slot: String, val role: String)
 @Serializable private data class ReviewRequest(
     val variant: VariantDto, val confirmations: List<SlotHashDto> = emptyList(), val roles: List<RoleDto> = emptyList(),
 )
 @Serializable private data class ReviewResponse(val confirmations: Int, val roles: Int, val skipped: Int)
-@Serializable private data class WordDto(val slot: String, val hash: String, val word: String)
+@Serializable internal data class WordDto(val slot: String, val hash: String, val word: String)
 @Serializable private data class WordsRequest(val variant: VariantDto, val words: List<WordDto>)
 @Serializable private data class WordResultDto(val slot: String, val status: String)
 @Serializable private data class WordsResponse(val words: List<WordResultDto>)
 @Serializable private data class QuarantineRequest(val artifact: String, val note: String? = null)
-@Serializable private data class QuarantineResponse(val status: String = "quarantined", val expiresDay: String)
+@Serializable private data class QuarantineResponse(val status: String = "quarantined", val expiresDay: String, val artifactSha256: String)
 @Serializable private data class ArtifactDto(
     val skeleton: JsonElement,
     val confirmations: List<SlotHashDto> = emptyList(),

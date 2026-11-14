@@ -38,6 +38,8 @@ import java.time.ZoneOffset
 import java.util.Base64
 import java.util.UUID
 import java.util.concurrent.TimeUnit
+import java.sql.DriverManager
+import kotlin.concurrent.thread
 import javax.crypto.Cipher
 import javax.crypto.KeyAgreement
 import javax.crypto.spec.GCMParameterSpec
@@ -91,13 +93,18 @@ class QuarantineTest : LifecycleTestDatabase() {
             val id = granted(db)
             val bytes = artifact()
             val parsed = requireNotNull(QuarantineArtifact.parse(bytes, testKeying, policy, day))
-            val result = store(db).submit(id, key, day, bytes, QuarantineNote.MIGHT_CONTAIN_CUSTOMER, parsed.words)
+            val result = store(db).submit(id, key, day, parsed.canonical, QuarantineNote.MIGHT_CONTAIN_CUSTOMER, parsed.words)
             assertEquals(ContributorOutcome.Ok(QuarantineResult.Stored(day.plusDays(3))), result)
             val entry = store(db).list(day).single()
             assertEquals(QuarantineNote.MIGHT_CONTAIN_CUSTOMER, entry.note)
             val (_, sealed) = requireNotNull(store(db).sealed(entry.id, day))
-            // Byte-identical to what the phone sent, and stored only as ciphertext.
-            assertArrayEquals(bytes, open(entry.id, sealed))
+            // The validated artifact in its canonical form, and stored only as ciphertext.
+            assertArrayEquals(parsed.canonical, open(entry.id, sealed))
+            val canonical = Json.parseToJsonElement(parsed.canonical.decodeToString()).jsonObject
+            assertEquals(listOf("skeleton", "confirmations", "roles", "words"), canonical.keys.toList())
+            assertEquals(Json.parseToJsonElement(bytes.decodeToString()).jsonObject["roles"], canonical["roles"])
+            // A phone that sends the canonical form gets back exactly its bytes.
+            assertArrayEquals(parsed.canonical, requireNotNull(QuarantineArtifact.parse(parsed.canonical, testKeying, policy, day)).canonical)
             assertFalse(String(sealed, Charsets.ISO_8859_1).contains("skeleton"))
             // Not clustered, counted or drafted from: nothing outside the quarantine table changed.
             for (table in listOf("clusters", "cluster_samples", "token_sightings_v5", "cluster_sightings_v5", "slot_sightings", "slot_roles", "vocabulary_v5")) {
@@ -139,6 +146,84 @@ class QuarantineTest : LifecycleTestDatabase() {
             // No grant, no item.
             val other = install(age = 40)
             assertEquals(ContributorOutcome.NoGrant, store(db).submit(other, key, day, artifact(), null, emptyList()))
+        }
+    }
+
+    @Test fun `a repeated key at any depth is refused, so ungated text cannot hide behind a validated value`() = runBlocking {
+        // Sol S1: a parser keeps one of two "words" values; validation saw the empty one, the bytes held the other.
+        val hash = requireNotNull(CensusHash.of("Pick up by"))
+        val smuggled = """{"skeleton":${skeleton()},"words":[{"slot":"root/0/text","hash":"$hash","word":"Pick up by"}],"words":[]}"""
+        assertNull(QuarantineArtifact.parse(smuggled.toByteArray(), testKeying, policy, day))
+        val nested = """{"skeleton":${skeleton()},"roles":[{"slot":"root/0/text","role":"tip","r\u006fle":"deadline"}]}"""
+        assertNull(QuarantineArtifact.parse(nested.toByteArray(), testKeying, policy, day))
+        assertTrue(cloud.trotter.census.server.ingest.hasDuplicateKeys("""{"a":{"b":1,"c":[{"d":1},{"d":2}]},"e":"{\"a\":1,\"a\":2}"}""").not())
+        assertTrue(cloud.trotter.census.server.ingest.hasDuplicateKeys("""{"a":[{"b":1,"b":2}]}"""))
+    }
+
+    @Test fun `a submission racing an erasure never leaves an item behind`() = runBlocking {
+        Database.connect(config()).use { db ->
+            // Sol S4: the submission is admitted, then an erasure takes the install row and deletes the install's
+            // quarantine items (none yet) before the submission writes; the erasure deletes the grant only later.
+            val id = granted(db)
+            val store = store(db)
+            store.afterAdmission = {
+                val erasure = DriverManager.getConnection(postgres.jdbcUrl, postgres.username, postgres.password)
+                erasure.autoCommit = false
+                erasure.select("SELECT 1 FROM installs WHERE install_id = ? FOR UPDATE", id) { true }
+                erasure.update("UPDATE installs SET erased_through = now() WHERE install_id = ?", id)
+                erasure.update("DELETE FROM quarantine_items")
+                thread {
+                    // Once the submission waits on the install row, the erasure finishes and commits.
+                    var waited = false
+                    repeat(200) {
+                        if (!waited) waited = sql { it.select("SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock'") { r -> r.getLong(1) }!! } > 0
+                        if (!waited) Thread.sleep(25)
+                    }
+                    erasure.update("DELETE FROM contributor_grants WHERE install_id = ?", id)
+                    erasure.commit()
+                    erasure.close()
+                }
+            }
+            assertEquals(ContributorOutcome.NoGrant, store.submit(id, key, day, artifact(), null, emptyList()))
+            assertEquals(0L, count("quarantine_items"))
+        }
+    }
+
+    @Test fun `approval and an erasure of the same install take their locks in one order`() = runBlocking {
+        Database.connect(config()).use { db ->
+            // Sol S7: the install's trusted envelope drafts the cluster the sanitized copy lands on, so erasing the
+            // envelope locks that cluster; approval locks the item, then the cluster.
+            val id = granted(db)
+            val sanitized = SkeletonValidator.validate(skeleton("Order details"), policy, day) as ItemVerdict.Accepted
+            val keyed = testKeying.atRest(sanitized)
+            sql { connection ->
+                connection.update("INSERT INTO clusters (fingerprint, platform, first_seen_day, last_seen_day) VALUES (?, 'doordash', ?, ?)",
+                    keyed.item.fingerprint, day, day)
+                val envelope = connection.select("INSERT INTO trusted_envelopes (install_id, fingerprint, envelope, received_day, purge_after) VALUES (?, ?, '{}', ?, ?) RETURNING id",
+                    id, keyed.item.fingerprint, day, day.plusDays(30)) { it.getLong(1) }!!
+                connection.update("UPDATE clusters SET draft = jsonb_build_object('envelopeId', ?::text) WHERE fingerprint = ?", envelope.toString(), keyed.item.fingerprint)
+            }
+            val store = store(db)
+            store.submit(id, key, day, artifact(), null, emptyList())
+            val item = store.list(day).single().id
+            var deletion: Thread? = null
+            var failure: Throwable? = null
+            store.afterItemLock = {
+                deletion = thread { runCatching { runBlocking { InstallStore(db, clock).deleteData(id, key, day) } }.onFailure { failure = it } }
+                // The erasure reaches the item approval holds and waits there, before it touches the cluster.
+                var waited = false
+                repeat(200) {
+                    if (!waited) waited = sql { it.select("SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock'") { r -> r.getLong(1) }!! } > 0
+                    if (!waited) Thread.sleep(25)
+                }
+                assertTrue(waited)
+            }
+            assertTrue(store.approve(item, keyed, day))
+            deletion!!.join()
+            assertNull(failure, "no deadlock: both transactions commit")
+            assertEquals(0L, count("quarantine_items"))
+            assertEquals(1L, count("cluster_samples"))
+            assertEquals(0L, count("trusted_envelopes"))
         }
     }
 

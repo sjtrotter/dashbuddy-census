@@ -160,7 +160,11 @@ class ContributorRoutesTest : LifecycleTestDatabase() {
                     val encoded = Base64.getUrlEncoder().withoutPadding().encodeToString(artifact)
                     assertError(post("/v1/contributor/quarantine", body("artifact" to encoded, "note" to "free text")), 400, "bad_request")
                     val quarantined = post("/v1/contributor/quarantine", body("artifact" to encoded, "note" to "unsure_what_screen"))
-                    assertEquals("""{"status":"quarantined","expiresDay":"${day.plusDays(3)}"}""", quarantined.bodyAsText())
+                    // Sol S1: the sealed bytes are the canonical form of the validated artifact; this phone sent that form.
+                    val canonical = """{"skeleton":${SkeletonSchema.serialize(item())},"confirmations":[],"roles":[],"words":[]}"""
+                    assertEquals("""{"status":"quarantined","expiresDay":"${day.plusDays(3)}","artifactSha256":"${cloud.trotter.census.server.auth.sha256Hex(canonical.toByteArray())}"}""",
+                        quarantined.bodyAsText())
+                    assertError(post("/v1/contributor/quarantine", """{"artifact":"$encoded","artifact":"$encoded"}"""), 400, "bad_request")
                     val listed = Json.parseToJsonElement(client.ops("/ops/quarantine").bodyAsText()).jsonArray.single().jsonObject
                     val itemId = listed.getValue("id").jsonPrimitive.content
                     assertEquals("unsure_what_screen", listed.getValue("note").jsonPrimitive.content)

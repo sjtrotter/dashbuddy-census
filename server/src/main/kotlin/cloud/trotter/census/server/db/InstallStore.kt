@@ -217,10 +217,15 @@ class InstallStore(private val db: Database, private val clock: Clock) {
                 "health_daily" -> deleteHealthAndRefold(keys, installId)
                 in TAGGED_TABLES -> TaggedTable.entries.single { it.table == table }.erase(this, keys, installId)
                 // #81: a withdrawal ends every grant (its audit rows go with it); a data deletion ends the live grant
-                // but keeps a revoked one, so deleting data cannot lift the operator's revocation.
+                // but keeps a revoked one, so deleting data cannot lift the operator's revocation. Sol S5: the kept
+                // grant is a revocation marker only; the audit rows of every grant of the install go, since a grant id
+                // links them to the install.
                 "contributor_grants" -> if (keepInstallFrom == null) {
                     update("DELETE FROM contributor_grants WHERE install_id = ?", installId)
-                } else update("DELETE FROM contributor_grants WHERE install_id = ? AND revoked_day IS NULL", installId)
+                } else {
+                    update("DELETE FROM contributor_reads WHERE grant_id IN (SELECT grant_id FROM contributor_grants WHERE install_id = ?)", installId) +
+                        update("DELETE FROM contributor_grants WHERE install_id = ? AND revoked_day IS NULL", installId)
+                }
                 else -> update("DELETE FROM $table WHERE install_id = ?", installId)
             }
         }
@@ -550,9 +555,12 @@ class InstallStore(private val db: Database, private val clock: Clock) {
          * (#86), the rest by `install_id`. `PublicInstallsTest` fails when a table that can hold the install is missing.
          */
         val WITHDRAWAL_TABLES: List<String> = listOf(
+            // #81 (Sol S7): quarantine items before trusted envelopes, whose deletion locks clusters. Approving an item
+            // locks the item, then its cluster; erasure takes the same order, so the two never deadlock.
+            "quarantine_items",
             "trusted_envelopes", "health_daily", "token_sightings_v5", "cluster_sightings_v5", "slot_sightings",
-            // #81: the contributor tier's tagged rows, then its grants (their audit rows cascade).
-            "slot_confirmations", "slot_roles", "slot_release", "quarantine_items", "contributor_grants",
+            // #81: the contributor tier's other tagged rows, then its grants (their audit rows cascade).
+            "slot_confirmations", "slot_roles", "slot_release", "contributor_grants",
             "ingest_ledger", "nonces", "installs",
         )
 

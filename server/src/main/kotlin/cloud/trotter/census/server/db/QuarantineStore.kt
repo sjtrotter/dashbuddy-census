@@ -76,8 +76,13 @@ class QuarantineStore(private val db: Database, private val clock: Clock, privat
             ContributorOutcome.Ok(Unit)
         }
         admitted.refusal()?.let { return it }
+        afterAdmission?.invoke()
         return query(Connection.TRANSACTION_REPEATABLE_READ) {
-            activeInstall(installId, keyHash, lock = false) ?: return@query ContributorOutcome.Stale
+            // Sol S4: the install row is share-locked first, the lock every erasure takes first (FOR UPDATE), so an
+            // erasure either commits before this transaction's snapshot (no grant: refused) or waits for it (and then
+            // deletes the item). One that commits while this waits makes the lock refuse the stale snapshot (40001),
+            // and the retry sees the erasure.
+            activeInstall(installId, keyHash, lock = true) ?: return@query ContributorOutcome.Stale
             liveGrant(installId, today, lock = true) ?: return@query ContributorOutcome.NoGrant
             if (words.isNotEmpty()) {
                 val keys = liveKeysByEpoch(db.keying, today)
@@ -95,6 +100,12 @@ class QuarantineStore(private val db: Database, private val clock: Clock, privat
             ContributorOutcome.Ok(QuarantineResult.Stored(expires))
         }
     }
+
+    /** Test seam: runs inside [approve] after the item is locked, before its cluster is. */
+    internal var afterItemLock: (() -> Unit)? = null
+
+    /** Test seam: runs between the admission transaction and the writing one. */
+    internal var afterAdmission: (() -> Unit)? = null
 
     /** The unexpired items, soonest to expire first. Reads honour the deadline even when the sweep has not run. */
     suspend fun list(today: LocalDate): List<QuarantineEntry> = query {
@@ -127,7 +138,10 @@ class QuarantineStore(private val db: Database, private val clock: Clock, privat
      * False when the item is gone or expired, or the copy's cluster exists with another kind.
      */
     suspend fun approve(id: UUID, sanitized: ItemVerdict.Accepted, today: LocalDate): Boolean = query {
+        // Sol S7: the item, then its cluster: the order erasure takes too (quarantine items before the trusted envelopes
+        // whose deletion locks clusters, InstallStore.WITHDRAWAL_TABLES), so approval and erasure never deadlock.
         if (select("SELECT 1 FROM quarantine_items WHERE id = ? AND expires_day > ? FOR UPDATE", id, today) { true } == null) return@query false
+        afterItemLock?.invoke()
         val item = sanitized.item
         val observed = LifecycleDeadline.observation(LocalDate.parse(item.day), today)
         val fingerprint = item.fingerprint
