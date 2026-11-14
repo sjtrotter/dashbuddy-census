@@ -412,7 +412,8 @@ The operator surface is served only on a second Caddy listener that Compose publ
 2. Generate a keypair per device on the workstation, keeping private keys in the password manager and in `~/dashbuddy/secrets/wireguard/` (0600):
 
    ```sh
-   umask 077; wg genkey | tee workstation.key | wg pubkey > workstation.pub   # or an X25519 keypair from python-cryptography
+   wg_dir=~/dashbuddy/secrets/wireguard; umask 077; mkdir -p "$wg_dir"   # outside the checkout, never the working directory
+   wg genkey | tee "$wg_dir/workstation.key" | wg pubkey > "$wg_dir/workstation.pub"   # or an X25519 keypair from python-cryptography
    ```
 
    A phone can instead generate its own keypair in the WireGuard app ("Create from scratch") and show only the public key.
@@ -420,7 +421,7 @@ The operator surface is served only on a second Caddy listener that Compose publ
 
    ```sh
    aws ssm put-parameter --name /dashbuddy-census/wireguard_peers --type String --overwrite \
-     --value "$(printf 'workstation %s 10.8.0.2\nphone %s 10.8.0.3\n' "$(cat workstation.pub)" "$(cat phone.pub)")"
+     --value "$(printf 'workstation %s 10.8.0.2\nphone %s 10.8.0.3\n' "$(cat ~/dashbuddy/secrets/wireguard/workstation.pub)" "$(cat ~/dashbuddy/secrets/wireguard/phone.pub)")"
    ```
 4. Existing host: run the one-time host refresh command in "Operator second factor + alarm delivery" step 3 with `CENSUS_COMPOSE_REF` at the reviewed ref — it installs the WireGuard package and `census-wireguard-configure`, the updated `census-configure`/`census.service`, refreshes Compose and the Caddyfile, and restarts the stack. A new host installs all of this from cloud-init, but a parameter change never triggers the configure step by itself: after setting the peers on a new host, run `systemctl restart census.service` over SSM (the existing-host refresh already restarts).
 5. Read the host's public key and the operator CA, then write each device's config — the `Address` is the one registered for THAT device in step 3 (workstation `10.8.0.2/32`, phone `10.8.0.3/32`; WireGuard drops packets from an unregistered inner address even after a good handshake) and `AllowedIPs = 10.8.0.1/32` so only operator traffic enters the tunnel:

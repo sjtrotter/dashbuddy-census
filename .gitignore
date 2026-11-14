@@ -14,3 +14,16 @@ deploy/aws/**/.terraform/
 deploy/aws/**/*.tfstate*
 deploy/aws/**/*.tfvars
 !deploy/aws/**/*.auto.tfvars.example
+
+# Secret files never belong in the repo, wherever they land in the checkout (sjtrotter/gig.log#1646).
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.jks
+*.keystore
+*.tfvars.json
+*service-account*.json
+*-credentials.json
