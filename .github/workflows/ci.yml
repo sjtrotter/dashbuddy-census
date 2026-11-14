@@ -29,7 +29,7 @@ jobs:
             # backup.sh, restore.sh and the journal exports against stubbed docker/aws (#94).
             - name: Backup and restore script checks
               run: python3 -I deploy/compose/test-withdrawals.py
-            - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+            - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
               with:
                   distribution: temurin
                   java-version: "21"
