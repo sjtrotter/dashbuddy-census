@@ -54,7 +54,7 @@ import java.time.ZoneOffset
 import java.util.Base64
 
 private val contributorJson = Json { encodeDefaults = true; explicitNulls = false }
-private val slotPattern = Regex("^[A-Za-z0-9/]{1,512}$")
+internal val slotPattern = Regex("^[A-Za-z0-9/]{1,512}$")
 private val contributorLog = LoggerFactory.getLogger("Contributor")
 
 /**

@@ -126,7 +126,7 @@ private suspend fun ApplicationCall.emptyOpsBody(): Boolean {
     return true
 }
 
-private suspend inline fun <reified T> ApplicationCall.opsJson(): T? {
+internal suspend inline fun <reified T> ApplicationCall.opsJson(): T? {
     if (attributes.contains(OpsForm)) throw BadRequestException("Invalid operator request")
     val bytes = readLimitedBody() ?: return null
     val element = parseBounded(bytes) ?: throw BadRequestException("Invalid operator request")

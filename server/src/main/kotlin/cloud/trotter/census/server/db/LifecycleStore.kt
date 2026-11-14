@@ -64,6 +64,7 @@ class LifecycleStore(private val db: Database, private val clock: Clock, private
         result["slot_release_expired"] = delete("slot_release_days", "release_day < ?", today)
         result["slot_release"] = release(today)
         for ((name, table, predicate) in contributorRetention()) result[name] = delete(table, predicate, *contributorArgs(name, today))
+        for ((name, table, predicate) in anchorRetention()) result[name] = delete(table, predicate, today)
         for (kind in listOf("screen", "notification")) result["samples_$kind"] = samples(kind, today)
         result["vocabulary"] = vocabulary(today)
         result["catalogue"] = catalogue()
@@ -148,6 +149,12 @@ class LifecycleStore(private val db: Database, private val clock: Clock, private
         )
     }
 
+    /** #82: anchor-check audit rows go after [AnchorCheckPolicy.auditDays], budget rows with the ingest ledger's days. */
+    private fun anchorRetention(): List<Triple<String, String, String>> = listOf(
+        Triple("anchor_checks", "anchor_checks", "day + ${policy.anchorCheck.auditDays} <= ?"),
+        Triple("anchor_check_budget", "anchor_check_budget", "day + ${policy.retention.ingestLedgerDays} <= ?"),
+    )
+
     private fun contributorArgs(name: String, today: LocalDate): Array<Any> = if (name == "contributor_words") arrayOf(today, today) else arrayOf(today)
 
     private data class Sample(val version: String, val received: LocalDate, val body: String, val domain: Int, val revision: Int, val deadline: LocalDate?)
@@ -186,6 +193,7 @@ class LifecycleStore(private val db: Database, private val clock: Clock, private
                 for ((name, table, predicate) in contributorRetention()) {
                     put(name, select("SELECT count(*) FROM $table WHERE $predicate", *contributorArgs(name, today)) { it.getLong(1) }!!)
                 }
+                for ((name, table, predicate) in anchorRetention()) put(name, select("SELECT count(*) FROM $table WHERE $predicate", today) { it.getLong(1) }!!)
             }
         } + InstallStore(db,clock).remainingDue(today,clock.now(),policy.retention)
     }

@@ -1,8 +1,7 @@
 package cloud.trotter.census.server.db
 
 import cloud.trotter.census.contract.CensusHash
-import cloud.trotter.census.contract.KindClassifier
-import cloud.trotter.census.contract.SensitiveMarkerScan
+import cloud.trotter.census.server.ChromeShape
 import cloud.trotter.census.server.EpochKey
 import cloud.trotter.census.server.Epochs
 import cloud.trotter.census.server.HashKeying
@@ -156,15 +155,11 @@ internal object ContributorGate {
      * to store, or the refusal. Pure: nothing about a refused word is stored or logged.
      */
     fun checkWord(word: String, publicHash: String): Pair<String?, WordStatus?> {
-        if (word.isEmpty() || word.length > MAX_WORD_LENGTH) return null to WordStatus.NOT_CHROME
-        val canonical = CensusHash.canonical(word) ?: return null to WordStatus.NOT_CHROME
-        val shape = KindClassifier.shapeKind(canonical)
-        if (canonical.isEmpty() || shape !is KindClassifier.ShapeKind.Words || !shape.hashable) return null to WordStatus.NOT_CHROME
-        if (SensitiveMarkerScan.findMarker(canonical) != null) return null to WordStatus.NOT_CHROME
+        val canonical = ChromeShape.wordsCanonical(word) ?: return null to WordStatus.NOT_CHROME
         val hash = CensusHash.ofCanonical(canonical) ?: return null to WordStatus.NOT_CHROME
         if (hash != publicHash) return null to WordStatus.HASH_MISMATCH
         return canonical to null
     }
 
-    const val MAX_WORD_LENGTH: Int = 128
+    const val MAX_WORD_LENGTH: Int = ChromeShape.MAX_TEXT_LENGTH
 }

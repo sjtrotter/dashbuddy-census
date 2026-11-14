@@ -16,7 +16,7 @@ AWS wrapper: account budgets + automatic EC2 stop; daily cost anomalies;
              multi-region CloudTrail management events --> S3 (14 days)
 ```
 
-Census validates environment configuration (including the required hash pepper), migrates through V10 and checks the pepper against the database's, replays withdrawals, applies the monotonic filter floor, and drains startup lifecycle work before accepting HTTP. The five-connection Hikari pool is registered with Exposed. Migration, recovery or lifecycle failure aborts startup. Readiness runs a bounded `SELECT 1`; liveness does not check the database. Signed, budgeted ingestion and authenticated operator review share the same effective policy.
+Census validates environment configuration (including the required hash pepper), migrates through V11 and checks the pepper against the database's, replays withdrawals, applies the monotonic filter floor, and drains startup lifecycle work before accepting HTTP. The five-connection Hikari pool is registered with Exposed. Migration, recovery or lifecycle failure aborts startup. Readiness runs a bounded `SELECT 1`; liveness does not check the database. Signed, budgeted ingestion and authenticated operator review share the same effective policy.
 
 ## Contract seam
 
@@ -59,6 +59,16 @@ routes reads it; `backup.sh` dumps it, `slot_release` and `slot_release_days` wi
 revocation and the restore replay erase the new tagged tables through `TaggedTable`; withdrawal deletes the grants. The
 lifecycle sweep builds the day's release, deletes an older one even when the build fails, and expires confirmations,
 role tags, audit rows, expired grants, waiting words and quarantine items.
+
+V11 (#82) adds the anchor check (ADR-0011 §16). `anchor_check_budget` counts candidates per caller and UTC day (7
+days); `anchor_checks` is its audit log, one row per query (30 days). Neither names an install: a caller is a fixed
+name (`operator`; the agent token, #84, adds its own, `AnchorCaller`). `AnchorCheckStore.check` runs in one
+transaction: the pure chrome filter (`ChromeShape.anchorCandidate`) first, then the budget, then, only for a query
+with no refused candidate, the slot's live counted rows (`SlotRelease.liveRows`, classified like the operator views
+with nobody left out), the keyed compare of every case variant (`anchorMatches`) and the audit row, which keeps
+no text and is read only inside its 30 days. A phrase is compared only in lower and sentence case
+(`ChromeShape.caseVariants`), and a phrase with any capitalized word after its first is refused. Every slot class
+runs the same statements and the same hashing; only `constant` supplies a value to compare against.
 
 Configuration is injected, stdout carries logs, and PostgreSQL holds durable state. The runtime is non-root, drops capabilities in Compose, and writes only under `/tmp`. Flyway coordination handles concurrent migration attempts, but operators must still review backward compatibility for rolling deployments.
 

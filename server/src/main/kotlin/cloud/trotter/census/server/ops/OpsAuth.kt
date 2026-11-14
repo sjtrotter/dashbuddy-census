@@ -149,7 +149,7 @@ internal fun isOpsHtmlPath(path: String): Boolean {
 internal fun opsLogPath(path: String): String {
     val segment = path.removePrefix("/ops").trimStart('/').substringBefore('/')
     return if (segment in setOf("clusters", "installs", "health", "alarms", "enrol", "ledger", "vocabulary", "lifecycle", "login", "logout", "pause",
-        "contributors", "quarantine")) "/ops/$segment" else "/ops"
+        "contributors", "quarantine", "anchor-check", "anchor-checks")) "/ops/$segment" else "/ops"
 }
 
 /** Application scope includes routing failures; CallLogging excludes these to produce exactly one INFO line. */
