@@ -28,6 +28,10 @@ sed -i "s/^CENSUS_HASH_PEPPER=\$/CENSUS_HASH_PEPPER=$(openssl rand -hex 32)/" .e
 
 It never enters the database, backups or logs. Startup refuses a missing or malformed pepper, and refuses a pepper other than the one the database was first keyed under. Never change it: a new pepper is a new hash domain and needs a migration plan. A restore runs with the current `.env`, so keep the pepper with your backups' recovery material; without it, a dump cannot be brought back up. The per-epoch pseudonym keys (#86) are stored in the database wrapped under it, so the pepper covers them too; they need no configuration.
 
+### Operator public key (optional)
+
+`CENSUS_OPERATOR_PUBLIC_KEY` (#81) is the key contributor "Ask the developer" items are sealed to. Generate the pair on your own machine with `java deploy/tools/QuarantineKey.java keygen <private-key-file>` (JDK 21+), keep the private key there, and put the printed public key in `.env`. Without it the quarantine refuses every item; everything else runs. See [Operator](OPERATOR.md#contributor-tier-81).
+
 ## Verify and pin a release
 
 Given a published release and its manifest digest, substitute the tag and digest below:

@@ -15,6 +15,13 @@ Public health/policy, identity, ingest and operator routes are implemented. Noti
 | GET | `/v1/me` | Implemented | Day-level identity and remaining budgets |
 | POST | `/v1/skeletons` | Implemented | Admit skeleton batches under the advertised policy |
 | POST | `/v1/health` | Implemented | Daily recognition-health reports |
+| GET, POST | `/v1/contributor/grant` | Implemented | Request a contributor grant, or read its state (#81) |
+| POST | `/v1/contributor/classes` | Implemented | Slot classes of one cluster variant, from the day's release (#81) |
+| POST | `/v1/contributor/review` | Implemented | One screen's confirmations and role tags (#81) |
+| POST | `/v1/contributor/gates` | Implemented | Whether the word gate is open for confirmed values (#81) |
+| POST | `/v1/contributor/words` | Implemented | Plaintext words for slots whose gate is open (#81) |
+| POST | `/v1/contributor/quarantine` | Implemented | "Ask the developer": the artifact, sealed to the operator (#81) |
+| GET, POST | `/ops/contributors…`, `/ops/quarantine…` | Implemented | Grants, gated words and the quarantine (operator; POST needs TOTP, #81) |
 | GET, POST | `/ops/pause` | Implemented | Read or set the upload pause switch (operator; POST needs TOTP) |
 | GET | `/ops/` | Implemented | Authenticated operator dashboard |
 
@@ -89,7 +96,7 @@ Rotation and withdrawal revalidate the current credential within their own trans
 
 Authentication captures one instant in `RequestInstantKey` for admission, the signature timestamp window, the last-seen UTC day, and the route's ledger day and `resetInSeconds`. Routes fall back to the clock only when the attribute is absent. Last-seen updates are monotonic, bound to the verified credential, and exclude revoked rows; `GET /v1/me` re-reads the stored row instead of echoing the attempted day. Counters and reset describe the same UTC day even at midnight.
 
-Withdrawal deletes `trusted_envelopes`, `health_daily`, `token_sightings_v5`, `cluster_sightings_v5`, `slot_sightings`, `ingest_ledger`, `nonces`, and `installs` in one transaction (`InstallStore.WITHDRAWAL_TABLES`; a test fails when a table that can hold the install is missing from it), and recomputes the `health_fleet_daily` rows the erased health still fed. The four content tables carry epoch pseudonyms, not the install ID (#86): the server finds the install's rows by recomputing its pseudonyms under every stored epoch key. Rows under a destroyed epoch key cannot be found, by the server or anyone else, and are past retention. Shared aggregate/catalog tables are retained; health days already folded into fleet totals hold no trace of the install.
+Withdrawal deletes `trusted_envelopes`, `health_daily`, `token_sightings_v5`, `cluster_sightings_v5`, `slot_sightings`, the contributor tier's `slot_confirmations`, `slot_roles`, `slot_release`, `quarantine_items` and `contributor_grants` (with their audit rows, #81), `ingest_ledger`, `nonces`, and `installs` in one transaction (`InstallStore.WITHDRAWAL_TABLES`; a test fails when a table that can hold the install is missing from it), and recomputes the `health_fleet_daily` rows the erased health still fed. The content tables carry epoch pseudonyms, not the install ID (#86): the server finds the install's rows by recomputing its pseudonyms under every stored epoch key. Rows under a destroyed epoch key cannot be found, by the server or anyone else, and are past retention. Shared aggregate/catalog tables are retained; health days already folded into fleet totals hold no trace of the install.
 
 "Delete my data" (`DELETE /v1/installs/me/data`, #79) runs the same erasure in one transaction, parent row locked first, except that the `installs` row and the ledger rows from today on stay: the credential keeps working, today's quota is not reset, and a batch sent before the deletion is answered `duplicate` rather than stored again. It writes the same hashed tombstone as a withdrawal and the same off-host journal notice, and copies the tombstone instant into `installs.erased_through`; startup replay leaves a generation alone when that marker covers its tombstone. After a restore from a backup older than the deletion the marker is missing, and replay erases that generation whole (the journal does not record which kind of erasure it was), so the app re-enrols. Shared cluster samples carry no install ID: the hashes only this install sent expire at the next lifecycle pass, as do vocabulary entries it alone held at k, before `completionDeadline`. Neither request is refused by the pause switch. Deletion is synchronous; the deadline preserves a future asynchronous contract. Nonces are single-use with a 300-second validity window. HMAC signatures remain replayable within their timestamp window; S4 batch admission will use the ledger for replay protection.
 
@@ -114,9 +121,107 @@ The counts come from `slot_sightings` (V9), not from token sightings, which do n
 
 Slot ids: `root/<child index>/…/<text key>` for a screen node's text field (`root/text`, `root/0/2/desc`), `windowTitle`, a notification field's wire name (`title`, `text`, `bigText`, `tickerText`, `subText`) and `action/<index>` for a notification action. The path is the tree as sent, anonymous wrappers included. A cluster's fingerprint splices anonymous wrappers away, so two raw trees of one cluster can put different nodes at one path; evidence is therefore partitioned by the **layout id**, a sha256 over the raw tree's shape (every node's class, id and child count, and for an anonymous wrapper its text keys), never its values. `SlotWalk.layout` holds its exact byte form.
 
-**Operator-only.** Classes are computed from the live rows for the operator views below; no app route serves them. Classes the app can read arrive with the contributor tier (#81), which must not answer from live evidence: an install could upload a guessed value and read whether it completed a value k installs share. The thresholds (`Policy.slotConstancy`) are server configuration and are not published in `/v1/policy`.
+**Operator views read the live rows.** The operator views below classify the live rows. A contributor's phone reads classes from the day's release instead, with its own rows left out (the contributor tier, #81, below): answered from live evidence, an install could upload a guessed value and read whether it completed a value k installs share. The thresholds (`Policy.slotConstancy`) are server configuration and are not published in `/v1/policy`.
 
 `GET /ops/clusters/{fingerprint}` carries `slots` (each variant's slots with class, installs and distinct hashes) and the cluster page shows them in a "Slot constancy" panel; cluster cards on `/ops/clusters/view` show the count of slots per class.
+
+## Contributor tier — #81
+
+A contributor is an opted-in install that reviews a screen before it is sent (ADR-0011 §15, gig.log#1625–#1627). It may
+confirm that a constant slot holds the app's own wording, tag what a field means, send that wording once the word gate
+opens, and send a screen to the operator's quarantine. Contributor status is separate from `trusted` and never permits
+`POST /v1/envelopes` (`403 not_trusted` as before). Nothing a contributor sends names the install: confirmations, role
+tags and quarantine items carry epoch tags (#86), and confirmed values are keyed hashes (#85).
+
+Every route below is authenticated like the other `/v1` routes (bearer and HMAC signature over the exact body, the
+install rate limit) and takes a JSON body decoded strictly (an unknown key is `400 bad_request`). Each request that
+writes checks the install and its grant in the transaction that writes. The pause switch refuses `review`, `words` and
+`quarantine` like any upload (`503 paused`); grants, classes and gates are not uploads.
+
+A **variant** names one cluster variant as the phone computed it, and is the scope of every per-slot request:
+
+```json
+{"kind":"screen","fingerprint":"<64 hex, the public fingerprint>","platformAppVersion":"8.0","hashDomain":1,"filterRev":1,"layout":"<64 hex, SlotWalk.layout>"}
+```
+
+`kind` is `screen` or `notification` (a notification's fingerprint is keyed on the server, as at ingest).
+`platformAppVersion` is the skeleton's version, or `unknown` when it carried none. `hashDomain` must be accepted and
+`filterRev` at or above the floor. A **slot** is a #80 slot id (`root/0/text`, `windowTitle`, `title`, `action/0`; at
+most 512 characters of `[A-Za-z0-9/]`). A **hash** is the slot's public census hash (16 lowercase hex), never keyed by
+the phone.
+
+| Endpoint | Body | Success |
+| --- | --- | --- |
+| `POST /v1/contributor/grant` | `{"eligible":true}`: a yes or no only, no counts | `200 {"status":"granted","grantedDay":"YYYY-MM-DD","expiresDay":"YYYY-MM-DD"}`. Idempotent while the grant is live; a new grant after it expires |
+| `GET /v1/contributor/grant` | none | `200 {"status":"granted"\|"expired"\|"revoked"\|"none", …days}` |
+| `POST /v1/contributor/classes` | `{"variant":{…}}` | `200 {"releaseDay":"YYYY-MM-DD","slots":[{"slot":"root/text","class":"constant"}]}` |
+| `POST /v1/contributor/review` | `{"variant":{…},"confirmations":[{"slot":…,"hash":…}],"roles":[{"slot":…,"role":"tip"}]}`, 1 to 256 items | `200 {"confirmations":N,"roles":N,"skipped":N}` |
+| `POST /v1/contributor/gates` | `{"variant":{…},"slots":[{"slot":…,"hash":…}]}`, 1 to 64 items | `200 {"slots":[{"slot":…,"hash":…,"open":false}]}` |
+| `POST /v1/contributor/words` | `{"variant":{…},"words":[{"slot":…,"hash":…,"word":"Pick up by"}]}`, 1 to 16 items | `200 {"words":[{"slot":…,"status":"accepted"}]}` |
+| `POST /v1/contributor/quarantine` | `{"artifact":"<base64url of the artifact bytes>","note":"might_contain_customer"}` (note optional) | `200 {"status":"quarantined","expiresDay":"YYYY-MM-DD"}` |
+
+**Grants.** A grant is issued to an install past the server's quarantine (enrolled at least 8 UTC days ago, the
+vocabulary rule) that sends `eligible: true`. It lasts 30 UTC days (`expiresDay` is the first day it no longer works).
+`eligible: false` stores nothing and answers `403 not_eligible`; a younger install gets `403 install_too_new`; while the
+operator's revocation stands, `403 grant_revoked`. Withdrawal deletes the install's grants; "delete my data" deletes the
+live grant (a revoked one stays, so a deletion cannot lift a revocation), and the phone requests again.
+
+**Classes** (#80's classes, released to contributors). Only `constant`, `regional`, `varying`, `withheld` and `shape`
+appear; an `unknown` slot (below k) is left out, and no hash or count is ever returned. They come from the day's
+release, never the live rows: once per UTC day the lifecycle sweep copies the counted slot rows into `slot_release`
+(one statement, one transaction), and a read is answered from that copy with the reader's own rows left out, found
+through its epoch tags in the same REPEATABLE READ snapshot as the install, grant and release checks. A release is
+served only on its own UTC day; until today's is built (the first sweep after midnight) the answer is `503
+release_unavailable` with `Retry-After: 3600`. An upload reaches another reader's answer the next day at the earliest,
+and never moves the uploader's own.
+
+**Review.** A confirmation says a slot holds the app's own wording; its hash is keyed and stored, never the word. A
+role is one of `total_pay`, `tip`, `base_pay`, `deadline`, `distance`, `item_count`, `customer_info`, `store_name`,
+`other`; anything else is `400`. An item is stored only when the install holds a live slot sighting of that value (a
+role: of that slot), so send the skeleton through `POST /v1/skeletons` first; other items count in `skipped`.
+Confirming the same value again in the same 30-day epoch changes nothing: one install counts once.
+
+**The word gate.** `gates` answers `open: true` for a (slot, hash) only when, in one snapshot: the asker itself
+confirmed that value; at least 2 non-trusted installs confirmed it within one epoch; and the slot is constant on that
+value, at k installs or more, both in today's release and in the live rows, each judged with the asker's own rows left
+out. A plaintext word is accepted only then. `words` answers per item: `accepted` (stored for the operator; never
+auto-approved), `gate_closed`, `hash_mismatch` (the word's census hash is not `hash`), or `not_chrome` (not 1 to 8
+words, no canonical form, longer than 128 characters, or a sensitive marker). A refused word is neither stored nor
+logged. An accepted word waits in `contributor_words` until the operator resolves its token (`POST
+/ops/vocabulary/resolve`, `source: "contributor"`) into the working vocabulary, or rejects it; the sweep also drops it
+after 30 days or once fewer than 2 confirmations stand behind it.
+
+**Quarantine.** The artifact is the outbound review exactly as the review screen described it, a JSON object:
+`{"skeleton":<one skeleton item, validated like an upload>,"confirmations":[…],"roles":[…],"words":[…]}` (the last three
+optional, shaped as above). A word in it must pass the same checks and find its gate open, else `409 gate_closed` and
+nothing is stored; any other invalid artifact is `422 bad_artifact`; decoded artifacts are at most 128 KiB. The note is
+one of `might_contain_customer`, `might_contain_my_info`, `unsure_what_screen`. The server seals the exact bytes to the
+operator's public key (`CENSUS_OPERATOR_PUBLIC_KEY`, [QuarantineCrypto](../server/src/main/kotlin/cloud/trotter/census/server/QuarantineCrypto.kt))
+and can never read them back; without that key it answers `503 quarantine_unconfigured`. The item expires at the start
+of `expiresDay` (3 UTC days after receipt, at most 72 hours) and is never clustered, counted, drafted from or backed up.
+
+**Errors and limits.** `401 unauthorized` for a stale credential; `403 grant_required` without a live grant; `429
+budget_exhausted` with `Retry-After` to UTC midnight when a daily quota is spent. Per install and UTC day, on its
+ledger row (so a data deletion and a new grant do not reset them): 200 class and gate items (`dailyReads`), 10 reviews,
+30 words, 3 quarantine items (`Policy.contributor`, server configuration, not published in `/v1/policy`). Every class,
+gate and word request writes an audit row: the grant id, the day, the kind, the cluster key, the layout and the item
+count; it goes with the grant or after 30 days. Logs carry counts and outcomes only.
+
+Operator routes (bearer or session; every POST also needs `X-Census-Totp`):
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /ops/contributors` | Grants: `grantId`, days, `live`, `readsToday` from the audit log |
+| `POST /ops/contributors/{grantId}/revoke` | `{"revoked":true}` revokes the grant and every live grant of its install and deletes the install's confirmations and role tags; `{"revoked":false}` clears a revocation. `204`, or `404` |
+| `GET /ops/contributors/words` | Words waiting for approval, with the `tokenHash`, `hashDomain` and `filterRev` the resolve route takes |
+| `GET /ops/quarantine` | Unexpired items: `id`, `expiresDay`, `note`, `bytes` |
+| `GET /ops/quarantine/view` | The quarantine page (the only page that lists items) |
+| `GET /ops/quarantine/{id}` | One item with its sealed `artifact` (base64), to open offline |
+| `POST /ops/quarantine/{id}/approve` | Body: the operator's sanitized copy, one skeleton item; validated like an upload and stored as a cluster sample with no sighting behind it; the item is deleted. `204`, `404`, or `422 bad_artifact` |
+| `POST /ops/quarantine/{id}/delete` | No body. `204` or `404` |
+
+The cluster page's slot table shows each slot's role tags as non-trusted installs per role (within one epoch), and the
+dashboard lists waiting contributor words.
 
 ## Skeleton v2: value shapes, click flags, notification actions — #78
 
