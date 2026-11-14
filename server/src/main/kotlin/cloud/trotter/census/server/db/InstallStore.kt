@@ -215,8 +215,12 @@ class InstallStore(private val db: Database, private val clock: Clock) {
                 // Delete/lock envelopes before clusters, the same lock order as retention and draft saves.
                 "trusted_envelopes" -> deleteEnvelopesAndClearDrafts("DELETE FROM trusted_envelopes WHERE install_id = ? RETURNING id", installId)
                 "health_daily" -> deleteHealthAndRefold(keys, installId)
-                in TAGGED_TABLES -> forInstallTags(keys, TaggedTable.entries.single { it.table == table }, installId,
-                    "DELETE FROM $table WHERE epoch = ? AND install_tag = ANY(?::bpchar[])")
+                in TAGGED_TABLES -> TaggedTable.entries.single { it.table == table }.erase(this, keys, installId)
+                // #81: a withdrawal ends every grant (its audit rows go with it); a data deletion ends the live grant
+                // but keeps a revoked one, so deleting data cannot lift the operator's revocation.
+                "contributor_grants" -> if (keepInstallFrom == null) {
+                    update("DELETE FROM contributor_grants WHERE install_id = ?", installId)
+                } else update("DELETE FROM contributor_grants WHERE install_id = ? AND revoked_day IS NULL", installId)
                 else -> update("DELETE FROM $table WHERE install_id = ?", installId)
             }
         }
@@ -546,8 +550,10 @@ class InstallStore(private val db: Database, private val clock: Clock) {
          * (#86), the rest by `install_id`. `PublicInstallsTest` fails when a table that can hold the install is missing.
          */
         val WITHDRAWAL_TABLES: List<String> = listOf(
-            "trusted_envelopes", "health_daily", "token_sightings_v5", "cluster_sightings_v5", "slot_sightings", "ingest_ledger", "nonces",
-            "installs",
+            "trusted_envelopes", "health_daily", "token_sightings_v5", "cluster_sightings_v5", "slot_sightings",
+            // #81: the contributor tier's tagged rows, then its grants (their audit rows cascade).
+            "slot_confirmations", "slot_roles", "slot_release", "quarantine_items", "contributor_grants",
+            "ingest_ledger", "nonces", "installs",
         )
 
         /** The content tables keyed by epoch tags instead of the install id (#86). */

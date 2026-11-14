@@ -200,7 +200,7 @@ class MigrationTest {
                 run("INSERT INTO health_daily (install_id, day, platform, platform_app_version, admitted, unknown, trips, rule_counts) VALUES (?, ?, 'doordash', '8.0', 1, 0, 0, '{}')", id, day)
             }
 
-            assertEquals(2, flyway().load().migrate().migrationsExecuted)  // V8, then V9 (#80) on the re-keyed rows
+            assertEquals(3, flyway().load().migrate().migrationsExecuted)  // V8, then V9 (#80) on the re-keyed rows, then V10 (#81)
             assertEquals(0, flyway().load().migrate().migrationsExecuted)
 
             fun strings(sql: String) = connection.createStatement().use { statement ->
@@ -210,7 +210,7 @@ class MigrationTest {
             assertEquals(listOf("${current - 1}", "$current"), strings("SELECT epoch::text FROM epoch_keys ORDER BY epoch"))
             assertEquals(emptyList<String>(), strings("""SELECT table_name FROM information_schema.tables WHERE table_schema = '$schema'
                 AND table_name IN ('token_sightings', 'cluster_sightings', 'vocabulary')"""))
-            assertEquals(listOf("ingest_ledger", "installs", "nonces", "trusted_envelopes"), strings("""SELECT table_name FROM information_schema.columns
+            assertEquals(listOf("contributor_grants", "ingest_ledger", "installs", "nonces", "trusted_envelopes"), strings("""SELECT table_name FROM information_schema.columns
                 WHERE table_schema = '$schema' AND column_name = 'install_id' ORDER BY table_name"""))
             val content = listOf("token_sightings_v5", "cluster_sightings_v5", "health_daily").flatMap { strings("SELECT row_to_json(t)::text FROM $it t") }
             assertEquals(emptySet<String>(), matches(content, listOf(plain, trusted, revoked, quarantined).map { it.toString() }))
@@ -272,7 +272,7 @@ class MigrationTest {
                 WHERE table_schema = '$schema' AND column_name = 'install_id' AND table_name IN ('token_sightings_v5', 'health_daily') ORDER BY table_name"""))
             assertEquals(before, connection.dumpRows(schema).toSet())
 
-            assertEquals(2, flyway(testKeying).load().migrate().migrationsExecuted)  // V8, then V9 (#80)
+            assertEquals(3, flyway(testKeying).load().migrate().migrationsExecuted)  // V8, then V9 (#80), then V10 (#81)
             assertEquals(1L, connection.installRows("token_sightings_v5", install, today))
         }
     }
@@ -430,15 +430,18 @@ class MigrationTest {
     }
 
     @Test
-    fun `empty database applies every migration and contains exactly seventeen application tables`() {
+    fun `empty database applies every migration and contains exactly twenty-five application tables`() {
         val flyway = Database.flyway(postgres.jdbcUrl, postgres.username, postgres.password, testKeying).load()
         // V1 schema, V2 classification, V3 tombstones, V4 notifications, V5 lifecycle, V6 keep less (#79), V7 keyed (#85),
-        // V8 epoch pseudonyms (#86, which drops the three pre-V5 tables), V9 slot sightings (#80).
-        assertEquals(9, flyway.migrate().migrationsExecuted)
+        // V8 epoch pseudonyms (#86, which drops the three pre-V5 tables), V9 slot sightings (#80), V10 the contributor tier (#81).
+        assertEquals(10, flyway.migrate().migrationsExecuted)
         val expected = setOf(
             "installs", "clusters", "cluster_samples", "trusted_envelopes", "health_daily", "health_fleet_daily", "ingest_ledger",
             "nonces", "withdrawals", "token_sightings_v5", "cluster_sightings_v5", "vocabulary_v5", "filter_floor", "ingest_pause",
             "hash_keying", "epoch_keys", "slot_sightings",
+            // #81
+            "contributor_grants", "contributor_reads", "slot_confirmations", "slot_roles", "slot_release_days", "slot_release",
+            "contributor_words", "quarantine_items",
         )
         DriverManager.getConnection(postgres.jdbcUrl, postgres.username, postgres.password).use { connection ->
             connection.createStatement().use { statement ->
@@ -492,13 +495,14 @@ class MigrationTest {
                     assertEquals(listOf("integer", null, "NO", "1"), columns["cluster_sightings_v5.count"])
                     assertEquals(listOf("character", "64", "NO", null), columns["hash_keying.key_check"])
                     // #86: content rows carry an epoch and an epoch tag; no content table carries an install id.
-                    for (table in listOf("token_sightings_v5", "cluster_sightings_v5", "health_daily", "slot_sightings")) {
+                    for (table in listOf("token_sightings_v5", "cluster_sightings_v5", "health_daily", "slot_sightings",
+                        "slot_confirmations", "slot_roles", "slot_release", "quarantine_items")) {
                         assertEquals(listOf("integer", null, "NO", null), columns["$table.epoch"], table)
                         assertEquals(listOf("character", "64", "NO", null), columns["$table.install_tag"], table)
                         assertEquals(null, columns["$table.install_id"], table)
                     }
                     assertEquals(listOf("bytea", null, "NO", null), columns["epoch_keys.wrapped"])
-                    assertEquals(setOf("installs", "nonces", "ingest_ledger", "trusted_envelopes"),
+                    assertEquals(setOf("installs", "nonces", "ingest_ledger", "trusted_envelopes", "contributor_grants"),
                         columns.keys.filter { it.endsWith(".install_id") }.map { it.substringBefore('.') }.toSet())
                 }
                 // #85: a fresh database records the pepper's check value, so a later boot with another pepper refuses.

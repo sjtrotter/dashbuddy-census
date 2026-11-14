@@ -111,14 +111,44 @@ internal class Tagger(private val connection: Connection, private val keying: Ha
  * The content tables keyed by epoch tags instead of the install id (#86). Each knows how to list the objects stored
  * under one epoch, from which one install's tags in that epoch are recomputed.
  */
-internal enum class TaggedTable(val table: String, val purpose: TagPurpose, private val objects: String?) {
+internal enum class TaggedTable(
+    val table: String, val purpose: TagPurpose, private val objects: String?,
+    /** Runs before this table's rows of one install are erased ([eraseTagged]). */
+    private val beforeErase: String? = null,
+) {
     HEALTH("health_daily", TagPurpose.HEALTH, null),
     TOKENS("token_sightings_v5", TagPurpose.TOKEN,
         "SELECT DISTINCT hash_domain::text || ':' || filter_rev::text || ':' || token_hash FROM token_sightings_v5 WHERE epoch = ?"),
     CLUSTERS("cluster_sightings_v5", TagPurpose.CLUSTER,
         "SELECT DISTINCT fingerprint::text FROM cluster_sightings_v5 WHERE epoch = ?"),
     SLOTS("slot_sightings", TagPurpose.SLOT, "SELECT DISTINCT ${SlotObject.SQL} FROM slot_sightings WHERE epoch = ?"),
+
+    /** #81: a contributor's confirmations, keyed like its slot sightings under their own purpose. */
+    CONFIRMATIONS("slot_confirmations", TagPurpose.CONFIRMATION,
+        "SELECT DISTINCT ${SlotObject.SQL} FROM slot_confirmations WHERE epoch = ?"),
+
+    /** #81: a contributor's role tags. */
+    ROLES("slot_roles", TagPurpose.ROLE, "SELECT DISTINCT ${SlotObject.sql("role")} FROM slot_roles WHERE epoch = ?"),
+
+    /**
+     * #81: the day's released copy of slot sightings, under the slot sightings' own tags. The release is built in one
+     * transaction holding an EXCLUSIVE lock on this table ([cloud.trotter.census.server.db.SlotRelease]); erasure takes
+     * ROW EXCLUSIVE first, so its delete runs either before the build starts (the build then copies nothing of the
+     * install) or after the build commits (the delete then sees the copied rows): an erased install never survives in
+     * a release.
+     */
+    RELEASE("slot_release", TagPurpose.SLOT, "SELECT DISTINCT ${SlotObject.SQL} FROM slot_release WHERE epoch = ?",
+        beforeErase = "LOCK TABLE slot_release IN ROW EXCLUSIVE MODE"),
+
+    /** #81: "Ask the developer" items; the object is the item id. */
+    QUARANTINE("quarantine_items", TagPurpose.QUARANTINE, "SELECT id::text FROM quarantine_items WHERE epoch = ?"),
     ;
+
+    /** Deletes [installId]'s rows of this table under every key in [keys] (#86, #81). */
+    fun erase(connection: Connection, keys: List<EpochKey>, installId: UUID): Int {
+        beforeErase?.let { sql -> connection.createStatement().use { it.execute(sql) } }
+        return connection.forInstallTags(keys, this, installId, "DELETE FROM $table WHERE epoch = ? AND install_tag = ANY(?::bpchar[])")
+    }
 
     /**
      * [installId]'s tags in this table under [key], handed to [block] [chunkSize] at a time: one per object stored in
@@ -185,20 +215,22 @@ internal fun Connection.forInstallTags(
 }
 
 /**
- * Deletes [installId]'s token, cluster and slot (#80) sightings under every key in [keys] (#86): withdrawal, data deletion and
- * revocation. The caller holds the install row lock, so no new sighting of it can appear meanwhile.
+ * Deletes [installId]'s rows in every tagged table but health under every key in [keys] (#86): its token, cluster and
+ * slot (#80) sightings and its contributor rows (#81: confirmations, role tags, released slot rows, quarantine items).
+ * Install revocation. The caller holds the install row lock, so no new row of it can appear meanwhile.
  */
 internal fun Connection.deleteSightings(keys: List<EpochKey>, installId: UUID): Map<String, Int> =
-    listOf(TaggedTable.TOKENS, TaggedTable.CLUSTERS, TaggedTable.SLOTS).associate { table ->
-        table.table to forInstallTags(keys, table, installId,
-            "DELETE FROM ${table.table} WHERE epoch = ? AND install_tag = ANY(?::bpchar[])")
-    }
+    (TaggedTable.entries - TaggedTable.HEALTH).associate { table -> table.table to table.erase(this, keys, installId) }
 
-/** Marks [installId]'s sightings under [keys] trusted or not, with the installs row in the same transaction (#86). */
+/**
+ * Marks [installId]'s sightings, confirmations and role tags (#81) under [keys] trusted or not, with the installs row in
+ * the same transaction (#86). A release holds only counted, non-trusted rows, so trusting an install also removes its
+ * rows from the day's release; untrusting adds them back at the next release.
+ */
 internal fun Connection.markSightingsTrusted(keys: List<EpochKey>, installId: UUID, trusted: Boolean): Int =
-    listOf(TaggedTable.TOKENS, TaggedTable.CLUSTERS, TaggedTable.SLOTS).sumOf { table ->
+    listOf(TaggedTable.TOKENS, TaggedTable.CLUSTERS, TaggedTable.SLOTS, TaggedTable.CONFIRMATIONS, TaggedTable.ROLES).sumOf { table ->
         forInstallTags(keys, table, installId,
             "UPDATE ${table.table} SET trusted = ? WHERE epoch = ? AND install_tag = ANY(?::bpchar[])") { epoch, tags ->
             arrayOf(trusted, epoch, tags)
         }
-    }
+    } + if (trusted) TaggedTable.RELEASE.erase(this, keys, installId) else 0

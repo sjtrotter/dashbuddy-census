@@ -25,6 +25,9 @@ internal object SlotObject {
 
     const val SQL: String = "fingerprint::text || ':' || hash_domain::text || ':' || filter_rev::text || ':' || layout::text" +
         " || ':' || slot || ':' || value || ':' || platform_app_version"
+
+    /** [SQL] over a table whose value column is [column] (#81: a role tag's `role`). */
+    fun sql(column: String): String = SQL.replace("|| value ||", "|| $column ||")
 }
 
 /**
@@ -34,9 +37,12 @@ internal object SlotObject {
 @Serializable
 data class SlotVariant(val platformAppVersion: String, val hashDomain: Int, val filterRev: Int, val layout: String)
 
-/** One slot's class (#80) with the installs and distinct hashes of the epoch it was judged on: operator views only. */
+/**
+ * One slot's class (#80) with the installs and distinct hashes of the epoch it was judged on, and (#81) the role tags
+ * contributors gave it, as non-trusted installs per role in the epoch where most tagged it: operator views only.
+ */
 @Serializable
-data class SlotReading(val slot: String, val slotClass: SlotClass, val installs: Int, val hashes: Int)
+data class SlotReading(val slot: String, val slotClass: SlotClass, val installs: Int, val hashes: Int, val roles: Map<String, Int> = emptyMap())
 
 /** One cluster variant's slots (#80), sorted by slot id. */
 @Serializable
@@ -105,8 +111,8 @@ internal fun Policy.classify(counts: SlotCounts): SlotClass =
 /**
  * The operator's live read (#80): every variant's slot readings for the stored cluster keys in [fingerprints], from the
  * rows as they stand now. Support is counted per variant and slot within ONE epoch, as vocabulary k is (#86): distinct
- * epoch tags of non-trusted, out-of-quarantine rows. Operator views only: no app route serves classes until the contributor
- * tier (#81).
+ * epoch tags of non-trusted, out-of-quarantine rows. Operator views only: a contributor's phone reads the day's release,
+ * with its own rows left out ([SlotRelease], #81), never these live readings.
  */
 internal fun Connection.slotReadings(policy: Policy, today: LocalDate, fingerprints: List<String>): Map<String, List<SlotVariantReading>> {
     if (fingerprints.isEmpty()) return emptyMap()
@@ -153,3 +159,28 @@ internal fun Connection.slotReadings(policy: Policy, today: LocalDate, fingerpri
 internal fun Policy.countedSlotRows(): String = """NOT trusted AND (counts_from IS NULL OR counts_from <= ?)
     AND last_day + ${retention.clusterSightingsDays} > ?
     AND hash_domain IN (${acceptedHashDomains.joinToString(",")}) AND filter_rev >= $minimumFilterRev"""
+
+/**
+ * #81: the role tags of one cluster, per variant and slot: for each role, the distinct non-trusted installs that gave it
+ * within one live epoch (the epoch where most did; never a sum across epochs), from rows inside retention.
+ */
+internal fun Connection.slotRoles(policy: Policy, today: LocalDate, fingerprint: String): Map<Pair<SlotVariant, String>, Map<String, Int>> {
+    val live = Epochs.live(today)
+    val counts = HashMap<Pair<SlotVariant, String>, MutableMap<String, Int>>()
+    prepareStatement(
+        """SELECT platform_app_version, hash_domain, filter_rev, layout, slot, role, max(installs) FROM (
+                SELECT platform_app_version, hash_domain, filter_rev, layout, slot, role, epoch, count(DISTINCT install_tag) AS installs
+                FROM slot_roles WHERE fingerprint = ? AND NOT trusted AND last_day + ? > ? AND epoch BETWEEN ? AND ?
+                GROUP BY platform_app_version, hash_domain, filter_rev, layout, slot, role, epoch
+            ) per_epoch GROUP BY platform_app_version, hash_domain, filter_rev, layout, slot, role""",
+    ).use { statement ->
+        listOf(fingerprint, policy.contributor.retentionDays, today, live.first, live.last).forEachIndexed { index, value -> statement.setObject(index + 1, value) }
+        statement.executeQuery().use { rows ->
+            while (rows.next()) {
+                val variant = SlotVariant(rows.getString(1), rows.getInt(2), rows.getInt(3), rows.getString(4))
+                counts.getOrPut(variant to rows.getString(5)) { sortedMapOf() }[rows.getString(6)] = rows.getInt(7)
+            }
+        }
+    }
+    return counts
+}

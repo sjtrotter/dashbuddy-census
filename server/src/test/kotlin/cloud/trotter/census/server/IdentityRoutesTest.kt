@@ -19,6 +19,7 @@ import cloud.trotter.census.server.db.LedgerRow
 import cloud.trotter.census.server.db.MutationOutcome
 import cloud.trotter.census.server.db.TokenObject
 import cloud.trotter.census.server.db.installRows
+import cloud.trotter.census.server.db.seedContributorRows
 import cloud.trotter.census.server.db.testTag
 import cloud.trotter.census.server.db.update
 import cloud.trotter.census.server.ingest.BudgetPolicy
@@ -770,6 +771,8 @@ class IdentityRoutesTest {
         val slot = connection.testTag(TagPurpose.SLOT, install, cloud.trotter.census.server.db.SlotObject.of(fingerprint, cloud.trotter.census.server.db.SlotVariant("1.0", 1, 1, "a".repeat(64)), "root/text", "present"), day)
         connection.update("INSERT INTO slot_sightings (fingerprint, platform_app_version, hash_domain, filter_rev, layout, slot, value, epoch, install_tag, trusted, last_day) VALUES (?, '1.0', 1, 1, repeat('a', 64), 'root/text', 'present', ?, ?, false, ?)",
             fingerprint, slot.epoch, slot.tag, day)
+        // #81: the contributor tier's rows.
+        connection.seedContributorRows(install, fingerprint, day)
     }
 
     private fun tableCounts(id: String): Map<String, Int> = sql { connection ->

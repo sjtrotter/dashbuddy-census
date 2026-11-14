@@ -271,7 +271,7 @@ class PublicInstallsTest : LifecycleTestDatabase() {
         }
         // #86: the install id stays only where the install itself is needed (authentication, quotas, the operator's own
         // envelopes); every content table is keyed by epoch tags, and erasure reaches both kinds.
-        assertEquals(setOf("installs", "nonces", "ingest_ledger", "trusted_envelopes"), keyed)
+        assertEquals(setOf("installs", "nonces", "ingest_ledger", "trusted_envelopes", "contributor_grants"), keyed)
         assertEquals(InstallStore.WITHDRAWAL_TABLES.toSet(), keyed + InstallStore.TAGGED_TABLES)
         assertEquals(InstallStore.WITHDRAWAL_TABLES - "installs", InstallStore.DATA_TABLES)
     }
@@ -492,6 +492,8 @@ class PublicInstallsTest : LifecycleTestDatabase() {
         ) { it.getLong(1) }!!
         connection.update("UPDATE clusters SET draft = jsonb_build_object('envelopeId', ?::text), draft_day = ? WHERE fingerprint = ?", envelope.toString(), day, fingerprint)
         connection.update("INSERT INTO ingest_ledger (install_id, day) VALUES (?, ?)", id, day.minusDays(1))
+        // #81: the contributor tier's rows go with the data too.
+        connection.seedContributorRows(id, fingerprint, day)
     }
 
     private fun rootLogs(): ListAppender<ILoggingEvent> = ListAppender<ILoggingEvent>().apply {
