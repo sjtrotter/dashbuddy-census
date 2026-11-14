@@ -81,36 +81,84 @@ object ChromeShape {
     }
 
     /**
-     * A name, address or contact shape in one canonical variant (words separated by one ASCII space):
-     * - an initial: a one-letter capital word, optionally with a period, after a word that starts with a capital, when
-     *   it ends the value, carries the period, or is not `A` or `I` (`Brandon C`, `Jane S. is here`; `Plan B` is refused
-     *   too, which is the accepted cost);
-     * - a customer lead-in with anything after it (`Deliver to Sam`; `Deliver to` alone is chrome);
-     * - a street suffix ending a value of two or more words (`Main St`, `Oak Avenue`);
-     * - an `@` (an e-mail address) or a square bracket (a redaction mask).
+     * A name, address, contact or code shape in one case variant. Punctuation never hides one (Sol round 1, S1): every
+     * predicate reads words, not the raw string, where a **word** is a run of letters that may carry an inner
+     * apostrophe or hyphen (`Let's`, `O'Brien`, `Mary-Jo`) and every other character (space, `,` `:` `-` `!` `(`…)
+     * separates words, and a **letter run** splits at every non-letter. Refused:
+     * - an initial: a one-letter capital word after a word that starts with a capital, when it ends the value, is
+     *   followed by a period, or is not one of [SHORT_WORDS] (`Brandon C`, `brandon c,` through its title case,
+     *   `Brandon, C`, `Jane S. is here`; `Plan B` is refused too, the accepted cost);
+     * - a lead-in from [LEAD_INS] followed by any further letter run, whatever separates them (`Deliver to Sam`,
+     *   `Deliver to: Sam`, `Pick-up for Riley`, `Gate code: KQZX`); the lead-in alone (`Deliver to`) is chrome;
+     * - a street suffix as the last letter run of two or more (`Main St!`, `Oak Avenue.`), or an abbreviated one between
+     *   two runs (`Main St Springfield`);
+     * - an e-mail or web address (an `@`, or a dot between a letter and a common top-level domain) and a square bracket
+     *   (a redaction mask).
+     * Digits never reach here ([wordsCanonical] refuses any), so phone numbers, PINs and codes with digits are refused
+     * there, punctuation or not.
      */
     internal fun refusedShape(value: String): Boolean {
-        if (value.any { it == '@' || it == '[' || it == ']' }) return true
-        val words = value.split(' ')
-        val folded = CaseFold.fold(value)
-        if (LEAD_INS.any { folded.startsWith("$it ") }) return true
-        if (words.size >= 2 && CaseFold.fold(words.last().trimEnd('.', ',')) in STREET_SUFFIXES) return true
+        if (value.any { it == '@' || it == '[' || it == ']' } || DOMAIN.containsMatchIn(value)) return true
+        val runs = letterRuns(CaseFold.fold(value))
+        if (LEAD_INS.any { lead -> runs.size > lead.size && runs.subList(0, lead.size) == lead }) return true
+        if (runs.size >= 2 && runs.last() in STREET_SUFFIXES) return true
+        if ((1 until runs.lastIndex).any { runs[it] in STREET_ABBREVIATIONS }) return true
+        val words = words(value)
         return words.indices.any { index ->
-            val core = words[index].removeSuffix(".")
-            index > 0 && core.length == 1 && core[0].isUpperCase() && words[index - 1].firstOrNull()?.isUpperCase() == true &&
-                (index == words.lastIndex || words[index].endsWith('.') || core[0] !in setOf('A', 'I'))
+            val (word, end) = words[index]
+            index > 0 && word.length == 1 && word[0].isUpperCase() && words[index - 1].first[0].isUpperCase() &&
+                (index == words.lastIndex || value.getOrNull(end) == '.' || word[0] !in SHORT_WORDS)
         }
     }
 
-    /** Lead-ins whose tail is a customer or a place on the delivery apps' screens; case-folded. */
-    private val LEAD_INS = listOf(
+    /** The words of [value] with the index just past each ([refusedShape]). */
+    private fun words(value: String): List<Pair<String, Int>> {
+        val out = ArrayList<Pair<String, Int>>()
+        var start = -1
+        fun close(end: Int) {
+            if (start < 0) return
+            var from = start
+            var to = end
+            while (from < to && value[from] in JOINERS) from++
+            while (to > from && value[to - 1] in JOINERS) to--
+            if (to > from) out += value.substring(from, to) to to
+            start = -1
+        }
+        for (i in value.indices) {
+            if (value[i].isLetter() || value[i] in JOINERS) { if (start < 0) start = i } else close(i)
+        }
+        close(value.length)
+        return out
+    }
+
+    private fun letterRuns(value: String): List<String> = value.split(NON_LETTERS).filter { it.isNotEmpty() }
+
+    private val NON_LETTERS = Regex("[^\\p{L}]+")
+
+    /** Characters that join letters into one word ([words]): apostrophes and the hyphen. */
+    private const val JOINERS = "'\u2019-"
+
+    /** One-letter words that are words, not initials, when another word follows: English, Spanish and French. */
+    private val SHORT_WORDS = setOf('A', 'I', 'Y', 'O', 'E', 'U', '\u00C0')
+
+    /** An e-mail or web address without its `@`: a letter, a dot and a common top-level domain. */
+    private val DOMAIN = Regex("\\p{L}\\.(?:com|net|org|edu|gov|io|co|us|ca|mx|info)\\b", RegexOption.IGNORE_CASE)
+
+    /**
+     * Lead-ins whose tail is a customer, a place or a code on the delivery apps' screens, as case-folded letter runs.
+     */
+    private val LEAD_INS: List<List<String>> = listOf(
         "deliver to", "delivering to", "drop off for", "dropoff for", "pick up for", "pickup for", "order for", "orders for",
-        "message from",
-    )
+        "message from", "gate code", "door code", "access code", "entry code", "passcode", "pin", "buzzer", "buzz",
+        "apt", "apartment", "suite", "unit",
+    ).map { it.split(' ') }
 
     /** Street-type words that end an address line; case-folded. */
     private val STREET_SUFFIXES = setOf(
         "street", "st", "avenue", "ave", "road", "rd", "boulevard", "blvd", "drive", "dr", "lane", "ln", "court", "ct",
         "parkway", "pkwy", "highway", "hwy",
     )
+
+    /** The abbreviated suffixes, which an address line carries between a street name and a city. */
+    private val STREET_ABBREVIATIONS = setOf("st", "ave", "rd", "blvd", "dr", "ln", "ct", "pkwy", "hwy")
 }

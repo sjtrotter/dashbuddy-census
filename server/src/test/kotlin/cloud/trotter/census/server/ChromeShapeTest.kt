@@ -10,7 +10,9 @@ import org.junit.jupiter.api.Test
 /** #82: the anchor check's candidate filter, its case variants, and the keyed compare. */
 class ChromeShapeTest {
     @Test fun `app wording passes the filter in its canonical form`() {
-        for (text in listOf("Heads up", "Order details", "Got it!", "Take a photo", "Can I help", "Return to dash", "Deliver to")) {
+        for (text in listOf("Heads up", "Order details", "Got it!", "Take a photo", "Can I help", "Return to dash", "Deliver to",
+            "Deliver to:", "Pickup for", "Let's go", "Don't show again", "Check-in", "Accept Order", "Pick up by", "Test drive now",
+            "Entrega y recogida", "Riley Smith")) {
             assertEquals(text, ChromeShape.anchorCandidate(text), text)
         }
         assertEquals("Heads up", ChromeShape.anchorCandidate("  Heads  up "))
@@ -27,7 +29,13 @@ class ChromeShapeTest {
             // Contact and mask shapes.
             "jane@example.com", "[redacted]",
             // A dasher-sensitive marker, an over-long value, body text, nothing.
-            "Bank Account", "DasherDirect balance", "a".repeat(41), "one two three four five six seven eight nine", "", " ", "​",
+            "Bank Account", "DasherDirect balance", "a".repeat(41), "one two three four five six seven eight nine", "", " ", "\u200B",
+            // Sol round 1, S1: punctuation never hides a shape.
+            "brandon c,", "Brandon C!", "Brandon, C", "brandon,c", "(Jane S.)", "Jane S, here", "Mary-Jo K.", "O'Brien M", "Riley M:",
+            "Deliver to: Sam", "Deliver to - Sam", "DELIVER TO,SAM", "deliver-to sam", "Pick-up for Riley", "Message from: Ana",
+            "Main St!", "Main St.", "main st,", "Oak Ave, Springfield", "Main St Springfield", "Elm Dr.",
+            "jane at example.com", "Jane (example.org)", "(555) 123-4567", "+1 555", "PIN: 4821", "Pin: KQZX", "Gate code: KQZX",
+            "Gate-code KQZX", "Apt B", "Suite: Rear", "Unit, Back",
         )
         for (text in refused) assertNull(ChromeShape.anchorCandidate(text), text)
         assertNull(ChromeShape.anchorCandidate("x".repeat(ChromeShape.MAX_TEXT_LENGTH + 1)))
