@@ -133,7 +133,7 @@ object ChromeShape {
 
     private fun letterRuns(value: String): List<String> = value.split(NON_LETTERS).filter { it.isNotEmpty() }
 
-    private val NON_LETTERS = Regex("[^\\p{L}]+")
+    private val NON_LETTERS = Regex("[^\\pL]+")
 
     /** Characters that join letters into one word ([words]): apostrophes and the hyphen. */
     private const val JOINERS = "'\u2019-"
@@ -142,7 +142,7 @@ object ChromeShape {
     private val SHORT_WORDS = setOf('A', 'I', 'Y', 'O', 'E', 'U', '\u00C0')
 
     /** An e-mail or web address without its `@`: a letter, a dot and a common top-level domain. */
-    private val DOMAIN = Regex("\\p{L}\\.(?:com|net|org|edu|gov|io|co|us|ca|mx|info)\\b", RegexOption.IGNORE_CASE)
+    private val DOMAIN = Regex("\\pL\\.(?:com|net|org|edu|gov|io|co|us|ca|mx|info)\\b", RegexOption.IGNORE_CASE)
 
     /**
      * Lead-ins whose tail is a customer, a place or a code on the delivery apps' screens, as case-folded letter runs.
