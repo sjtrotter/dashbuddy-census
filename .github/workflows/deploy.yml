@@ -15,6 +15,10 @@ concurrency:
     cancel-in-progress: false
 jobs:
     deploy:
+        # gig.log#1646: a protected environment with a required reviewer; the AWS deploy role trusts only this
+        # environment's OIDC subject (deploy/aws/github_oidc.tf), so only a job the reviewer admits to `production`
+        # can assume it.
+        environment: production
         runs-on: ubuntu-latest
         timeout-minutes: 25
         steps:

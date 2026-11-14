@@ -22,8 +22,9 @@ resource "aws_iam_role" "github_deploy" {
         StringLike = {
           "token.actions.githubusercontent.com:sub" = [
             # GitHub OIDC docs: repositories created after July 15, 2026 use repo:OWNER@OWNER-ID/REPO@REPO-ID.
-            "repo:${local.github_owner}@${var.github_owner_id}/${local.github_repo}@${var.github_repository_id}:ref:refs/heads/main",
-            "repo:${local.github_owner}@${var.github_owner_id}/${local.github_repo}@${var.github_repository_id}:ref:refs/tags/v*",
+            # gig.log#1646: only a job in the protected `production` environment (required reviewer; deployment
+            # refs main and v* tags) may assume this role. A job that names an environment gets this subject.
+            "repo:${local.github_owner}@${var.github_owner_id}/${local.github_repo}@${var.github_repository_id}:environment:production",
           ]
         }
       }
