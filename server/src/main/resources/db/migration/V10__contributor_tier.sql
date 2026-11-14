@@ -70,8 +70,19 @@ CREATE TABLE slot_roles (
 );
 CREATE INDEX slot_roles_tag_idx ON slot_roles (install_tag);
 
--- The day's released slot evidence: a copy of the counted slot_sightings rows, taken in one statement when the day's
--- release is built, served on that UTC day only and deleted after it. Classes read by contributors come from here,
+-- Sol S6: a release built on day D holds the slot rows as they stood at the end of D-1, so an upload reaches a
+-- release the next day at the earliest. Each slot sighting therefore keeps the receipt day it was first written
+-- (first_received), the receipt day of its latest write (received_day), and its last_day as it stood before that
+-- receipt day (prev_last_day). A row's state before D is: absent if first_received >= D, else prev_last_day when
+-- received_day >= D, else last_day. A presence row's last_day is the newest of its values', and each value row keeps
+-- its own, so the state before D keeps a value behind every presence (Sol N3). Rows written before V10 take their
+-- last observation day as both receipt days (an observation is never later than its receipt).
+ALTER TABLE slot_sightings ADD COLUMN first_received date, ADD COLUMN received_day date, ADD COLUMN prev_last_day date NULL;
+UPDATE slot_sightings SET first_received = last_day, received_day = last_day;
+ALTER TABLE slot_sightings ALTER COLUMN first_received SET NOT NULL, ALTER COLUMN received_day SET NOT NULL;
+
+-- The day's released slot evidence: a copy of the slot_sightings rows counted as they stood at the end of the previous
+-- day, taken in one statement when the day's release is built, served on that UTC day only and deleted after it. Classes read by contributors come from here,
 -- with the reader's own rows left out (found through its epoch tags), never from live rows. Erasure deletes an
 -- install's copied rows through the same tags as its slot sightings.
 CREATE TABLE slot_release_days (

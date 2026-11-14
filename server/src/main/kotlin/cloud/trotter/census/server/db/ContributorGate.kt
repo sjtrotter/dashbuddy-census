@@ -8,6 +8,7 @@ import cloud.trotter.census.server.Epochs
 import cloud.trotter.census.server.HashKeying
 import cloud.trotter.census.server.Policy
 import cloud.trotter.census.server.SlotClass
+import cloud.trotter.census.server.SlotValues
 import cloud.trotter.census.server.TagPurpose
 import cloud.trotter.census.server.db.SlotRelease.classWithValue
 import cloud.trotter.census.server.db.SlotRelease.leaveOneOut
@@ -86,7 +87,28 @@ internal object ContributorGate {
     }
 
     /**
+     * Whether [reader] holds a live sighting of any of [slots] in [scope] (Sol S3): one query over its presence tags
+     * under each live key. A reader is answered only about a variant (or slot) it has itself uploaded.
+     */
+    fun Connection.sightedAny(keys: Collection<EpochKey>, reader: UUID, scope: SlotScope, slots: Collection<String>, today: LocalDate, days: Int): Boolean {
+        if (slots.isEmpty() || keys.isEmpty()) return false
+        val tags = keys.flatMap { key ->
+            slots.map { key.tag(TagPurpose.SLOT, reader, SlotObject.of(scope.fingerprint, scope.variant, it, SlotValues.PRESENT)) }
+        }
+        val array = createArrayOf("text", tags.toTypedArray())
+        try {
+            return select(
+                "SELECT 1 FROM slot_sightings WHERE fingerprint = ? AND install_tag = ANY(?::bpchar[]) AND last_day + ? > ? LIMIT 1",
+                scope.fingerprint, array, days, today,
+            ) { true } ?: false
+        } finally {
+            array.free()
+        }
+    }
+
+    /**
      * The gate (#81, ADR-0011 §15): open for [value] in [slot] only when, in the caller's snapshot,
+     * 0. [reader] holds a live sighting of the slot (Sol S3),
      * 1. [reader] itself confirmed that value (so the gate answers no one about values they have not confirmed),
      * 2. at least [cloud.trotter.census.server.ContributorPolicy.gateConfirmations] independent, non-trusted installs
      *    confirmed it within ONE epoch (one install's confirmations are one row per epoch, so it counts once), and
@@ -98,6 +120,7 @@ internal object ContributorGate {
         policy: Policy, keys: Map<Int, EpochKey>, reader: UUID, today: LocalDate, scope: SlotScope, slot: String, value: String,
     ): Boolean {
         val days = policy.contributor.retentionDays
+        if (!sightedAny(keys.values, reader, scope, listOf(slot), today, policy.retention.clusterSightingsDays)) return false
         if (!ownRow(TaggedTable.CONFIRMATIONS, keys.values, reader, scope, slot, value, today, days)) return false
         if (confirmations(policy, today, scope, slot, value) < policy.contributor.gateConfirmations) return false
         if (!releaseDay(today)) return false

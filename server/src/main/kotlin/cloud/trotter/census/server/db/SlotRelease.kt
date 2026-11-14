@@ -14,12 +14,13 @@ import java.util.UUID
  * The slot classes a contributor's phone may read (#81, ADR-0011 §14 and §15), built so that no single install can
  * move an answer it can read (the oracle #80's review found, Sol S1 and N1 to N4).
  *
- * - **The day's release.** Once per UTC day the lifecycle sweep copies the counted slot rows ([countedSlotRows] on
- *   that day, live epochs only) into `slot_release`, in ONE statement inside a transaction that holds the table's
- *   EXCLUSIVE lock, and marks the day built in the same transaction. Rows received after the copy wait for the next
- *   day's release, so an upload reaches another install's answer a day later at the earliest. Every row copied is a
- *   live, counted row on its day: an install that saw a slot holds a value row for it (a presence row's `last_day` is
- *   the newest of its values', and trust, quarantine and the variant are shared), so the regional lower bound of
+ * - **The day's release.** Once per UTC day the lifecycle sweep copies the slot rows as they stood at the end of the
+ *   previous day, counted on this day ([countedSlotRows], live epochs only), into `slot_release`, in ONE statement
+ *   inside a transaction that holds the table's EXCLUSIVE lock, and marks the day built in the same transaction. A row
+ *   first received today is left out and a row written again today counts with its earlier last day (V10, Sol S6), so
+ *   an upload reaches another install's answer the next day at the earliest, whenever the build runs. In that state an
+ *   install that saw a slot holds a value row for it (a presence row's last day is the newest of its values', and
+ *   trust, quarantine and the variant are shared), so the regional lower bound of
  *   [cloud.trotter.census.server.SlotEvidence.of] holds on released data (Sol N3).
  * - **Served on its day only.** A read accepts the release only when it is today's ([releaseDay]); yesterday's is
  *   refused from midnight even if today's build failed, and the sweep deletes it (Sol N2). A release counts only rows
@@ -46,14 +47,20 @@ internal object SlotRelease {
         update("DELETE FROM slot_release_days WHERE release_day <> ?", today)
         update("INSERT INTO slot_release_days (release_day) VALUES (?)", today)
         val live = Epochs.live(today)
+        // Sol S6: the rows as they stood at the end of yesterday (V10): none first received today, and a row written
+        // again today counted with the last day it had before.
         return update(
             """INSERT INTO slot_release (release_day, fingerprint, platform_app_version, hash_domain, filter_rev, layout, slot,
                     value, epoch, install_tag)
                 SELECT ?, fingerprint, platform_app_version, hash_domain, filter_rev, layout, slot, value, epoch, install_tag
-                FROM slot_sightings WHERE ${policy.countedSlotRows()} AND epoch BETWEEN ? AND ?""",
-            today, today, today, live.first, live.last,
+                FROM slot_sightings WHERE first_received < ? AND ${policy.countedSlotRows(BEFORE_TODAY_LAST_DAY)}
+                AND epoch BETWEEN ? AND ?""",
+            today, today, today, today, today, live.first, live.last,
         )
     }
+
+    /** A slot row's last day as it stood before the receipt day bound to the first parameter (V10, Sol S6). */
+    private const val BEFORE_TODAY_LAST_DAY = "(CASE WHEN received_day >= ? THEN prev_last_day ELSE last_day END)"
 
     /** One released or live row a contributor read is answered from. */
     class Row(val slot: String, val epoch: Int, val value: String, val tag: String)

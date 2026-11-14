@@ -63,7 +63,7 @@ internal class SlotSighting(val item: CensusSkeletonDto, val variant: SlotVarian
  */
 internal fun Connection.recordSlotSightings(
     tagger: Tagger, installId: UUID, trusted: Boolean, countsFrom: LocalDate?, fingerprint: String,
-    sightings: List<SlotSighting>, slotLimit: Int,
+    sightings: List<SlotSighting>, slotLimit: Int, received: LocalDate,
 ) {
     data class Row(val variant: SlotVariant, val epoch: Int, val slot: String, val value: String)
     val lastDays = LinkedHashMap<Row, LocalDate>()
@@ -78,8 +78,13 @@ internal fun Connection.recordSlotSightings(
     var written = 0
     prepareStatement(
         """INSERT INTO slot_sightings (fingerprint, platform_app_version, hash_domain, filter_rev, layout, slot, value, epoch,
-                install_tag, trusted, counts_from, last_day) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                install_tag, trusted, counts_from, last_day, first_received, received_day)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (fingerprint, platform_app_version, hash_domain, filter_rev, layout, slot, epoch, value, install_tag) DO UPDATE SET
+                -- #81 (Sol S6): the first write on a new receipt day keeps the row's state before that day.
+                prev_last_day = CASE WHEN slot_sightings.received_day < EXCLUDED.received_day
+                    THEN slot_sightings.last_day ELSE slot_sightings.prev_last_day END,
+                received_day = GREATEST(slot_sightings.received_day, EXCLUDED.received_day),
                 last_day = GREATEST(slot_sightings.last_day, EXCLUDED.last_day),
                 counts_from = CASE WHEN slot_sightings.counts_from IS NULL OR EXCLUDED.counts_from IS NULL
                     THEN NULL ELSE LEAST(slot_sightings.counts_from, EXCLUDED.counts_from) END""",
@@ -89,7 +94,7 @@ internal fun Connection.recordSlotSightings(
             val tag = tagger.tag(TagPurpose.SLOT, installId, SlotObject.of(fingerprint, variant, row.slot, row.value), day)
             check(tag.epoch == row.epoch)
             listOf(fingerprint, variant.platformAppVersion, variant.hashDomain, variant.filterRev, variant.layout, row.slot,
-                row.value, tag.epoch, tag.tag, trusted, countsFrom, day)
+                row.value, tag.epoch, tag.tag, trusted, countsFrom, day, received, received)
                 .forEachIndexed { index, parameter -> statement.setObject(index + 1, parameter) }
             statement.addBatch()
             if (++written % 500 == 0) statement.executeBatch()
@@ -156,8 +161,8 @@ internal fun Connection.slotReadings(policy: Policy, today: LocalDate, fingerpri
  * The rows k counting may use (#80, the vocabulary's rule, #86): non-trusted, past quarantine on the day bound to the
  * first parameter, inside retention on the day bound to the second, in an accepted domain at or above the floor.
  */
-internal fun Policy.countedSlotRows(): String = """NOT trusted AND (counts_from IS NULL OR counts_from <= ?)
-    AND last_day + ${retention.clusterSightingsDays} > ?
+internal fun Policy.countedSlotRows(lastDay: String = "last_day"): String = """NOT trusted AND (counts_from IS NULL OR counts_from <= ?)
+    AND $lastDay + ${retention.clusterSightingsDays} > ?
     AND hash_domain IN (${acceptedHashDomains.joinToString(",")}) AND filter_rev >= $minimumFilterRev"""
 
 /**

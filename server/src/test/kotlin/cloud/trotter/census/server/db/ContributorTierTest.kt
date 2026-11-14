@@ -78,6 +78,12 @@ class ContributorTierTest : LifecycleTestDatabase() {
         copied
     }
 
+    /**
+     * Moves to the next day and builds its release: a release holds the rows as they stood at the end of the day
+     * before (Sol S6), so today's uploads reach one tomorrow.
+     */
+    private fun nextDay(): Int? { at(day.plusDays(1)); return publish() }
+
     private suspend fun classes(db: Database, id: UUID, store: ContributorStore = contributors(db)): Map<String, SlotClass>? =
         (store.classes(id, key, day, scope) as? ContributorOutcome.Ok)?.value?.toMap()
 
@@ -146,7 +152,7 @@ class ContributorTierTest : LifecycleTestDatabase() {
             assertEquals(1, (confirm(db, a) as ContributorOutcome.Ok).value.confirmations)
             assertEquals(1L, count("slot_confirmations"))
             assertEquals(1, sql { ContributorGate.run { it.confirmations(policy, day, scope, value, testKeying().token(word.h!!)) } })
-            publish()
+            nextDay()
             assertEquals(false, gate(db, a))
             assertEquals(ContributorOutcome.Ok(listOf(WordStatus.GATE_CLOSED)), store.words(a, key, day, scope, items))
 
@@ -185,6 +191,8 @@ class ContributorTierTest : LifecycleTestDatabase() {
             confirm(db, a); confirm(db, b)
             assertEquals(false, gate(db, a), "no release built yet")
             publish()
+            assertEquals(false, gate(db, a), "today's release does not hold today's uploads")
+            nextDay()
             assertEquals(true, gate(db, a))
             // The live rows must agree with the release: three peers' live sightings go (as retention would take
             // them), the release still holds them, and with the reader left out the live slot falls below k.
@@ -204,14 +212,13 @@ class ContributorTierTest : LifecycleTestDatabase() {
             for (id in ids) see(db, id, word)
             val (a, b) = ids
             for (id in listOf(a, b)) { grant(db, id); confirm(db, id) }
-            publish()
+            nextDay()
             assertEquals(false, gate(db, a))
             assertEquals(false, gate(db, b))
             // An eleventh install: open, from the next day's release on.
             see(db, install(age = 40), word)
             assertEquals(false, gate(db, a), "today's release does not hold the new upload")
-            at(day.plusDays(1))
-            publish()
+            nextDay()
             assertEquals(true, gate(db, a))
         }
     }
@@ -238,24 +245,54 @@ class ContributorTierTest : LifecycleTestDatabase() {
 
     @Test fun `the reader's own upload never moves its own classes, and another reader sees it no sooner than the next release`() = runBlocking {
         Database.connect(config()).use { db ->
-            // Nine peers share the word: one install short of k. X guesses it and uploads; Y only reads.
+            // Nine peers share the word: one install short of k with any reader left out. X and Y each uploaded the
+            // screen with a one-off value; X then guesses the word and uploads it.
             val peers = installs(9)
             for (id in peers) see(db, id, word)
             val (x, y) = installs(2)
             grant(db, x); grant(db, y)
-            publish()
+            see(db, x, other(4)); see(db, y, other(3))
+            nextDay()
             val before = classes(db, x)
-            assertEquals(emptyMap<String, SlotClass>(), before)
+            assertEquals(mapOf(title to SlotClass.CONSTANT), before)
+            assertEquals(mapOf(title to SlotClass.CONSTANT), classes(db, y))
             see(db, x, word)
             assertEquals(before, classes(db, x), "an upload today is not in today's release")
-            assertEquals(emptyMap<String, SlotClass>(), classes(db, y))
+            assertEquals(mapOf(title to SlotClass.CONSTANT), classes(db, y))
 
-            at(day.plusDays(1))
-            publish()
+            nextDay()
             // X's guess is now in the release, and X's own answer is computed without it: unchanged.
             assertEquals(before, classes(db, x))
             // The residual SECURITY.md states: a second, colluding reader sees the guess land a day later.
             assertEquals(mapOf(title to SlotClass.CONSTANT, value to SlotClass.CONSTANT), classes(db, y))
+        }
+    }
+
+    @Test fun `uploads received before the day's first build reach the release only the next day`() = runBlocking {
+        Database.connect(config()).use { db ->
+            // Sol S6: the build runs after midnight, at any hour; what arrived today waits for tomorrow's release.
+            val ids = installs(11)
+            for (id in ids) see(db, id, word)
+            val reader = ids.first()
+            grant(db, reader)
+            assertEquals(0, publish())
+            assertEquals(emptyMap<String, SlotClass>(), classes(db, reader))
+            assertTrue((nextDay() ?: 0) > 0)
+            assertEquals(mapOf(title to SlotClass.CONSTANT, value to SlotClass.CONSTANT), classes(db, reader))
+        }
+    }
+
+    @Test fun `a reader is answered only about a variant and slot it has uploaded itself`() = runBlocking {
+        Database.connect(config()).use { db ->
+            // Sol S3 (mitigation): eleven installs share the word; R holds a grant but never uploaded this screen.
+            val ids = installs(11)
+            for (id in ids) see(db, id, word)
+            val r = install(age = 40)
+            grant(db, r); grant(db, ids.first())
+            nextDay()
+            assertEquals(emptyMap<String, SlotClass>(), classes(db, r))
+            assertEquals(false, gate(db, r))
+            assertEquals(mapOf(title to SlotClass.CONSTANT, value to SlotClass.CONSTANT), classes(db, ids.first()))
         }
     }
 
@@ -266,7 +303,7 @@ class ContributorTierTest : LifecycleTestDatabase() {
             val reader = ids.first()
             grant(db, reader)
             assertEquals(ContributorOutcome.ReleaseUnavailable, contributors(db).classes(reader, key, day, scope))
-            publish()
+            nextDay()
             assertEquals(mapOf(title to SlotClass.CONSTANT, value to SlotClass.CONSTANT), classes(db, reader))
             val built = day
             at(day.plusDays(1))
@@ -291,7 +328,7 @@ class ContributorTierTest : LifecycleTestDatabase() {
             val x = install(age = 40)
             grant(db, x)
             see(db, x, word)
-            publish()
+            nextDay()
             val store = contributors(db)
             var isolation: String? = null
             // Sol N1: X's data is deleted (its release rows included) after the read's checks, before its evidence.
@@ -316,13 +353,18 @@ class ContributorTierTest : LifecycleTestDatabase() {
             for (id in peers) see(db, id, word)
             val reader = install(age = 40)
             grant(db, reader)
-            publish()
+            see(db, reader, other(5))
+            // A tenth peer is trusted when the first release is built, so it is left out of it.
             val late = install(age = 40)
             see(db, late, word)
+            assertTrue(OpsStore(db, clock, policy).trust(late, true))
+            nextDay()
             val store = contributors(db)
-            // Today's release is replaced while the read runs: it answers from the release it started with.
+            // Today's release is replaced while the read runs, with the tenth peer counted: the read answers from the
+            // release it started with.
             store.readSeam = {
                 thread {
+                    runBlocking { OpsStore(db, clock, policy).trust(late, false) }
                     sql { connection ->
                         connection.autoCommit = false
                         connection.update("DELETE FROM slot_release_days")
@@ -342,6 +384,7 @@ class ContributorTierTest : LifecycleTestDatabase() {
             val ids = installs(3)
             for (id in ids) see(db, id, word)
             val erased = ids.first()
+            at(day.plusDays(1))
             DriverManager.getConnection(postgres.jdbcUrl, postgres.username, postgres.password).use { build ->
                 build.autoCommit = false
                 assertTrue((build.buildRelease(policy, day) ?: 0) > 0)
@@ -375,10 +418,18 @@ class ContributorTierTest : LifecycleTestDatabase() {
             for ((index, id) in nine.withIndex()) see(db, id, other(100 + index))
             val three = installs(3)
             for (id in three) { see(db, id, a); see(db, id, b) }
-            at(start.plusDays(30))
             val reader = install(age = 40)
+            see(db, reader, other(999))
+            // One more install saw A only on the first day and sees a new value on the release day itself: before that
+            // day its presence and A are both past retention, and the new value is today's, so none of it is released.
+            val z = install(age = 40)
+            at(start)
+            see(db, z, a)
+            at(start.plusDays(30))
+            see(db, z, other(998))
             grant(db, reader)
             publish()
+            assertEquals(0L, sql { it.installRows("slot_release", z, day) })
             sql { connection ->
                 connection.prepareStatement("""SELECT epoch, count(*) FILTER (WHERE value = 'present'), count(*) FILTER (WHERE value <> 'present')
                     FROM slot_release WHERE slot = ? GROUP BY epoch""").use { statement ->
@@ -398,7 +449,7 @@ class ContributorTierTest : LifecycleTestDatabase() {
             assertEquals(ContributorOutcome.NoGrant, store.classes(id, key, day, scope))
             assertEquals(0L, count("contributor_reads"))
             grant(db, id)
-            publish()
+            nextDay()
             repeat(2) { assertTrue(store.classes(id, key, day, scope) is ContributorOutcome.Ok) }
             assertTrue(store.classes(id, key, day, scope) is ContributorOutcome.BudgetExhausted)
             assertTrue(store.gates(id, key, day, scope, listOf(value to word.h!!)) is ContributorOutcome.BudgetExhausted)
@@ -420,13 +471,17 @@ class ContributorTierTest : LifecycleTestDatabase() {
                 grant(db, id)
                 contributors(db).review(id, key, day, scope, listOf(value to word.h!!), listOf(value to SlotRole.TIP))
             }
-            publish()
+            nextDay()
+            for (id in ids) contributors(db).classes(id, key, day, scope)
             val tables = listOf("slot_confirmations", "slot_roles", "slot_release")
             for (id in ids) for (table in tables) assertEquals(1L, sql { it.installRows(table, id, day) }.coerceAtMost(1), table)
             assertTrue(contributors(db).setRevoked(grantId(revoked), true))
             InstallStore(db, clock).deleteData(revoked, key, day)
             for (table in tables) assertEquals(0L, sql { it.installRows(table, revoked, day) }, table)
             assertEquals(1L, sql { it.installRows("contributor_grants", revoked, day) }, "a revoked grant outlives a data deletion")
+            // Sol S5: as a revocation marker only; its audit rows, which the grant id links to the install, go.
+            assertEquals(0L, sql { it.select("SELECT count(*) FROM contributor_reads WHERE grant_id = ?", grantId(revoked)) { r -> r.getLong(1) }!! })
+            assertEquals(1L, count("contributor_reads"))
             assertEquals(GrantOutcome.Revoked, contributors(db).requestGrant(revoked, key, true, day))
             InstallStore(db, clock).withdraw(withdrawn, key)
             for (table in tables + "contributor_grants") assertEquals(0L, sql { it.installRows(table, withdrawn, day) }, table)
@@ -440,7 +495,7 @@ class ContributorTierTest : LifecycleTestDatabase() {
             val (a, b) = ids
             for (id in listOf(a, b)) grant(db, id)
             confirm(db, a); confirm(db, b)
-            publish()
+            nextDay()
             assertEquals(true, gate(db, a))
             assertTrue(OpsStore(db, clock, policy).trust(b, true))
             assertEquals(1, sql { ContributorGate.run { it.confirmations(policy, day, scope, value, testKeying().token(word.h!!)) } })
@@ -455,7 +510,7 @@ class ContributorTierTest : LifecycleTestDatabase() {
             see(db, id, word)
             grant(db, id)
             contributors(db).review(id, key, day, scope, listOf(value to word.h!!), listOf(value to SlotRole.TIP))
-            publish()
+            nextDay()
             contributors(db).classes(id, key, day, scope)
             sql { it.update("""INSERT INTO contributor_words (fingerprint, platform_app_version, hash_domain, filter_rev, layout, slot, value,
                 clear_text, received_day) VALUES (?, '8.0', 1, 1, ?, ?, ?, ?, ?)""", scope.fingerprint, scope.variant.layout, value,

@@ -13,6 +13,7 @@ import cloud.trotter.census.server.db.ContributorGate.gateOpen
 import cloud.trotter.census.server.db.ContributorGate.liveGrant
 import cloud.trotter.census.server.db.ContributorGate.liveKeysByEpoch
 import cloud.trotter.census.server.db.ContributorGate.ownRow
+import cloud.trotter.census.server.db.ContributorGate.sightedAny
 import cloud.trotter.census.server.db.SlotRelease.leaveOneOut
 import cloud.trotter.census.server.db.SlotRelease.releaseDay
 import cloud.trotter.census.server.db.SlotRelease.releasedRows
@@ -222,7 +223,13 @@ class ContributorStore(private val db: Database, private val clock: Clock, priva
             if (!releaseDay(today)) return@snapshot ContributorOutcome.ReleaseUnavailable
             readSeam?.invoke(this)
             val keys = liveKeysByEpoch(db.keying, today)
-            val evidence = leaveOneOut(releasedRows(today, scope), scope, installId, keys)
+            val rows = releasedRows(today, scope)
+            // Sol S3: a reader is answered only about a variant it has itself uploaded (a live sighting of one of its
+            // slots); otherwise it reads nothing, as if the variant had no evidence.
+            if (!sightedAny(keys.values, installId, scope, rows.map { it.slot }.toSet(), today, policy.retention.clusterSightingsDays)) {
+                return@snapshot ContributorOutcome.Ok(emptyList())
+            }
+            val evidence = leaveOneOut(rows, scope, installId, keys)
             ContributorOutcome.Ok(evidence.mapNotNull { (slot, counts) ->
                 policy.classify(counts).takeIf { it != SlotClass.UNKNOWN }?.let { slot to it }
             }.sortedBy { it.first })
@@ -257,7 +264,8 @@ class ContributorStore(private val db: Database, private val clock: Clock, priva
         admitted.refusal()?.let { return it }
         val checked = items.map { ContributorGate.checkWord(it.word, it.publicHash) }
         return snapshot(readOnly = false) {
-            activeInstall(installId, keyHash, lock = false) ?: return@snapshot ContributorOutcome.Stale
+            // As in the quarantine (Sol S4): install first, then the grant, both share-locked in the writing snapshot.
+            activeInstall(installId, keyHash, lock = true) ?: return@snapshot ContributorOutcome.Stale
             liveGrant(installId, today, lock = true) ?: return@snapshot ContributorOutcome.NoGrant
             val keys = liveKeysByEpoch(db.keying, today)
             ContributorOutcome.Ok(items.zip(checked).map { (item, check) ->
