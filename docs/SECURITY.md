@@ -141,7 +141,9 @@ the pepper and compares it with the value a slot holds. That is the operation an
 pepper would run to guess what the hashes hide (ADR-0011 §16). The route exists so drafting an anchor does not need
 raw screen text; its limits are what keep it from being a way to guess customer text:
 
-- **The chrome filter runs first, before anything is hashed or read.** A candidate must canonicalize to 1 to 40
+- **The chrome filter runs first, before anything is hashed or read.** A candidate is restricted to Latin-script
+  letters, spaces and basic punctuation (`' ’ - . , : ! ? ( ) / &`), judged by code point on the text as sent: another
+  script, a supplementary-plane code point, a combining mark, a zero-width or control character is refused. It must canonicalize to 1 to 40
   characters of 1 to 8 words with no digit (no phone number, code, PIN, house number, ZIP or price), carry no
   sensitive marker, `@`, web address or square bracket, and none of its case variants may have a name, address or code
   shape (a first name and an initial, a customer or code lead-in with a tail, a street line). The shapes read words

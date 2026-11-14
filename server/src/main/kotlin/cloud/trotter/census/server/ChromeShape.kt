@@ -37,32 +37,42 @@ object ChromeShape {
     }
 
     /**
-     * #82: the canonical form of an anchor candidate, or null when it is refused. On top of [wordsCanonical]: at most
-     * [MAX_CANONICAL_LENGTH] characters; a phrase whose as-sent form has a capitalized word anywhere after its first
-     * ([laterCapital]: `Accept Order`, `Riley Smith`, `Maria de Souza`, `Can I help`) is refused, because
-     * capitalization cannot tell app wording from a person's name (Sol rounds 2 and 3, S1); and none of [judgedForms]
-     * may carry a name, address, contact or code shape ([refusedShape]). The judged forms are wider than the compared
-     * ones on purpose: `brandon c,` is refused for its upper-case form. Pure: nothing is hashed here.
+     * #82: the canonical form of an anchor candidate, or null when it is refused. First, on the text as sent, every code
+     * point must be a Latin-script letter, a space or one of [ANCHOR_PUNCTUATION] ([latinOnly], Sol round 4, S1):
+     * another script, a supplementary-plane code point, a combining mark, a zero-width or control character is refused,
+     * because the checks below read letters, and delivery-app chrome here is English, Spanish and French. Then, on top of
+     * [wordsCanonical]: at most [MAX_CANONICAL_LENGTH] characters; a phrase whose as-sent form has a capitalized word
+     * anywhere after its first ([laterCapital]: `Accept Order`, `Riley Smith`, `Maria de Souza`, `Can I help`) is
+     * refused, because capitalization cannot tell app wording from a person's name (Sol rounds 2 and 3, S1); and none of
+     * [judgedForms] may carry a name, address, contact or code shape ([refusedShape]). The judged forms are wider than
+     * the compared ones on purpose: `brandon c,` is refused for its upper-case form. Pure: nothing is hashed here.
      */
     fun anchorCandidate(text: String): String? {
+        if (!latinOnly(text)) return null
         val canonical = wordsCanonical(text)?.takeIf { it.length <= MAX_CANONICAL_LENGTH } ?: return null
         if (laterCapital(canonical)) return null
         return canonical.takeIf { judgedForms(it).none(::refusedShape) }
+    }
+
+    /** Every code point of [text] is a Latin-script letter, an ASCII space or one of [ANCHOR_PUNCTUATION] (#82). */
+    internal fun latinOnly(text: String): Boolean = text.codePoints().allMatch { cp ->
+        cp == ' '.code || cp in ANCHOR_PUNCTUATION ||
+            (Character.isLetter(cp) && Character.UnicodeScript.of(cp) == Character.UnicodeScript.LATIN)
     }
 
     /**
      * The case variants of [canonical] the anchor check compares (#82), in this order and without duplicates. A single
      * word: as sent, all lower case, all upper case, and capitalized (first letter upper, the rest lower). Several
      * words: all lower case and sentence case (the first letter upper, the rest lower) only, never as sent, so no
-     * compared phrase has a capital after its first letter. Each maps one character to one character (`lowercaseChar`,
-     * `uppercaseChar`) and is kept only if `equals(other, ignoreCase = true)` accepts it against [canonical], the
-     * comparison the app's `hasText` makes. A slot holding a phrase with a later capital is not found here; see
-     * OPERATOR.md.
+     * compared phrase has a capital after its first letter. Each maps one code point to one code point
+     * (`Character.toLowerCase`, `toUpperCase`) and is kept only if `equals(other, ignoreCase = true)` accepts it against
+     * [canonical], the comparison the app's `hasText` makes. A slot holding a phrase with a later capital is not found
+     * here; see OPERATOR.md.
      */
     fun caseVariants(canonical: String): List<String> {
-        val lower = canonical.map { it.lowercaseChar() }.joinToString("")
+        val lower = mapCodePoints(canonical, Character::toLowerCase)
         val sentence = capitalizeFirst(lower, everyWord = false)
-        val forms = if (words(canonical).size <= 1) listOf(canonical, lower, canonical.map { it.uppercaseChar() }.joinToString(""), sentence)
+        val forms = if (words(canonical).size <= 1) listOf(canonical, lower, mapCodePoints(canonical, Character::toUpperCase), sentence)
             else listOf(lower, sentence)
         return forms.distinct().filter { it.equals(canonical, ignoreCase = true) }
     }
@@ -72,26 +82,25 @@ object ChromeShape {
      * whether or not they are compared, so a shape the casing of the candidate hides is still seen.
      */
     internal fun judgedForms(canonical: String): List<String> {
-        val lower = canonical.map { it.lowercaseChar() }.joinToString("")
-        return listOf(canonical, lower, canonical.map { it.uppercaseChar() }.joinToString(""), capitalizeFirst(lower, everyWord = false),
+        val lower = mapCodePoints(canonical, Character::toLowerCase)
+        return listOf(canonical, lower, mapCodePoints(canonical, Character::toUpperCase), capitalizeFirst(lower, everyWord = false),
             capitalizeFirst(lower, everyWord = true)).distinct()
     }
 
     /** A word ([words]) after the first that starts with a capital letter (`Accept Order`, `Juan de la Cruz`, `Can I`). */
-    internal fun laterCapital(value: String): Boolean = words(value).drop(1).any { it.first[0].isUpperCase() }
+    internal fun laterCapital(value: String): Boolean = words(value).drop(1).any { Character.isUpperCase(it.codePoints[0]) }
+
+    private fun mapCodePoints(value: String, map: (Int) -> Int): String =
+        buildString { value.codePoints().forEach { appendCodePoint(map(it)) } }
 
     private fun capitalizeFirst(lower: String, everyWord: Boolean): String {
         val out = StringBuilder(lower.length)
         var pending = true
-        for (ch in lower) {
-            if (ch == ' ') {
-                pending = pending || everyWord
-                out.append(ch)
-            } else if (pending && ch.isLetter()) {
-                out.append(ch.uppercaseChar())
-                pending = false
-            } else {
-                out.append(ch)
+        lower.codePoints().forEach { cp ->
+            when {
+                cp == ' '.code -> { pending = pending || everyWord; out.appendCodePoint(cp) }
+                pending && Character.isLetter(cp) -> { out.appendCodePoint(Character.toUpperCase(cp)); pending = false }
+                else -> out.appendCodePoint(cp)
             }
         }
         return out.toString()
@@ -99,9 +108,9 @@ object ChromeShape {
 
     /**
      * A name, address, contact or code shape in one case variant. Punctuation never hides one (Sol round 1, S1): every
-     * predicate reads words, not the raw string, where a **word** is a run of letters that may carry an inner
-     * apostrophe or hyphen (`Let's`, `O'Brien`, `Mary-Jo`) and every other character (space, `,` `:` `-` `!` `(`…)
-     * separates words, and a **letter run** splits at every non-letter. Refused:
+     * predicate reads words, not the raw string, where a **word** is a run of letters (code points) that may carry an
+     * inner apostrophe or hyphen (`Let's`, `O'Brien`, `Mary-Jo`) and every other code point (space, `,` `:` `-` `!`
+     * `(`…) separates words, and a **letter run** splits at every non-letter. Refused:
      * - an initial: a one-letter capital word after a word that starts with a capital, when it ends the value, is
      *   followed by a period, or is not one of [SHORT_WORDS] (`Brandon C`, `brandon c,` through its title case,
      *   `Brandon, C`, `Jane S. is here`; `Plan B` is refused too, the accepted cost);
@@ -115,36 +124,40 @@ object ChromeShape {
      * there, punctuation or not.
      */
     internal fun refusedShape(value: String): Boolean {
-        if (value.any { it == '@' || it == '[' || it == ']' } || DOMAIN.containsMatchIn(value)) return true
+        if (value.codePoints().anyMatch { it == '@'.code || it == '['.code || it == ']'.code } || DOMAIN.containsMatchIn(value)) return true
         val runs = letterRuns(CaseFold.fold(value))
         if (LEAD_INS.any { lead -> runs.size > lead.size && runs.subList(0, lead.size) == lead }) return true
         if (runs.size >= 2 && runs.last() in STREET_SUFFIXES) return true
         if ((1 until runs.lastIndex).any { runs[it] in STREET_ABBREVIATIONS }) return true
         val words = words(value)
         return words.indices.any { index ->
-            val (word, end) = words[index]
-            index > 0 && word.length == 1 && word[0].isUpperCase() && words[index - 1].first[0].isUpperCase() &&
-                (index == words.lastIndex || value.getOrNull(end) == '.' || word[0] !in SHORT_WORDS)
+            val word = words[index].codePoints
+            index > 0 && word.size == 1 && Character.isUpperCase(word[0]) && Character.isUpperCase(words[index - 1].codePoints[0]) &&
+                (index == words.lastIndex || words[index].next == '.'.code || word[0] !in SHORT_WORDS)
         }
     }
 
-    /** The words of [value] with the index just past each ([refusedShape]). */
-    private fun words(value: String): List<Pair<String, Int>> {
-        val out = ArrayList<Pair<String, Int>>()
+    /** One word of a value ([words]): its code points and the code point that follows it, if any. */
+    private class Word(val codePoints: IntArray, val next: Int?)
+
+    /** The words of [value], by code point ([refusedShape]). */
+    private fun words(value: String): List<Word> {
+        val cps = value.codePoints().toArray()
+        val out = ArrayList<Word>()
         var start = -1
         fun close(end: Int) {
             if (start < 0) return
             var from = start
             var to = end
-            while (from < to && value[from] in JOINERS) from++
-            while (to > from && value[to - 1] in JOINERS) to--
-            if (to > from) out += value.substring(from, to) to to
+            while (from < to && cps[from] in JOINERS) from++
+            while (to > from && cps[to - 1] in JOINERS) to--
+            if (to > from) out += Word(cps.copyOfRange(from, to), cps.getOrNull(to))
             start = -1
         }
-        for (i in value.indices) {
-            if (value[i].isLetter() || value[i] in JOINERS) { if (start < 0) start = i } else close(i)
+        for (i in cps.indices) {
+            if (Character.isLetter(cps[i]) || cps[i] in JOINERS) { if (start < 0) start = i } else close(i)
         }
-        close(value.length)
+        close(cps.size)
         return out
     }
 
@@ -152,11 +165,14 @@ object ChromeShape {
 
     private val NON_LETTERS = Regex("[^\\pL]+")
 
-    /** Characters that join letters into one word ([words]): apostrophes and the hyphen. */
-    private const val JOINERS = "'\u2019-"
+    /** Code points that join letters into one word ([words]): apostrophes and the hyphen. */
+    private val JOINERS: Set<Int> = setOf('\''.code, '\u2019'.code, '-'.code)
+
+    /** The punctuation an anchor candidate may carry ([latinOnly]): what the shape checks above understand. */
+    private val ANCHOR_PUNCTUATION: Set<Int> = "'\u2019-.,:!?()/&".codePoints().toArray().toSet()
 
     /** One-letter words that are words, not initials, when another word follows: English, Spanish and French. */
-    private val SHORT_WORDS = setOf('A', 'I', 'Y', 'O', 'E', 'U', '\u00C0')
+    private val SHORT_WORDS: Set<Int> = "AIYOEU\u00C0".codePoints().toArray().toSet()
 
     /** An e-mail or web address without its `@`: a letter, a dot and a common top-level domain. */
     private val DOMAIN = Regex("\\pL\\.(?:com|net|org|edu|gov|io|co|us|ca|mx|info)\\b", RegexOption.IGNORE_CASE)

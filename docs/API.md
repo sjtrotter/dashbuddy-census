@@ -262,7 +262,8 @@ counted or audited.
 
 Each query runs, in this order:
 
-1. **The chrome filter**, on every candidate, before anything is hashed or read. A candidate is refused unless its
+1. **The chrome filter**, on every candidate, before anything is hashed or read. A candidate is refused unless every
+   code point of the text as sent is a Latin-script letter, a space or basic punctuation (`' ’ - . , : ! ? ( ) / &`), and its
    census canonical form is 1 to 40 characters of 1 to 8 words with no digit, carries no sensitive marker, no `@` and
    no square bracket or web address, and none of its case variants (below) has a name, address or code shape: a first
    name and an initial (`Brandon C`, `brandon c,`, `Brandon, C`), a customer or code lead-in with a tail, whatever

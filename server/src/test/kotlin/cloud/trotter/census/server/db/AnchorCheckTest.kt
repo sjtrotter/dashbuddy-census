@@ -203,7 +203,7 @@ class AnchorCheckTest : LifecycleTestDatabase() {
         Database.connect(config()).use { db ->
             constant(db)
             val store = store(db)
-            assertEquals(answered(wordText, null), store.ask("8.0", "pick up by", "  Got\u00A0it "))
+            assertEquals(answered(wordText, null), store.ask("8.0", "pick up by", "  Got  it "))
             store.ask("8.0", "Got it", "riley smith")
             val (miss, match) = store.auditLog(10)
             assertEquals(AnchorAuditRow("operator", day.toString(), scope("8.0").fingerprint, scope("8.0").variant, slot, 2, "match"), match)

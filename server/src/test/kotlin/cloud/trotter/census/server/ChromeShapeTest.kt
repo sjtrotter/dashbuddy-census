@@ -15,7 +15,9 @@ class ChromeShapeTest {
             "Entrega y recogida", "DoorDash", "OK", "jane a smith", "riley smith", "RILEY smith", "HEADS up")) {
             assertEquals(text, ChromeShape.anchorCandidate(text), text)
         }
-        assertEquals("Heads up", ChromeShape.anchorCandidate("  Heads  up "))
+        assertEquals("Heads up", ChromeShape.anchorCandidate("  Heads   up "))
+        // Sol round 4, S1: accented Latin letters are Latin.
+        assertEquals("Café ouvert", ChromeShape.anchorCandidate("Café ouvert"))
     }
 
     @Test fun `name, address, contact, code and sensitive shapes are refused`() {
@@ -41,6 +43,10 @@ class ChromeShapeTest {
             // Sol round 3, S1: any capitalized word after the first refuses a phrase, so lower-case particles do not help.
             "riley Smith", "Maria de Souza", "Juan de la Cruz", "Ludwig van Beethoven", "Ana da Silva", "Jean-Luc de la Fontaine",
             "maria de Souza", "ana da silva Costa",
+            // Sol round 4, S1: Latin letters, spaces and basic punctuation only, judged by code point on the text as sent.
+            "\uD801\uDC16\uD801\uDC2A\uD801\uDC4C smith", "smith \uD801\uDC16\uD801\uDC2A\uD801\uDC4C", "\u0410ccept order",
+            "\u0391ccept order", "Acc\u200Dept order", "pick\u200Bup", "Jose\u0301 smith", "jose\u0301", "Heads\u00A0up", "Heads\tup",
+            "\uD835\uDC00ccept order", "Accept order \u2014 now", "\u00ABOui\u00BB",
         )
         for (text in refused) assertNull(ChromeShape.anchorCandidate(text), text)
         assertNull(ChromeShape.anchorCandidate("x".repeat(ChromeShape.MAX_TEXT_LENGTH + 1)))

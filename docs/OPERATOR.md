@@ -182,7 +182,8 @@ curl --fail-with-body "$CENSUS_URL/ops/anchor-check" \
   -d "{\"variant\":{\"fingerprint\":\"$FINGERPRINT\",\"platformAppVersion\":\"8.0\",\"hashDomain\":1,\"filterRev\":1,\"layout\":\"$LAYOUT\"},\"slot\":\"root/0/text\",\"candidates\":[\"Heads up\",\"Pick up by\"]}"
 ```
 
-Send phrases as they read in sentence or lower case (`Pick up by`, `accept order`); a single word in any case. The
+Candidates are restricted to Latin-script letters (accents included), spaces and basic punctuation
+(`' ’ - . , : ! ? ( ) / &`). Send phrases as they read in sentence or lower case (`Pick up by`, `accept order`); a single word in any case. The
 check compares a phrase only in all lower case and in sentence case, and refuses as `not_chrome` a phrase with a
 capitalized word anywhere after its first (`Accept Order`, `PICK UP BY`, `Can I help`), because capitalization cannot
 tell app wording from a person's name. Chrome with a later capital is confirmed another way: through contributor-approved vocabulary (the
