@@ -384,6 +384,38 @@ class MigrationTest {
     }
 
     @Test
+    fun `V10 gives slot rows written before it the migration day as their receipt, so they reach only the next release`() {
+        // Round 2, S6: a row received on the rollout day can describe the day before; its observation day would
+        // admit it to the rollout day's own release.
+        val schema = "slot_receipt"
+        fun flyway() = Database.flyway(postgres.jdbcUrl, postgres.username, postgres.password, testKeying)
+            .schemas(schema).defaultSchema(schema)
+        flyway().target("9").load().migrate()
+        DriverManager.getConnection(schemaUrl(schema), postgres.username, postgres.password).use { connection ->
+            val migrated = connection.select("SELECT (now() AT TIME ZONE 'UTC')::date") { it.getObject(1, java.time.LocalDate::class.java) }!!
+            val observed = migrated.minusDays(1)
+            connection.createStatement().use { it.execute("INSERT INTO clusters (fingerprint, platform, first_seen_day, last_seen_day) VALUES (repeat('a',64), 'doordash', '$observed', '$observed')") }
+            for ((value, tag) in listOf("present" to "1", "0123456789abcdef" to "2")) connection.prepareStatement(
+                """INSERT INTO slot_sightings (fingerprint, platform_app_version, hash_domain, filter_rev, layout, slot, value, epoch,
+                    install_tag, trusted, counts_from, last_day) VALUES (repeat('a',64), '8.0', 1, 1, repeat('b',64), 'root/text', ?, ?, ?, false, NULL, ?)""",
+            ).use { statement ->
+                statement.setString(1, value); statement.setInt(2, Epochs.of(observed)); statement.setString(3, tag.repeat(64)); statement.setObject(4, observed)
+                statement.executeUpdate()
+            }
+            flyway().load().migrate()
+            connection.select("SELECT min(first_received), max(received_day), count(prev_last_day) FROM slot_sightings") { rows ->
+                assertEquals(migrated, rows.getObject(1, java.time.LocalDate::class.java))
+                assertEquals(migrated, rows.getObject(2, java.time.LocalDate::class.java))
+                assertEquals(0, rows.getInt(3))
+            }
+            connection.autoCommit = false
+            assertEquals(0, with(cloud.trotter.census.server.db.SlotRelease) { connection.buildRelease(Policy(), migrated) })
+            assertEquals(2, with(cloud.trotter.census.server.db.SlotRelease) { connection.buildRelease(Policy(), migrated.plusDays(1)) })
+            connection.rollback()
+        }
+    }
+
+    @Test
     fun `V3 to V4 backfills screen and preserves sample relationship`() {
         fun migration(target: String) = Flyway.configure()
             .dataSource(postgres.jdbcUrl, postgres.username, postgres.password)
