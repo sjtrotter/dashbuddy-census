@@ -46,6 +46,18 @@ resource "aws_ssm_parameter" "alerts_topic_arn" {
   value = aws_sns_topic.alerts.arn
 }
 
+# #81: the operator's X25519 public key for "Ask the developer" items (base64 X.509, from deploy/tools/QuarantineKey.java
+# keygen). Public, so a String; the private key never leaves the operator's machine. CHANGE-ME leaves the quarantine off.
+resource "aws_ssm_parameter" "census_operator_public_key" {
+  name  = "/${var.name_prefix}/census_operator_public_key"
+  type  = "String"
+  value = "CHANGE-ME"
+
+  lifecycle {
+    ignore_changes = [value]
+  }
+}
+
 # These values are deployment policy; a database/recovery floor can only raise the effective revision.
 resource "aws_ssm_parameter" "census_policy" {
   for_each = { census_notifications_enabled = "false", census_min_filter_rev = "1" }

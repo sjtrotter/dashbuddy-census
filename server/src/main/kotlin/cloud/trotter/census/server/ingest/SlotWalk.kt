@@ -16,7 +16,7 @@ import java.io.ByteArrayOutputStream
 data class SlotValue(val slot: String, val value: String)
 
 /**
- * The slot positions of a skeleton (#80), as the operator views name them; the contributor tier (#81) will share them
+ * The slot positions of a skeleton (#80), as the operator views name them and the contributor tier (#81) shares them
  * with the app:
  *
  * - a screen node's text field: `root`, then the child index of every step down the tree as the skeleton sends it,

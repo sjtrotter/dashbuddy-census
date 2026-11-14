@@ -213,6 +213,8 @@ write_files:
           'census_notifications_enabled': ('CENSUS_NOTIFICATIONS_ENABLED', r'^(true|false)$'),
           'census_min_filter_rev': ('CENSUS_MIN_FILTER_REV', r'^[1-9][0-9]{0,9}$'),
           'alerts_topic_arn': ('ALERTS_TOPIC_ARN', r'^arn:aws:sns:[a-z0-9-]+:[0-9]{12}:[A-Za-z0-9_-]{1,256}$'),
+          # #81: the operator's X25519 public key (base64 X.509); without it "Ask the developer" items are refused.
+          'census_operator_public_key': ('CENSUS_OPERATOR_PUBLIC_KEY', r'^[A-Za-z0-9+/]{59}=$'),
       }
       result = json.loads(subprocess.check_output([
           'aws', 'ssm', 'get-parameters', '--with-decryption', '--output', 'json',

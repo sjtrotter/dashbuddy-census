@@ -25,6 +25,11 @@ data class Config(
     val alarmSpoolDir: String? = null,
     val minimumFilterRev: Int = 1,
     val notificationsEnabled: Boolean = false,
+    /**
+     * #81: the operator's X25519 public key, which "Ask the developer" items are sealed to ([QuarantineCrypto]). Optional:
+     * without it the quarantine route refuses every item rather than store one in a form the server could read.
+     */
+    val operatorPublicKey: java.security.PublicKey? = null,
 ) {
     init {
         require(minimumFilterRev > 0) { "Invalid variable: CENSUS_MIN_FILTER_REV" }
@@ -73,8 +78,10 @@ data class Config(
                 "true" -> true
                 else -> throw IllegalArgumentException("Invalid variable: CENSUS_NOTIFICATIONS_ENABLED")
             }
+            val operatorPublicKey = env[QuarantineCrypto.ENV]?.takeIf { it.isNotBlank() }?.let(QuarantineCrypto::publicKey)
             return Config(
                 minimumFilterRev = minimumFilterRev, notificationsEnabled = notificationsEnabled,
+                operatorPublicKey = operatorPublicKey,
                 databaseUrl = databaseUrl,
                 databaseUser = databaseUser,
                 databasePassword = databasePassword,
