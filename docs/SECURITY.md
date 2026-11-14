@@ -146,7 +146,7 @@ raw screen text; its limits are what keep it from being a way to guess customer 
   sensitive marker, `@`, web address or square bracket, and none of its case variants may have a name, address or code
   shape (a first name and an initial, a customer or code lead-in with a tail, a street line). The shapes read words
   and letter runs, never raw characters, so punctuation (`brandon c,`, `Deliver to: Sam`, `Main St!`) never hides one.
-  A candidate with two capitalized words in a row in any compared variant is refused as well (next point). A query
+  A phrase with a capitalized word anywhere after its first word is refused as well (below). A query
   with any refused candidate is refused whole, as `not_chrome`, and none of its candidates is compared. The phone's own filter (ADR-0011 §2) uses PII shapes
   and customer markers that live in the app, outside the Apache-2.0 contract, so the server cannot run it; its check
   (`ChromeShape`) is built from the contract's predicates and a short server list of shapes, and errs toward refusing.
@@ -158,12 +158,13 @@ raw screen text; its limits are what keep it from being a way to guess customer 
   wrong word on a constant slot, after the same statements (budget, the slot's live rows, the audit row) and the same
   hashing (each variant is compared against a placeholder whose result is discarded); tests compare the statement
   sequences. Neither the answer, the audit row nor the log names the slot's class.
-- **No two capitalized words are ever compared.** Capitalization cannot tell app wording (`Accept Order`) from a
-  person's name (`Riley Smith`, `Jane A Smith`), so the check never compares a form with two consecutive words that
-  start with a capital (Sol round 2, S1). A phrase is compared as sent, in lower case and in sentence case only; a
-  single word also in upper case and capitalized. A candidate whose as-sent form has such a pair is refused. A phrase
-  typed in lower case (`riley smith`) is compared only as `riley smith` and `Riley smith`, so it cannot reach a slot
-  that holds `Riley Smith`. Title-case and all-caps chrome is confirmed through contributor-approved vocabulary (#81)
+- **Phrases are checked in lower and sentence case only.** Capitalization cannot tell app wording (`Accept Order`)
+  from a person's name (`Riley Smith`, `Maria de Souza`, `Juan de la Cruz`), so the rule is plain (Sol rounds 2 and 3,
+  S1): a phrase (two words or more) is refused if any word after its first starts with a capital, and an admitted
+  phrase is compared only in its derived all-lower and sentence-case forms, never as sent. No compared phrase therefore
+  has a capital after its first letter, so a lower-case candidate (`maria de souza`) cannot reach a slot that holds
+  `Maria de Souza`. A single word is compared as sent, in lower and upper case and capitalized. Title-case and all-caps
+  chrome is confirmed through contributor-approved vocabulary (#81)
   or on-phone probes (ADR-0011 §17) instead. These variants are all ones `hasText` accepts, since it ignores case and
   the hash keeps it. No fragment, prefix or pattern is ever hashed here; those
   questions go to phones as probes (ADR-0011 §17).
@@ -191,9 +192,9 @@ the answer class only.
   guess on every install that saw it, turns `constant`, and the check answers `match`; without it, the slot stays
   below k and answers `no_answer`. So the check can confirm one install's value. What bounds this: the route is
   operator-only (a bearer token and a fresh TOTP code per query); it refuses name-, address- and code-shaped
-  candidates and never compares two capitalized words in a row, which is how a full name renders; the candidates
+  candidates and never compares a phrase with a capital after its first letter; the candidates
   spend a daily budget; and nothing about the query's text is stored. What it does not remove: a name that passes the
-  filter (a lone first name, `Riley`, or a name rendered in lower or sentence case), confirmed by someone holding the
+  filter (a lone first name, `Riley`, or a name a screen renders in lower or sentence case), confirmed by someone holding the
   operator credentials and k − 1 aged installs. The cluster page's class and counts give that same person the same
   answer without the check, so the check adds speed, not a new answer.
 - **Risk 14, the tool binds the tool.** These limits bind this route, the dashboard and the agent token (#84). The

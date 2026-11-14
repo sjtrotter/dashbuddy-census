@@ -183,9 +183,9 @@ curl --fail-with-body "$CENSUS_URL/ops/anchor-check" \
 ```
 
 Send phrases as they read in sentence or lower case (`Pick up by`, `accept order`); a single word in any case. The
-check compares a phrase only as sent, in lower case and in sentence case, and refuses a phrase with two capitalized
-words in a row (`Accept Order`, `PICK UP BY`) as `not_chrome`, because capitalization cannot tell app wording from a
-person's name. Title-case or all-caps chrome is confirmed another way: through contributor-approved vocabulary (the
+check compares a phrase only in all lower case and in sentence case, and refuses as `not_chrome` a phrase with a
+capitalized word anywhere after its first (`Accept Order`, `PICK UP BY`, `Can I help`), because capitalization cannot
+tell app wording from a person's name. Chrome with a later capital is confirmed another way: through contributor-approved vocabulary (the
 contributor word gate, #81, then the resolve route) or with an on-phone probe rule (gig.log#1630), never here.
 
 - `match` with a `text`: the slot holds that text, in that case. A `hasText` anchor with the candidate will match it
@@ -193,8 +193,8 @@ contributor word gate, #81, then the resolve route) or with an on-phone probe ru
   Verify spacing and unusual glyphs on a phone with a probe before the rule ships: the check compares canonical
   forms, `hasText` the raw string.
 - `no_answer`: the slot does not hold that word, or the slot does not answer. Nothing more can be read from it.
-- `422 not_chrome`: a candidate looks like a name, an address, a code or a contact, or has two capitalized words in a
-  row (`refused` lists which). Nothing was compared. App wording that trips the filter (a label ending in a single capital, `Plan B`) cannot be checked
+- `422 not_chrome`: a candidate looks like a name, an address, a code or a contact, or is a phrase with a capitalized
+  word after its first (`refused` lists which). Nothing was compared. App wording that trips the filter (a label ending in a single capital, `Plan B`) cannot be checked
   here; draft it from a trusted capture or a probe instead.
 - `429 budget_exhausted`: the day's 200 candidates are spent, refused ones included.
 

@@ -112,8 +112,12 @@ class AnchorCheckTest : LifecycleTestDatabase() {
             // Sol round 2, S1 and S4: nine Sybils and one victim can make a name constant; the check cannot reach it.
             seen(db, "8.4", 11) { slotOf("Riley Smith") }
             val store = store(db)
-            assertEquals(answered(null, null, null, null), store.ask("8.4", "riley smith", "Riley smith", "riley Smith", "RILEY smith"))
-            assertEquals(AnchorOutcome.Refused(listOf(0, 1)), store.ask("8.4", "Riley Smith", "RILEY SMITH"))
+            assertEquals(answered(null, null, null), store.ask("8.4", "riley smith", "Riley smith", "RILEY smith"))
+            assertEquals(AnchorOutcome.Refused(listOf(0, 1, 2)), store.ask("8.4", "Riley Smith", "RILEY SMITH", "riley Smith"))
+            // Sol round 3, S1: a lower-case particle does not separate the capitals enough to be compared.
+            seen(db, "8.7", 11) { slotOf("Maria de Souza") }
+            assertEquals(answered(null, null), store.ask("8.7", "maria de souza", "Maria de souza"))
+            assertEquals(AnchorOutcome.Refused(listOf(0, 1)), store.ask("8.7", "Maria de Souza", "maria de Souza"))
             seen(db, "8.5", 11) { slotOf("Accept Order") }
             assertEquals(AnchorOutcome.Refused(listOf(0)), store.ask("8.5", "Accept Order"))
             assertEquals(answered(null), store.ask("8.5", "Accept order"))

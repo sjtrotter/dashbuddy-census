@@ -267,9 +267,9 @@ Each query runs, in this order:
    no square bracket or web address, and none of its case variants (below) has a name, address or code shape: a first
    name and an initial (`Brandon C`, `brandon c,`, `Brandon, C`), a customer or code lead-in with a tail, whatever
    separates them (`Deliver to: Sam`, `Pick-up for …`, `Gate code: …`, `Apt B`), or a street line (`Main St!`,
-   `Oak Ave, Springfield`). The shapes read words, not characters, so punctuation never hides one. A candidate whose
-   compared variants (step 4) hold two consecutive words that both start with a capital is refused too: capitalization
-   cannot tell `Accept Order` from `Riley Smith`, so neither is ever compared (`Accept order` is). A refusal is an
+   `Oak Ave, Springfield`). The shapes read words, not characters, so punctuation never hides one. A phrase (two
+   words or more) with a capitalized word anywhere after its first is refused too: capitalization cannot tell
+   `Accept Order` from `Riley Smith` or `Maria de Souza`, so none of them is compared (`Accept order` is). A refusal is an
    answer of its own, never "no match": `422 {"error":"not_chrome","refused":[<indexes>]}`, and no candidate of that
    query is compared.
 2. **The budget.** Each caller has a daily budget of candidates per UTC day (`Policy.anchorCheck`: 200 for the
@@ -281,9 +281,9 @@ Each query runs, in this order:
    none of the candidates does, after the same statements and the same hashing.
 4. **The compare.** For each candidate, the case variants below, each one the app's `hasText` accepts (`hasText`
    compares case-insensitively, the census hash keeps case), each mapped one character to one character. A single
-   word: as sent, all lower case, all upper case and capitalized (`Heads`, `heads`, `HEADS`). Several words: as sent,
-   all lower case and sentence case only (`pick up by`, `Pick up by`); never all caps or title case, so no compared
-   variant has two capitalized words in a row. A slot that holds a title-case or all-caps phrase is not found here. Each variant is hashed the phone's way (`CensusHash.of`), keyed
+   word: as sent, all lower case, all upper case and capitalized (`Heads`, `heads`, `HEADS`). Several words: all
+   lower case and sentence case only (`pick up by`, `Pick up by`), never as sent, all caps or title case, so no
+   compared phrase has a capital after its first letter. A slot that holds such a phrase is not found here. Each variant is hashed the phone's way (`CensusHash.of`), keyed
    (`HMAC(pepper, …)`, #85) and compared in constant time with the slot's value.
 
 `200 {"results":[{"answer":"match","text":"Pick up by"},{"answer":"no_answer"}]}`, one result per candidate in order.

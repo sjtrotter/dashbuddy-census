@@ -12,7 +12,7 @@ class ChromeShapeTest {
     @Test fun `app wording passes the filter in its canonical form`() {
         for (text in listOf("Heads up", "Order details", "Got it!", "Take a photo", "Return to dash", "Deliver to",
             "Deliver to:", "Pickup for", "Let's go", "Don't show again", "Check-in", "Accept order", "Pick up by", "Test drive now",
-            "Entrega y recogida", "DoorDash", "OK", "jane a smith", "riley smith", "riley Smith")) {
+            "Entrega y recogida", "DoorDash", "OK", "jane a smith", "riley smith", "RILEY smith", "HEADS up")) {
             assertEquals(text, ChromeShape.anchorCandidate(text), text)
         }
         assertEquals("Heads up", ChromeShape.anchorCandidate("  Heads  up "))
@@ -38,16 +38,19 @@ class ChromeShapeTest {
             "Gate-code KQZX", "Apt B", "Suite: Rear", "Unit, Back",
             // Sol round 2, S1: two capitalized words in a row are never compared, chrome or name.
             "Riley Smith", "Accept Order", "Jane A Smith", "RILEY SMITH", "Can I help", "PICK UP BY", "Pick Up By",
+            // Sol round 3, S1: any capitalized word after the first refuses a phrase, so lower-case particles do not help.
+            "riley Smith", "Maria de Souza", "Juan de la Cruz", "Ludwig van Beethoven", "Ana da Silva", "Jean-Luc de la Fontaine",
+            "maria de Souza", "ana da silva Costa",
         )
         for (text in refused) assertNull(ChromeShape.anchorCandidate(text), text)
         assertNull(ChromeShape.anchorCandidate("x".repeat(ChromeShape.MAX_TEXT_LENGTH + 1)))
     }
 
     @Test fun `the case variants are the ones hasText accepts, without duplicates`() {
-        // Several words: as sent, lower and sentence case; never all caps or title case.
-        assertEquals(listOf("Heads up", "heads up"), ChromeShape.caseVariants("Heads up"))
+        // Several words: lower and sentence case only, never as sent, all caps or title case.
+        assertEquals(listOf("heads up", "Heads up"), ChromeShape.caseVariants("Heads up"))
         assertEquals(listOf("jane a smith", "Jane a smith"), ChromeShape.caseVariants("jane a smith"))
-        assertEquals(listOf("HEADS up", "heads up", "Heads up"), ChromeShape.caseVariants("HEADS up"))
+        assertEquals(listOf("heads up", "Heads up"), ChromeShape.caseVariants("HEADS up"))
         // One word: as sent, lower, upper and capitalized.
         assertEquals(listOf("DoorDash", "doordash", "DOORDASH", "Doordash"), ChromeShape.caseVariants("DoorDash"))
         for (word in listOf("Heads up", "straße", "İstanbul", "¡hola amigo", "o'clock rush")) {
