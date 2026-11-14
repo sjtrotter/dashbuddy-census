@@ -143,7 +143,9 @@ raw screen text; its limits are what keep it from being a way to guess customer 
 
 - **The chrome filter runs first, before anything is hashed or read.** A candidate is restricted to Latin-script
   letters, spaces and basic punctuation (`' ’ - . , : ! ? ( ) / &`), judged by code point on the text as sent: another
-  script, a supplementary-plane code point, a combining mark, a zero-width or control character is refused. It must canonicalize to 1 to 40
+  script, a combining mark, a zero-width or control character is refused. A supplementary-plane code point is refused
+  unless it is itself a Latin letter (such as U+10780): those few are admitted, and the letter, word and case checks
+  below read code points, so a surrogate pair is never split. It must canonicalize to 1 to 40
   characters of 1 to 8 words with no digit (no phone number, code, PIN, house number, ZIP or price), carry no
   sensitive marker, `@`, web address or square bracket, and none of its case variants may have a name, address or code
   shape (a first name and an initial, a customer or code lead-in with a tail, a street line). The shapes read words

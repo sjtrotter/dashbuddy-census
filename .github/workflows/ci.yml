@@ -26,6 +26,9 @@ jobs:
                   ref: ${{ env.DASHBUDDY_CONTRACT_SHA }}
                   path: DashBuddy
                   persist-credentials: false
+            # backup.sh, restore.sh and the journal exports against stubbed docker/aws (#94).
+            - name: Backup and restore script checks
+              run: python3 -I deploy/compose/test-withdrawals.py
             - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
               with:
                   distribution: temurin
