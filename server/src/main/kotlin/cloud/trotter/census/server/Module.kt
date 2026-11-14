@@ -148,7 +148,7 @@ fun Application.module(
         healthRoutes(db)
         policyRoutes(policy)
         val store = db?.let { InstallStore(it, clock) }
-        val skeletons = db?.let { SkeletonStore(it, clock) }
+        val skeletons = db?.let { SkeletonStore(it, clock, policy.slotConstancy.maxSlotsPerSkeleton) }
         val envelopes = db?.let { EnvelopeStore(it, clock) }
         val health = db?.let { HealthStore(it, clock, policy.retention.healthDailyDays) }
         val pause = db?.let { PauseStore(it, clock) }

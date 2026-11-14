@@ -32,7 +32,7 @@ Withdrawal, "delete my data" and revocation recompute the install's tags under e
 
 ## Backup and restore
 
-Run `./backup.sh` from `deploy/compose` using a daily scheduler. After `pg_dump` and dump upload, it runs `./export-withdrawals.sh` and `./export-filter-floor.sh`. Withdrawal export is an atomic, restricted-permission CSV export to `backups/withdrawals/withdrawals-<UTC timestamp>.csv`. Either export/upload failure fails the backup operation; the existing dump is preserved, but is not a complete recovery set. Earlier versions warned on withdrawal export failure; this release makes it fatal. Export `BACKUP_BUCKET` to upload journals under `withdrawals/` and dumps at the bucket root. Dumps and withdrawal journals retain 14 local UTC dates; policy-only `filter-floor/` journals are retained without age expiry. For observation backups, configure bucket encryption, restricted access, and the 14-day lifecycle including noncurrent versions. Local files and S3 copies contain sensitive pseudonymous data. The exporter can also run separately between backups.
+Run `./backup.sh` from `deploy/compose` using a daily scheduler. The dump passes through `order-tagged-dump.sh`, which sorts the rows of every epoch-tagged table by tag so a backup does not keep one upload's rows together ([Security](SECURITY.md#epoch-pseudonyms-at-rest-86)); it is still a plain SQL dump that `restore.sh` loads unchanged, and `TaggedDumpOrderTest` restores one. Its sort spills to `backups/`, beside the dump. After `pg_dump` and dump upload, it runs `./export-withdrawals.sh` and `./export-filter-floor.sh`. Withdrawal export is an atomic, restricted-permission CSV export to `backups/withdrawals/withdrawals-<UTC timestamp>.csv`. Either export/upload failure fails the backup operation; the existing dump is preserved, but is not a complete recovery set. Earlier versions warned on withdrawal export failure; this release makes it fatal. Export `BACKUP_BUCKET` to upload journals under `withdrawals/` and dumps at the bucket root. Dumps and withdrawal journals retain 14 local UTC dates; policy-only `filter-floor/` journals are retained without age expiry. For observation backups, configure bucket encryption, restricted access, and the 14-day lifecycle including noncurrent versions. Local files and S3 copies contain sensitive pseudonymous data. The exporter can also run separately between backups.
 
 Each live withdrawal writes a `withdrawals` tombstone in the same transaction as erasure: only the lowercase SHA-256 of the canonical install UUID and `withdrawn_at`, never the UUID or credential. Tombstones last 60 days, exceeding the restorable dump/version horizon. Every startup migrates and **automatically replays tombstones before opening the HTTP listener**; replay failure aborts startup. Live withdrawal and replay share the same deletion implementation, including clearing drafts derived from erased envelopes and recomputing the fleet health totals the erased rows fed. No enrolment instant is stored (#79): a generation enrolled after a withdrawal copies that tombstone's instant into `installs.erased_through`, and replay erases a generation only when its tombstone is newer than that marker (or the marker is empty). A later re-enrolment, including one on the same day, survives. V6 derived the marker from V3's `enrolled_at` before dropping it. Every withdrawal or deletion moves the tombstone strictly forward (the later of the request instant and one microsecond past the stored value), so a clock rollback or a skewed journal row never reuses an instant an older backup's marker covers. The 60-day purge clears a marker and deletes its tombstone together, install row locked first, in one transaction per batch.
 
@@ -55,29 +55,20 @@ docker compose run --rm --no-deps --user "$(id -u):$(id -g)" \
 
 **Residual:** a withdrawal after the latest journal export needs its SNS email to survive total host loss (the notice is exempt from spool eviction but still rides the publisher's hourly token budget, so a health-alarm storm can delay it; and a `withdrawals` row older than 60 days is purged, which is longer than any restorable backup). Paste the notice's hash and instant into the CSV. If host loss occurs before SNS publication as well, neither off-host channel has that withdrawal and it cannot be recovered automatically. The existing spool is bounded/best-effort and SNS publishing is rate-limited, so confirm receipt and retain the emails; exporting more often narrows the gap.
 
-**Last resort when no journal exists:** if you still know the withdrawn UUID, keep census stopped and erase it in one transaction. `InstallStore.WITHDRAWAL_TABLES` owns this list. Preserve a hashed tombstone for subsequent restores:
+**Last resort when no journal exists:** if you still know the withdrawn UUID, re-apply the withdrawal through the server's own replay; never by hand. Since #86 the content tables carry epoch tags, not the install id, so only the server can find an install's rows: it recomputes the tags under the stored epoch keys, which only open under the configured pepper, and it erases every table in `InstallStore.WITHDRAWAL_TABLES` (slot sightings included) and refolds the fleet health totals in one transaction. Write a one-row journal and replay it with census stopped and the CURRENT deployment `.env` (the one holding the right `CENSUS_HASH_PEPPER`; a wrong pepper aborts before anything changes):
 
-```sql
-BEGIN;
-SELECT 1 FROM installs WHERE install_id = '<uuid>' FOR UPDATE;
-INSERT INTO withdrawals (install_id_hash, withdrawn_at)
-VALUES (encode(sha256('<uuid>'::uuid::text::bytea), 'hex'), CURRENT_TIMESTAMP)
-ON CONFLICT (install_id_hash) DO UPDATE SET withdrawn_at = GREATEST(withdrawals.withdrawn_at, EXCLUDED.withdrawn_at);
-WITH erased AS (
-    DELETE FROM trusted_envelopes WHERE install_id = '<uuid>' RETURNING id
-)
-UPDATE clusters SET draft = NULL, draft_day = NULL
-WHERE draft->>'envelopeId' IN (SELECT id::text FROM erased);
-DELETE FROM health_daily      WHERE install_id = '<uuid>';
-DELETE FROM token_sightings_v5 WHERE install_id = '<uuid>';
-DELETE FROM cluster_sightings_v5 WHERE install_id = '<uuid>';
-DELETE FROM ingest_ledger     WHERE install_id = '<uuid>';
-DELETE FROM nonces            WHERE install_id = '<uuid>';
-DELETE FROM installs          WHERE install_id = '<uuid>';
-COMMIT;
+```sh
+umask 077
+uuid='<uuid>'   # canonical lowercase
+printf '%s,%s\n' "$(printf '%s' "$uuid" | sha256sum | cut -d' ' -f1)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > /absolute/path/to/manual-withdrawal.csv
+docker compose stop census
+docker compose run --rm --no-deps --user "$(id -u):$(id -g)" \
+    -v /absolute/path/to/manual-withdrawal.csv:/journal.csv:ro census --reapply-withdrawals /journal.csv
 ```
 
-Run `./export-withdrawals.sh` after this manual fallback. The first restore drill (2026-10-03) demonstrated why the durable journal is necessary; see the [AWS drill log](../deploy/aws/README.md#drill-log).
+The hash is `sha256` of the UUID text, the same value the `withdrawals` table and the journals hold. `--reapply-withdrawals` migrates, merges the row into `withdrawals` by maximum, erases every generation of that install the tombstone covers (the install row included) and drains lifecycle work, then exits; a failure leaves census stopped and logs the stage, never the id. Check the logged `withdrawal replay matched=1`, then start census. The tombstone is now in the database like any other, so the next journal export carries it.
+
+Run `./export-withdrawals.sh` after this fallback. The first restore drill (2026-10-03) demonstrated why the durable journal is necessary; see the [AWS drill log](../deploy/aws/README.md#drill-log).
 
 Schedule a restore drill; copying a dump alone does not prove recovery.
 
@@ -95,7 +86,7 @@ Per-install quotas apply at admission whether or not the switch is on: per UTC d
 
 ## Revoke, withdraw or delete an install's data
 
-`DELETE /v1/installs/me` lets an authenticated install withdraw; `DELETE /v1/installs/me/data` deletes its server data and keeps it enrolled (#79). The deletion erases every per-install row except the install row and today's ledger row (kept for the quota and batch replay protection, expiring with the 7-day ledger), writes the same tombstone and journal notice as a withdrawal, and is replayed the same way: after a restore from a backup older than the deletion, replay erases that install whole, and the app re-enrols. The response counts the rows erased. The operator can revoke credentials using the endpoint below. Revocation also deletes the install's token and cluster sightings (#86: they no longer name the install, so k counting cannot filter them by a join); its health rows stay until retention. Withdrawal deletes every row tied to the install in one transaction: install-keyed rows by id, content rows through its epoch tags under every stored key. See [Backup and restore](#backup-and-restore) for mandatory tombstone replay and journal recovery. Foreign keys currently do not cascade. Do not pretend a manual `DELETE FROM installs` is a complete withdrawal procedure.
+`DELETE /v1/installs/me` lets an authenticated install withdraw; `DELETE /v1/installs/me/data` deletes its server data and keeps it enrolled (#79). The deletion erases every per-install row except the install row and today's ledger row (kept for the quota and batch replay protection, expiring with the 7-day ledger), writes the same tombstone and journal notice as a withdrawal, and is replayed the same way: after a restore from a backup older than the deletion, replay erases that install whole, and the app re-enrols. The response counts the rows erased. The operator can revoke credentials using the endpoint below. Revocation also deletes the install's token, cluster and slot sightings (#86, #80: they no longer name the install, so k counting cannot filter them by a join); its health rows stay until retention. Withdrawal deletes every row tied to the install in one transaction: install-keyed rows by id, content rows through its epoch tags under every stored key. See [Backup and restore](#backup-and-restore) for mandatory tombstone replay and journal recovery. Foreign keys currently do not cascade. Do not pretend a manual `DELETE FROM installs` is a complete withdrawal procedure.
 
 ## Reinstall with a new signing key
 
@@ -180,6 +171,8 @@ no JavaScript or embedded operator credential. Its CSP is
 
 For screen clusters, the **Screen wireframe** section precedes skeleton samples. It draws the newest paired, already-redacted `uinode.v1` capture from a **currently trusted, unrevoked install**, with clipped node bounds, text/description/hint/pane labels, class and view-ID titles, and highlighted clickable boxes (a node that is clickable or advertises the click action, #78). The facts line shows receipt day, the eight-character install prefix, platform app version when recorded, and drawn/visited node counts. Rendering visits at most 2,000 nodes through depth 64. When no capture is paired, the section shows an explanatory empty state; clearing trust or revoking the install removes its capture from selection immediately. Pairing requires the phone to name an existing cluster's fingerprint when uploading the envelope.
 
+The **Slot constancy** section (#80) lists, per app version, filter revision and raw layout, every text slot with its class (`constant`, `regional`, `varying`, `withheld`, `shape`, `unknown`; [API](API.md#slot-constancy--80)), the installs that saw it within the best-supported epoch and its distinct hash count. Counts are shown below k here, as cluster counts are; the app's read never shows them. `constant` is candidate chrome, never proof. Cluster cards on the review page add a **Slot classes** fact: how many of the cluster's slots hold each class. The panel reads the live rows; no app route serves slot classes (they arrive with the contributor tier, #81). The lifecycle sweep reports `slots` (rows past retention) and `slot_quarantine_marks` beside the token rows' counterparts.
+
 The wireframe uses numeric-only inline styles for frame aspect ratio and box percentages, the only inline style attributes on ops pages. The existing CSP permits them; the page still uses one constant stylesheet and no JavaScript. Labels and titles pass through the existing privacy masking and HTML escaping. The wireframe is never serialized into cluster-detail JSON; samples use the kind-specific projections described below.
 
 For a browser, open `GET /ops/login` and enter the operator token and the authenticator's
@@ -239,7 +232,7 @@ Vocabulary hashes (keyed under the pepper, #85) are available only on the dedica
 | Endpoint | Result |
 | --- | --- |
 | `GET /ops/clusters?platform=&version=&status=&kind=&limit=` | Array of `{platformAppVersion, clusters}` groups, numeric versions newest first; optional filters must be valid when supplied. The additive `platform` filter uses `[a-z_][a-z0-9_]{0,31}` and restricts clusters before version grouping; the JSON shape is unchanged. Default 50 rows, maximum 200 across groups. Rows include dates, counts, trust/gate flags, versions, `newWithVersion`, status, resolved rule, and notes. |
-| `GET /ops/clusters/{fingerprint}` | Takes the fingerprint as the cluster rows show it: a screen fingerprint is the phone's, a notification fingerprint is keyed (#85) and will not match the one the phone computed. Cluster row and `{platformAppVersion, receivedDay, skeleton}` or `{platformAppVersion, receivedDay, notification}` samples; `newWithVersion` refers to its newest observed version. |
+| `GET /ops/clusters/{fingerprint}` | Takes the fingerprint as the cluster rows show it: a screen fingerprint is the phone's, a notification fingerprint is keyed (#85) and will not match the one the phone computed. Cluster row and `{platformAppVersion, receivedDay, skeleton}` or `{platformAppVersion, receivedDay, notification}` samples; `newWithVersion` refers to its newest observed version. `slots` (#80): per `variant` (`platformAppVersion`, `hashDomain`, `filterRev`), each slot's `slotClass`, `installs` and distinct `hashes`. |
 | `GET /ops/installs?limit=` | Prefixes, dates, trust/revocation flags, last app version, and whether an attestation verdict exists. Default 50, maximum 200. |
 | `GET /ops/health?days=7` | `fleet` rows and per-install rows (`pseudonymPrefix`, the first 8 hex of the row's epoch pseudonym, never the install id, #86) with day/platform/version counters; maximum 90 days. |
 | `GET /ops/alarms` | Today's successfully delivered alarms and process-local `AlarmStats` counts. |

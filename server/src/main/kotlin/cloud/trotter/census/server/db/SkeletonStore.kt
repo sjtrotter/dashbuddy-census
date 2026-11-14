@@ -2,11 +2,13 @@ package cloud.trotter.census.server.db
 
 import cloud.trotter.census.server.Clock
 import cloud.trotter.census.server.Database
+import cloud.trotter.census.server.SlotConstancyPolicy
 import cloud.trotter.census.server.TagPurpose
 import cloud.trotter.census.server.ingest.LifecycleDeadline
 import cloud.trotter.census.server.ingest.ItemVerdict
 import cloud.trotter.census.server.ingest.BudgetPolicy
 import cloud.trotter.census.server.ingest.ConsumeOutcome
+import cloud.trotter.census.server.ingest.SlotWalk
 import cloud.trotter.census.server.ingest.atRest
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -27,7 +29,12 @@ sealed interface IngestOutcome {
 }
 
 /** Canonical samples and epoch-tagged sightings (#86), written together in one transaction. */
-class SkeletonStore(private val db: Database, private val clock: Clock) {
+class SkeletonStore(
+    private val db: Database,
+    private val clock: Clock,
+    // #80: the per-skeleton slot cap, Policy.slotConstancy.maxSlotsPerSkeleton.
+    private val slotLimit: Int = SlotConstancyPolicy().maxSlotsPerSkeleton,
+) {
     private suspend fun <T> query(block: Connection.() -> T): T = withContext(Dispatchers.IO) {
         transaction(db.exposed) {
             maxAttempts = 1
@@ -135,9 +142,12 @@ class SkeletonStore(private val db: Database, private val clock: Clock) {
                     deadline, fingerprint, version,
                 )
             }
+            val slotSightings = ArrayList<SlotSighting>(group.size)
             for (acceptedItem in group) {
                 val item = acceptedItem.item
                 val observed = LifecycleDeadline.observation(LocalDate.parse(item.day), day)
+                slotSightings += SlotSighting(item, SlotVariant(item.platformAppVersion ?: "unknown", item.hashDomain, item.filterRev,
+                    SlotWalk.layout(item)), observed)
                 // #86: keyed by an epoch tag of (install, cluster) under the observation day's epoch, never the install.
                 val sighting = tagger.tag(TagPurpose.CLUSTER, installId, fingerprint, observed)
                 update(
@@ -163,6 +173,8 @@ class SkeletonStore(private val db: Database, private val clock: Clock) {
                     )
                 }
             }
+            // #80: where each value sat, for per-slot constancy; keyed by epoch tags like the sightings above.
+            recordSlotSightings(tagger, installId, trusted, countsFrom, fingerprint, slotSightings, slotLimit)
         }
         recordIngestCounters(installId, day, duplicateInBatch, rejected)
         IngestOutcome.Stored(IngestSummary(groups.size, newClusters, samplesStored, tokensTouched), consumed)

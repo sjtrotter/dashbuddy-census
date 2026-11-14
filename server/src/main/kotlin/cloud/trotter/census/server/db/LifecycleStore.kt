@@ -53,9 +53,12 @@ class LifecycleStore(private val db: Database, private val clock: Clock, private
             { query { with(EpochKeyStore) { expiredCount(today) } } },
             { query { with(EpochKeyStore) { destroyExpired(today).also { ensureAhead(db.keying, today) } } } to 0 },
         )
-        result["quarantine_marks"] = quarantineMarks(today)
+        result["quarantine_marks"] = quarantineMarks(today, "token_sightings_v5")
         result["tokens"] = delete("token_sightings_v5", "last_day + 30 <= ?", today)
         result["sightings"] = delete("cluster_sightings_v5", "day + ${policy.retention.clusterSightingsDays} <= ?", today)
+        // #80: slot sightings keep the cluster sightings' retention; their quarantine marks clear like token sightings'.
+        result["slots"] = delete("slot_sightings", "last_day + ${policy.retention.clusterSightingsDays} <= ?", today)
+        result["slot_quarantine_marks"] = quarantineMarks(today, "slot_sightings")
         for (kind in listOf("screen", "notification")) result["samples_$kind"] = samples(kind, today)
         result["vocabulary"] = vocabulary(today)
         result["catalogue"] = catalogue()
@@ -66,10 +69,10 @@ class LifecycleStore(private val db: Database, private val clock: Clock, private
      * #86: a passed quarantine mark is cleared, so the day an install's evidence started to count (shared by all its
      * sightings from its first week) does not outlive that week.
      */
-    private suspend fun quarantineMarks(today: LocalDate): SweepResult = sweep(
-        { query { select("SELECT count(*) FROM token_sightings_v5 WHERE counts_from <= ?", today) { it.getLong(1) } ?: 0 } },
-        { query { 0 to update("""UPDATE token_sightings_v5 SET counts_from = NULL WHERE ctid IN
-            (SELECT ctid FROM token_sightings_v5 WHERE counts_from <= ? LIMIT 1000)""", today) } },
+    private suspend fun quarantineMarks(today: LocalDate, table: String): SweepResult = sweep(
+        { query { select("SELECT count(*) FROM $table WHERE counts_from <= ?", today) { it.getLong(1) } ?: 0 } },
+        { query { 0 to update("""UPDATE $table SET counts_from = NULL WHERE ctid IN
+            (SELECT ctid FROM $table WHERE counts_from <= ? LIMIT 1000)""", today) } },
     )
 
     private fun sampleDue(): String = """(s.purge_after IS NULL OR s.purge_after <= ? OR EXISTS (
@@ -134,6 +137,8 @@ class LifecycleStore(private val db: Database, private val clock: Clock, private
                 put("quarantine_marks", select("SELECT count(*) FROM token_sightings_v5 WHERE counts_from <= ?",today) { it.getLong(1) }!!)
                 put("tokens", select("SELECT count(*) FROM token_sightings_v5 WHERE last_day+30 <= ?",today) { it.getLong(1) }!!)
                 put("sightings", select("SELECT count(*) FROM cluster_sightings_v5 WHERE day+${policy.retention.clusterSightingsDays} <= ?",today) { it.getLong(1) }!!)
+                put("slots", select("SELECT count(*) FROM slot_sightings WHERE last_day+${policy.retention.clusterSightingsDays} <= ?",today) { it.getLong(1) }!!)
+                put("slot_quarantine_marks", select("SELECT count(*) FROM slot_sightings WHERE counts_from <= ?",today) { it.getLong(1) }!!)
                 for (kind in listOf("screen","notification")) put("samples_$kind",
                     select("SELECT count(*) FROM cluster_samples s JOIN clusters c USING(fingerprint) WHERE c.kind=? AND ${sampleDue()}",kind,today,today) { it.getLong(1) }!!)
                 put("vocabulary", select("SELECT count(*) FROM vocabulary_v5 WHERE ${vocabularyPredicate()}",today,*VocabularyEligibility.args(today)) { it.getLong(1) }!!)

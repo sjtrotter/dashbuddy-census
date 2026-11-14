@@ -345,11 +345,11 @@ private fun FlowContent.rejections(reasons: JsonObject) {
 /** Columns are explicitly mapped by callers; JSON keys never define the HTML surface. */
 // kotlinx.html 0.12 types TH as inline-only and TD as block: a row-header cell renders PHRASING content, a body
 // cell may render block content (lists, disclosures) through [blockCell].
-private class DisplayCell(val num: Boolean, val inline: (FlowOrPhrasingContent.() -> Unit)? = null, val block: (FlowContent.() -> Unit)? = null)
-private fun cell(num: Boolean = false, render: FlowOrPhrasingContent.() -> Unit) = DisplayCell(num, inline = render)
-private fun blockCell(num: Boolean = false, render: FlowContent.() -> Unit) = DisplayCell(num, block = render)
-private fun numeric(value: Number) = cell(num = true) { +number(value) }
-private fun FlowContent.dataTable(description: String, columns: List<String>, rows: List<List<DisplayCell>>) {
+internal class DisplayCell(val num: Boolean, val inline: (FlowOrPhrasingContent.() -> Unit)? = null, val block: (FlowContent.() -> Unit)? = null)
+internal fun cell(num: Boolean = false, render: FlowOrPhrasingContent.() -> Unit) = DisplayCell(num, inline = render)
+internal fun blockCell(num: Boolean = false, render: FlowContent.() -> Unit) = DisplayCell(num, block = render)
+internal fun numeric(value: Number) = cell(num = true) { +number(value) }
+internal fun FlowContent.dataTable(description: String, columns: List<String>, rows: List<List<DisplayCell>>) {
     table("data-table") {
         attributes["role"] = "table"
         caption { +description }

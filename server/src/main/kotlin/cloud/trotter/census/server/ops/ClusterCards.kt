@@ -5,7 +5,9 @@ import cloud.trotter.census.contract.SkeletonKind
 import cloud.trotter.census.contract.authoring.RuleAuthoringVocabulary
 import cloud.trotter.census.server.db.CLUSTER_STATUSES
 import cloud.trotter.census.server.db.OpsCluster
+import cloud.trotter.census.server.SlotClass
 import kotlinx.html.FlowContent
+import kotlinx.html.FlowOrPhrasingContent
 import kotlinx.html.a
 import kotlinx.html.article
 import kotlinx.html.code
@@ -53,6 +55,11 @@ internal fun FlowContent.clusterFacts(cluster: OpsCluster, detail: Boolean = fal
         fact(if (detail) "New with newest observed version" else "New with this version") { yesChip(cluster.newWithVersion, "accent") }
         fact("Label visibility") { chip(if (cluster.unblinded) "Visible" else "Redacted", "neutral") }
         fact("Resolved rule") { cluster.resolvedRuleId?.let { code { +rule(it) } } ?: run { +"None" } }
+        cluster.slotClasses?.let { counts ->
+            fact("Slot classes") {
+                if (counts.isEmpty()) +"None counted" else counts.forEach { (slotClass, count) -> slotClassChip(slotClass, count) }
+            }
+        }
         fact("Notes") {
             +when {
                 cluster.notesWithheld -> "Withheld below privacy gate"
@@ -82,6 +89,17 @@ internal fun FlowContent.classChip(screenClass: String?) {
 internal fun classSummary(byClass: Map<String, Int>): String = byClass.entries.filter { it.value > 0 }.joinToString(" · ") {
     "${validated(it.key, RuleAuthoringVocabulary.SCREEN_CLASSES + "unclassified")}: ${number(it.value)}"
 }.ifEmpty { "None" }
+
+/** #80: a slot's class as a chip, optionally with how many slots hold it. Constant is candidate chrome, never proof. */
+internal fun FlowOrPhrasingContent.slotClassChip(slotClass: SlotClass, count: Int? = null) {
+    val tone = when (slotClass) {
+        SlotClass.CONSTANT -> "good"
+        SlotClass.WITHHELD -> "warn"
+        SlotClass.REGIONAL -> "accent"
+        SlotClass.VARYING, SlotClass.SHAPE, SlotClass.UNKNOWN -> "neutral"
+    }
+    chip(if (count == null) slotClass.wire else "${slotClass.wire} ${number(count)}", tone)
+}
 
 internal fun kindLabel(kind: SkeletonKind): String = when (kind) {
     SkeletonKind.SCREEN -> "Screen"

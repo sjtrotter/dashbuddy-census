@@ -6,6 +6,7 @@ import cloud.trotter.census.contract.authoring.RuleAuthoringVocabulary
 import cloud.trotter.census.server.Clock
 import cloud.trotter.census.server.Database
 import cloud.trotter.census.server.Policy
+import cloud.trotter.census.server.SlotClass
 import cloud.trotter.census.server.auth.sha256Hex
 import cloud.trotter.census.server.ingest.WireGrammars
 import cloud.trotter.census.server.ingest.StoredSampleExpiry
@@ -66,7 +67,15 @@ data class OpsCluster(
     @kotlinx.serialization.Transient val draftDay: String? = null,
     @kotlinx.serialization.Transient val wireframe: RenderedWireframe? = null,
     val kind: SkeletonKind = SkeletonKind.SCREEN,
+    /** #80: each variant's slots with their class, installs and distinct hashes; on the cluster detail only. */
+    val slots: List<SlotVariantReading>? = null,
+    /** #80: how many slots of each class the cluster's variants hold; on the paged cluster list only. */
+    val slotClasses: Map<SlotClass, Int>? = null,
 )
+
+/** #80: slot counts per class over every variant's slots, unknown included, in [SlotClass] order. */
+internal fun slotClassCounts(readings: List<SlotVariantReading>): Map<SlotClass, Int> =
+    readings.flatMap { it.slots }.groupingBy { it.slotClass }.eachCount().toSortedMap()
 
 @Serializable
 data class OpsClusterGroup(val platformAppVersion: String, val clusters: List<OpsCluster>)
@@ -151,8 +160,11 @@ class OpsStore(private val db: Database, private val clock: Clock, private val p
         val pageCount = if (rows.isEmpty()) 1 else (rows.size - 1) / pageSize + 1
         val currentPage = page.coerceIn(1, pageCount)
         val firstDays = if (version == null) emptyMap() else versionFirstDays()
-        val clusters = rows.drop((currentPage - 1) * pageSize).take(pageSize).map { row ->
-            row.copy(newWithVersion = version != null && newWithVersion(row, version, firstDays), samples = null)
+        val shown = rows.drop((currentPage - 1) * pageSize).take(pageSize)
+        val readings = slotReadings(policy, today, shown.map { it.fingerprint })
+        val clusters = shown.map { row ->
+            row.copy(newWithVersion = version != null && newWithVersion(row, version, firstDays), samples = null,
+                slotClasses = slotClassCounts(readings[row.fingerprint].orEmpty()))
         }
         OpsClusterPage(platform, version, status, rows.size, currentPage, pageSize, pageCount, clusters, classCounts(rows), kind)
     }
@@ -231,7 +243,8 @@ class OpsStore(private val db: Database, private val clock: Clock, private val p
                 ORDER BY e.received_day DESC, e.id DESC LIMIT 1""",
             fingerprint,
         ) { WireframeRender.render(it.getString("envelope"), it.getString("received_day"), it.getString("prefix")) } else null
-        row.copy(newWithVersion = newest != null && newWithVersion(row, newest, versionFirstDays()), samples = samples(row), wireframe = wireframe)
+        row.copy(newWithVersion = newest != null && newWithVersion(row, newest, versionFirstDays()), samples = samples(row), wireframe = wireframe,
+            slots = slotReadings(policy, clock.today(), listOf(row.fingerprint))[row.fingerprint].orEmpty())
     }
 
     private fun Connection.clusterRows(today: LocalDate, status: String? = null, fingerprint: String? = null): List<OpsCluster> =
