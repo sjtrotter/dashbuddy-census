@@ -24,3 +24,6 @@ deploy/aws/**/*.tfvars
 *.p12
 *.jks
 *.keystore
+*.tfvars.json
+*service-account*.json
+*-credentials.json
