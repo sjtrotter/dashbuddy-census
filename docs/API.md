@@ -264,9 +264,10 @@ Each query runs, in this order:
 
 1. **The chrome filter**, on every candidate, before anything is hashed or read. A candidate is refused unless its
    census canonical form is 1 to 40 characters of 1 to 8 words with no digit, carries no sensitive marker, no `@` and
-   no square bracket, and none of its case variants (below) has a name or address shape: a first name and an initial
-   (`Brandon C`, `Jane S.`), a customer lead-in with a tail (`Deliver to Sam`, `Pickup for …`), or a street line
-   (`Main St`). A refusal is an answer of its own, never "no match": `422 {"error":"not_chrome","refused":[<indexes>]}`,
+   no square bracket or web address, and none of its case variants (below) has a name, address or code shape: a first
+   name and an initial (`Brandon C`, `brandon c,`, `Brandon, C`), a customer or code lead-in with a tail, whatever
+   separates them (`Deliver to: Sam`, `Pick-up for …`, `Gate code: …`, `Apt B`), or a street line (`Main St!`,
+   `Oak Ave, Springfield`). The shapes read words, not characters, so punctuation never hides one. A refusal is an answer of its own, never "no match": `422 {"error":"not_chrome","refused":[<indexes>]}`,
    and no candidate of that query is compared.
 2. **The budget.** Each caller has a daily budget of candidates per UTC day (`Policy.anchorCheck`: 200 for the
    operator), refused ones included. Over it: `429 {"error":"budget_exhausted"}` with `Retry-After` to the next UTC
@@ -288,12 +289,14 @@ relies on it. Exact text only: "contains" and pattern candidates are answered on
 
 Every query, refused and over-budget ones included, writes one audit row (`anchor_checks`): caller, UTC day, the
 variant, slot, the number of candidates and the answer class (`match`, `no_answer`, `refused`, `budget_exhausted`),
-never which class the slot had. A query that passed the filter also stores its candidates' canonical text (operator-
-chosen app wording, kept so the audit shows what was guessed); a refused or over-budget one stores no text. Rows keep
-30 days, budget rows 7. Logs carry the candidate count and the answer class only.
+never which class the slot had. No candidate's text is stored: a refused or non-matching candidate leaves no trace of
+what it said. A match stores `matched`, the text the slot holds, which is a value constant on at least 90% of at least
+k installs (app wording about to go into a rule). Rows keep 30 days and are not read after that, swept or not; budget
+rows keep 7. Logs carry the candidate count and the answer class only.
 
 `GET /ops/anchor-checks?limit=N` (1 to 200, default 50) lists the audit rows, newest first:
-`[{"caller":"operator","day":"YYYY-MM-DD","fingerprint":…,"variant":{…},"slot":…,"candidates":2,"result":"match","words":[…]}]`.
+`[{"caller":"operator","day":"YYYY-MM-DD","fingerprint":…,"variant":{…},"slot":…,"candidates":2,"result":"match","matched":["Pick up by"]}]`
+(`matched` on a match only).
 
 ## Skeleton v2: value shapes, click flags, notification actions — #78
 

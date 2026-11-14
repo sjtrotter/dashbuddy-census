@@ -143,8 +143,10 @@ raw screen text; its limits are what keep it from being a way to guess customer 
 
 - **The chrome filter runs first, before anything is hashed or read.** A candidate must canonicalize to 1 to 40
   characters of 1 to 8 words with no digit (no phone number, code, PIN, house number, ZIP or price), carry no
-  sensitive marker, `@` or square bracket, and none of its case variants may have a name or address shape (a first
-  name and an initial, a customer lead-in with a tail, a street line). A query with any refused candidate is refused
+  sensitive marker, `@`, web address or square bracket, and none of its case variants may have a name, address or code
+  shape (a first name and an initial, a customer or code lead-in with a tail, a street line). The shapes read words
+  and letter runs, never raw characters, so punctuation (`brandon c,`, `Deliver to: Sam`, `Main St!`) never hides one.
+  A query with any refused candidate is refused
   whole, as `not_chrome`, and none of its candidates is compared. The phone's own filter (ADR-0011 §2) uses PII shapes
   and customer markers that live in the app, outside the Apache-2.0 contract, so the server cannot run it; its check
   (`ChromeShape`) is built from the contract's predicates and a short server list of shapes, and errs toward refusing.
@@ -164,19 +166,25 @@ raw screen text; its limits are what keep it from being a way to guess customer 
   process-wide operator bucket (60 per minute) applies. Every query writes an audit row: caller, day, variant, slot,
   candidate count and answer class.
 
-**The audit keeps the candidates' text.** A query that passed the filter stores its candidates' canonical forms in
-`anchor_checks.words`. They are operator-chosen guesses at app wording, not data a phone sent, and the audit exists to
-show what was guessed: a reviewer reading a run of name-like words that slipped the filter can only do so if the words
-are there (a keyed hash would hide exactly that). A refused query stores no text, because a refused candidate is by
-definition one that looked like a name, an address or a code. Rows name a caller (`operator`, later the agent's), never
-an install, keep 30 days, and are in `backup.sh`'s dump. Logs carry the candidate count and the answer class only.
+**The audit keeps no candidate's text.** A guess can be a name, and a stored guess would be a plaintext store of
+whatever names were tried, so the server keeps none (Sol round 1, S2): a refused or non-matching candidate leaves no
+trace of what it said, in the database, a backup or the log. A match keeps `matched`, the text the slot holds; by
+construction that is a value constant on at least 90% of at least k installs, which is app wording the operator is
+about to put in a rule. Rows name a caller (`operator`, later the agent's), never an install, keep 30 days, are never
+read after that whether or not the sweep has run, and are in `backup.sh`'s dump. Logs carry the candidate count and
+the answer class only.
 
 **What it does not stop.**
 
 - **Risk 12, constant is not chrome.** A common first name, a store or a place name can be constant on k installs.
-  The filter passes a lone first name (`Riley`) and a title-case full name (`Riley Smith`), so such a guess answers
-  `match` on a slot that constant. The controls are the regional class, the 90% share, the audit and the human review
-  before anything ships; a match is evidence for a draft, never approval.
+  The filter passes a lone first name (`Riley`) and two capitalized words (`Riley Smith`): refusing every title-case
+  pair would refuse the apps' own buttons (`Accept Order`, `Order Details`). We accept that because only a slot
+  constant on at least 90% of at least k installs ever answers. One customer's name appears on the screens of the
+  dashers who delivered to that customer, never on 90% of k dashers' screens of one slot, so no single customer's name
+  can be what such a slot holds; and a guess that does not match leaves nothing behind. What can answer is a value
+  that many dashers share, such as a store or a very common word, which is chrome-like by construction. The controls
+  are the regional class, the 90% share, the audit and the human review before anything ships; a match is evidence for
+  a draft, never approval.
 - **Risk 14, the tool binds the tool.** These limits bind this route, the dashboard and the agent token (#84). The
   live operator holds the database and the pepper and can compare any guess outside the route (risk 7).
 - **Aged Sybils (risk 5).** Someone holding the operator token and k − 1 aged installs of their own can upload a

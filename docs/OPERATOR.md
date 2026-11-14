@@ -193,9 +193,9 @@ curl --fail-with-body "$CENSUS_URL/ops/anchor-check" \
 - `429 budget_exhausted`: the day's 200 candidates are spent, refused ones included.
 
 Do not use the check to learn what a varying or regional slot holds; it cannot answer there by design. Every query is
-in the audit log with its candidates' text (refused queries without text): `GET /ops/anchor-checks`. Review it when
-the agent token (#84) starts calling the check; a run of name-like guesses that slipped the filter is the thing to
-look for.
+in the audit log (`GET /ops/anchor-checks`): who asked, which slot, how many candidates and the answer class. Only a
+match keeps text, the text the slot holds; a refused or non-matching candidate leaves no trace of what it said. When
+the agent token (#84) starts calling the check, watch its query counts and refusals per day.
 
 ## Reinstall with a new signing key
 

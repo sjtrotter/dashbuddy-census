@@ -13,9 +13,9 @@ CREATE TABLE anchor_check_budget (
 );
 
 -- One row per query: the caller, the day, the cluster variant and slot asked about, how many candidates, and the
--- answer class. `words` holds the canonical candidates of a query that passed the chrome filter (operator-chosen app
--- wording, so a reviewer can see what was guessed); a refused or over-budget query stores none of its text. Kept 30
--- days.
+-- answer class. No candidate's text is stored (Sol round 1, S2): a refused or non-matching candidate leaves no trace
+-- of what it said. A match stores `matched`, the text the slot holds, which is by definition a value constant on at
+-- least 90% of at least k installs (app wording the operator is about to put in a rule). Kept 30 days.
 CREATE TABLE anchor_checks (
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     caller text NOT NULL CHECK (caller ~ '^[a-z][a-z0-9:_-]{0,63}$'),
@@ -28,8 +28,8 @@ CREATE TABLE anchor_checks (
     slot text NOT NULL CHECK (slot ~ '^[A-Za-z0-9/]+$' AND length(slot) <= 512),
     candidates integer NOT NULL CHECK (candidates BETWEEN 1 AND 64),
     result text NOT NULL CHECK (result IN ('match', 'no_answer', 'refused', 'budget_exhausted')),
-    words text[] NULL,
-    CHECK ((result IN ('match', 'no_answer')) = (words IS NOT NULL)),
-    CHECK (words IS NULL OR cardinality(words) = candidates)
+    matched text[] NULL,
+    CHECK ((result = 'match') = (matched IS NOT NULL)),
+    CHECK (matched IS NULL OR cardinality(matched) BETWEEN 1 AND candidates)
 );
 CREATE INDEX anchor_checks_day_idx ON anchor_checks (day);

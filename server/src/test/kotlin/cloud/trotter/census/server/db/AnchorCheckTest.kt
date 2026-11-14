@@ -153,7 +153,7 @@ class AnchorCheckTest : LifecycleTestDatabase() {
             val row = store.auditLog(10).single()
             assertEquals("refused", row.result)
             assertEquals(3, row.candidates)
-            assertNull(row.words)
+            assertNull(row.matched)
             assertEquals(3, sql { it.select("SELECT candidates FROM anchor_check_budget WHERE caller = 'operator'") { r -> r.getInt(1) } })
         }
     }
@@ -180,22 +180,32 @@ class AnchorCheckTest : LifecycleTestDatabase() {
         }
     }
 
-    @Test fun `an answered query is audited with the caller, day, variant, slot, candidates and result`() = runBlocking {
+    @Test fun `the audit keeps no candidate text, only the text a matched slot holds, and stops reading at its deadline`() = runBlocking {
         Database.connect(config()).use { db ->
             constant(db)
             val store = store(db)
-            store.ask("8.0", "pick up by", "  Got it ")
-            val row = store.auditLog(10).single()
-            assertEquals(AnchorAuditRow("operator", day.toString(), scope("8.0").fingerprint, scope("8.0").variant, slot, 2, "match",
-                listOf("pick up by", "Got it")), row)
+            store.ask("8.0", "pick up by", "  Got\u00A0it ", "PICK UP BY")
+            store.ask("8.0", "Got it", "Riley Smith")
+            val (miss, match) = store.auditLog(10)
+            assertEquals(AnchorAuditRow("operator", day.toString(), scope("8.0").fingerprint, scope("8.0").variant, slot, 3, "match",
+                listOf(wordText)), match)
+            assertEquals(AnchorAuditRow("operator", day.toString(), scope("8.0").fingerprint, scope("8.0").variant, slot, 2, "no_answer"), miss)
+            // Sol round 1, S2: no column anywhere holds a candidate that did not match.
+            val text = sql { it.select("SELECT string_agg(t::text, ' ') FROM anchor_checks t") { r -> r.getString(1) }!! }
+            for (candidate in listOf("pick up by", "Got it", "Riley", "PICK UP BY")) assertFalse(text.contains(candidate), text)
 
             // Audit rows go after 30 days, budget rows with the ingest ledger's 7.
             instant = instant.plusSeconds(8 * 86_400L)
             LifecycleStore(db, clock, policy).runOnce()
             assertEquals(0L, count("anchor_check_budget"))
-            assertEquals(1L, count("anchor_checks"))
-            instant = instant.plusSeconds(22 * 86_400L)
-            assertEquals(1L, LifecycleStore(db, clock, policy).remainingDue().getValue("anchor_checks"))
+            assertEquals(2L, count("anchor_checks"))
+            // S3: on its 30th day a row is no longer read, before any sweep removes it.
+            instant = instant.plusSeconds(21 * 86_400L)
+            assertEquals(2, store.auditLog(10).size)
+            instant = instant.plusSeconds(86_400L)
+            assertEquals(emptyList<AnchorAuditRow>(), store.auditLog(10))
+            assertEquals(2L, count("anchor_checks"))
+            assertEquals(2L, LifecycleStore(db, clock, policy).remainingDue().getValue("anchor_checks"))
             LifecycleStore(db, clock, policy).runOnce()
             assertEquals(0L, count("anchor_checks"))
         }
@@ -249,7 +259,9 @@ class AnchorCheckTest : LifecycleTestDatabase() {
                     }
                     val audit = Json.parseToJsonElement(client.ops("/ops/anchor-checks?limit=10").bodyAsText()).jsonArray
                     assertEquals(listOf("refused", "no_answer", "match"), audit.map { it.jsonObject.getValue("result").jsonPrimitive.content })
-                    assertFalse(audit.first().jsonObject.containsKey("words"))
+                    assertFalse(audit.first().jsonObject.containsKey("matched"))
+                    assertFalse(audit[1].jsonObject.containsKey("matched"))
+                    assertEquals("[\"Pick up by\"]", audit[2].jsonObject.getValue("matched").toString())
                     assertError(client.ops("/ops/anchor-checks?limit=0"), 400, "bad_request")
                 }
                 val lines = logs.list.map { it.formattedMessage }

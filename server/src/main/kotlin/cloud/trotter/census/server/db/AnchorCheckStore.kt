@@ -56,11 +56,14 @@ sealed interface AnchorOutcome {
     data class BudgetExhausted(val retryAfterSeconds: Long) : AnchorOutcome
 }
 
-/** One audit row as the operator reads it (#82). [words] is absent for a refused or over-budget query. */
+/**
+ * One audit row as the operator reads it (#82). No candidate's text is kept; [matched] is the text the slot holds, on a
+ * match only.
+ */
 @Serializable
 data class AnchorAuditRow(
     val caller: String, val day: String, val fingerprint: String, val variant: SlotVariant, val slot: String,
-    val candidates: Int, val result: String, val words: List<String>? = null,
+    val candidates: Int, val result: String, val matched: List<String>? = null,
 )
 
 /**
@@ -77,7 +80,7 @@ data class AnchorAuditRow(
  *    more, yields a value; `unknown`, `varying`, `regional`, `withheld` and `shape` yield none;
  * 5. every case variant of every candidate is hashed (public census hash), keyed and compared in constant time, against
  *    the constant value or, when there is none, a placeholder whose result is discarded ([anchorMatches]);
- * 6. one audit row records the query.
+ * 6. one audit row records the query: never a candidate's text; on a match, the text the slot holds.
  *
  * So below-k, regional, varying, withheld and shape slots answer exactly as a constant slot that holds none of the
  * candidates does ("no answer"), after the same statements and the same hashing. The audit row and the log carry the
@@ -107,20 +110,22 @@ class AnchorCheckStore(private val db: Database, private val clock: Clock, priva
                 audit(caller, today, scope, slot, candidates.size, AnchorResult.REFUSED, null)
                 return@query AnchorOutcome.Refused(refused)
             }
-            val words = admitted.requireNoNulls()
-            val matches = anchorMatches(db.keying, constantValue(today, scope, slot), words)
-            audit(caller, today, scope, slot, candidates.size, if (matches.any { it != null }) AnchorResult.MATCH else AnchorResult.NO_ANSWER, words)
+            val matches = anchorMatches(db.keying, constantValue(today, scope, slot), admitted.requireNoNulls())
+            val matched = matches.filterNotNull().distinct().takeIf { it.isNotEmpty() }
+            audit(caller, today, scope, slot, candidates.size, if (matched != null) AnchorResult.MATCH else AnchorResult.NO_ANSWER, matched)
             AnchorOutcome.Answered(matches)
         }
     }
 
-    /** The newest audit rows first (#82). */
+    /** The newest audit rows inside retention first (#82): a row past its deadline is never read, swept or not. */
     suspend fun auditLog(limit: Int): List<AnchorAuditRow> = query {
         prepareStatement(
-            """SELECT caller, day, fingerprint, platform_app_version, hash_domain, filter_rev, layout, slot, candidates, result, words
-                FROM anchor_checks ORDER BY id DESC LIMIT ?""",
+            """SELECT caller, day, fingerprint, platform_app_version, hash_domain, filter_rev, layout, slot, candidates, result, matched
+                FROM anchor_checks WHERE day + ? > ? ORDER BY id DESC LIMIT ?""",
         ).use { statement ->
-            statement.setInt(1, limit)
+            statement.setInt(1, policy.anchorCheck.auditDays)
+            statement.setObject(2, clock.today())
+            statement.setInt(3, limit)
             statement.executeQuery().use { rows ->
                 buildList {
                     while (rows.next()) add(AnchorAuditRow(
@@ -153,13 +158,13 @@ class AnchorCheckStore(private val db: Database, private val clock: Clock, priva
     }
 
     private fun Connection.audit(
-        caller: AnchorCaller, today: LocalDate, scope: SlotScope, slot: String, candidates: Int, result: AnchorResult, words: List<String>?,
+        caller: AnchorCaller, today: LocalDate, scope: SlotScope, slot: String, candidates: Int, result: AnchorResult, matched: List<String>?,
     ) {
-        val array = words?.let { createArrayOf("text", it.toTypedArray()) }
+        val array = matched?.let { createArrayOf("text", it.toTypedArray()) }
         try {
             update(
                 """INSERT INTO anchor_checks (caller, day, fingerprint, platform_app_version, hash_domain, filter_rev, layout, slot,
-                        candidates, result, words) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        candidates, result, matched) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 caller.id, today, *scope.args(), slot, candidates, result.wire, array,
             )
         } finally {
