@@ -38,30 +38,48 @@ object ChromeShape {
 
     /**
      * #82: the canonical form of an anchor candidate, or null when it is refused. On top of [wordsCanonical]: at most
-     * [MAX_CANONICAL_LENGTH] characters, and none of [caseVariants] may carry a name, address or contact shape
-     * ([refusedShape]). Every variant is judged because the check compares every variant: a candidate typed in lower
-     * case must not reach a name shape through its title-case form. Pure: nothing is hashed here.
+     * [MAX_CANONICAL_LENGTH] characters; none of [caseVariants] (what is compared) may hold two consecutive words that
+     * start with a capital (Sol round 2, S1: capitalization cannot tell `Accept Order` from `Riley Smith`, so neither is
+     * ever compared); and none of [judgedForms] may carry a name, address, contact or code shape ([refusedShape]). The
+     * judged forms are wider than the compared ones on purpose: `brandon c,` is refused for its upper-case form even
+     * though only `brandon c,` and `Brandon c,` would be compared. Pure: nothing is hashed here.
      */
     fun anchorCandidate(text: String): String? {
         val canonical = wordsCanonical(text)?.takeIf { it.length <= MAX_CANONICAL_LENGTH } ?: return null
-        return canonical.takeIf { caseVariants(it).none(::refusedShape) }
+        if (caseVariants(canonical).any(::capitalizedPair)) return null
+        return canonical.takeIf { judgedForms(it).none(::refusedShape) }
     }
 
     /**
-     * The case variants of [canonical] the anchor check compares (#82), in this order and without duplicates: as sent,
-     * all lower case, all upper case, sentence case (the first letter upper, the rest lower) and title case (each
-     * word's first letter upper, the rest lower). Each maps one character to one character (`lowercaseChar`,
-     * `uppercaseChar`) and is kept only if `equals(other, ignoreCase = true)` accepts it against [canonical], the
-     * comparison the app's `hasText` makes, so a rule written with the candidate matches a slot that holds any variant.
-     * Mixed case inside a word (`DoorDash`) is compared as sent only.
+     * The case variants of [canonical] the anchor check compares (#82), in this order and without duplicates. A single
+     * word: as sent, all lower case, all upper case, and capitalized (first letter upper, the rest lower). Several
+     * words: as sent, all lower case and sentence case (the first letter upper, the rest lower) only, so no compared
+     * variant ever has two capitalized words in a row (all upper and title case would). Each maps one character to one
+     * character (`lowercaseChar`, `uppercaseChar`) and is kept only if `equals(other, ignoreCase = true)` accepts it
+     * against [canonical], the comparison the app's `hasText` makes. Mixed case inside a word (`DoorDash`) is compared
+     * as sent only. A slot holding title-case or all-caps phrases is not found here; see OPERATOR.md.
      */
     fun caseVariants(canonical: String): List<String> {
         val lower = canonical.map { it.lowercaseChar() }.joinToString("")
-        val upper = canonical.map { it.uppercaseChar() }.joinToString("")
         val sentence = capitalizeFirst(lower, everyWord = false)
-        val title = capitalizeFirst(lower, everyWord = true)
-        return listOf(canonical, lower, upper, sentence, title).distinct().filter { it.equals(canonical, ignoreCase = true) }
+        val forms = if (words(canonical).size <= 1) listOf(canonical, lower, canonical.map { it.uppercaseChar() }.joinToString(""), sentence)
+            else listOf(canonical, lower, sentence)
+        return forms.distinct().filter { it.equals(canonical, ignoreCase = true) }
     }
+
+    /**
+     * The forms [refusedShape] judges (#82): as sent, all lower case, all upper case, sentence case and title case,
+     * whether or not they are compared, so a shape the casing of the candidate hides is still seen.
+     */
+    internal fun judgedForms(canonical: String): List<String> {
+        val lower = canonical.map { it.lowercaseChar() }.joinToString("")
+        return listOf(canonical, lower, canonical.map { it.uppercaseChar() }.joinToString(""), capitalizeFirst(lower, everyWord = false),
+            capitalizeFirst(lower, everyWord = true)).distinct()
+    }
+
+    /** Two consecutive words ([words]) that both start with a capital letter (`Accept Order`, `Riley Smith`, `CAN I`). */
+    internal fun capitalizedPair(value: String): Boolean =
+        words(value).zipWithNext().any { (a, b) -> a.first[0].isUpperCase() && b.first[0].isUpperCase() }
 
     private fun capitalizeFirst(lower: String, everyWord: Boolean): String {
         val out = StringBuilder(lower.length)
