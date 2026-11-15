@@ -1,5 +1,7 @@
 package cloud.trotter.census.server.ingest
 
+import cloud.trotter.census.contract.health.ShadowRefDto
+import cloud.trotter.census.contract.health.ShadowTallyDto
 import cloud.trotter.census.server.Policy
 import cloud.trotter.census.server.healthFixture
 import kotlinx.serialization.json.Json
@@ -92,6 +94,24 @@ class HealthReportValidatorTest {
         reject("bad_count", item("parseShortfall", JsonObject(mapOf("a.b" to JsonObject(mapOf("shortfall" to JsonPrimitive(2), "eligible" to JsonPrimitive(40)))))))
         reject("bad_rule_id", item("parseShortfall", JsonObject(mapOf("a..b" to JsonPrimitive(0)))))
         reject("bad_rule_id", item("parseShortfall", JsonObject(mapOf("a.${"b".repeat(95)}" to JsonPrimitive(0)))))
+    }
+
+    @Test
+    fun `a report with shadow counts and refused probes is accepted and one without them still is (#102)`() {
+        val without = HealthReportValidator.validate(fixture, today, policy) as HealthReportVerdict.Accepted
+        assertEquals(null, without.report.shadow)
+        assertEquals(null, without.report.probeRefused)
+        val ids = mapOf("generation" to "0123456789abcdef", "rule" to "doordash.screen.offer_shadow", "digest" to "fedcba9876543210")
+        val tally = JsonObject(ids.mapValues { JsonPrimitive(it.value) } + mapOf("tied" to JsonPrimitive(20), "onUnknown" to JsonPrimitive(20)))
+        val ref = JsonObject(ids.mapValues { JsonPrimitive(it.value) })
+        val with = HealthReportValidator.validate(JsonObject(fixture + mapOf("shadow" to JsonArray(listOf(tally)), "probeRefused" to JsonArray(listOf(ref)))), today, policy)
+            as HealthReportVerdict.Accepted
+        assertEquals(listOf(ShadowTallyDto(ids.getValue("generation"), ids.getValue("rule"), ids.getValue("digest"), tied = 20, onUnknown = 20)), with.report.shadow)
+        assertEquals(listOf(ShadowRefDto(ids.getValue("generation"), ids.getValue("rule"), ids.getValue("digest"))), with.report.probeRefused)
+        reject("bad_count", item("shadow", JsonNull))
+        reject("bad_count", item("shadow", JsonArray(listOf(JsonObject(tally - "onUnknown")))))
+        reject("bad_rule_id", item("shadow", JsonArray(listOf(tally, tally))))
+        reject("unknown_field", item("probeRefused", JsonArray(listOf(JsonObject(ref + ("tied" to JsonPrimitive(0)))))))
     }
 
     @Test

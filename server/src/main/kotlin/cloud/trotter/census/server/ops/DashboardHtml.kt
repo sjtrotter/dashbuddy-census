@@ -335,6 +335,63 @@ private fun FlowContent.healthSection(health: JsonObject, today: String) = panel
             )
         })
     }
+    shadowSection(fleet, installs)
+}
+
+/** #102: the metric labels of a shadow entry, in wire order. */
+private val shadowMetrics = listOf("tied" to "Tied with a live rule", "onUnknown" to "On an UNKNOWN frame",
+    "emptyParse" to "Required field empty", "maskFail" to "Value survived the masks")
+
+/** #102: shadow-rule counts and refused probes. Diagnostics only: nothing here feeds an alarm. */
+private fun FlowContent.shadowSection(fleet: List<JsonObject>, installs: List<JsonObject>) {
+    val reported = installs.filter { it["shadow"] is JsonArray || it["probeRefused"] is JsonArray }
+    val folded = fleet.filter { it.rows("shadow").isNotEmpty() || it.rows("probeRefused").isNotEmpty() }
+    details {
+        summary { +"Shadow rules · ${number(reported.size)} per-install rows" }
+        p("muted") {
+            +"Each metric counts hits of the last 20 eligible visits for this metric. A metric whose sample was not full is "
+            +"unavailable, not 0. Generation and digest show their first 8 hex; /ops/health has them whole. No alarm reads these."
+        }
+        if (reported.isEmpty()) emptyState("No shadow counts in this window.")
+        else dataTable("Shadow rules per install · last 7 UTC days", listOf("Pseudonym", "Day", "Version", "Candidate", "Counts"),
+            reported.flatMap { row ->
+                row.rows("shadow").map { entry ->
+                    listOf(
+                        cell { code { +prefix(row.text("pseudonymPrefix")) } }, cell { date(row.text("day")) },
+                        cell { code { +version(row.text("version")) } }, blockCell { candidate(entry) },
+                        blockCell { ul { shadowMetrics.forEach { (key, label) ->
+                            val value = (entry[key] as? JsonPrimitive)?.long
+                            li { +"$label: "; if (value == null) +"unavailable" else +"${number(value)} of the last 20 eligible visits for this metric" }
+                        } } },
+                    )
+                } + row.rows("probeRefused").map { entry ->
+                    listOf(
+                        cell { code { +prefix(row.text("pseudonymPrefix")) } }, cell { date(row.text("day")) },
+                        cell { code { +version(row.text("version")) } }, blockCell { candidate(entry) }, cell { chip("Probe refused", "warn") },
+                    )
+                }
+            })
+        if (folded.isNotEmpty()) dataTable("Shadow rules, fleet · last 7 UTC days", listOf("Day", "Version", "Candidate", "Metric", "Σ hits", "Installs"),
+            folded.flatMap { row ->
+                row.rows("shadow").map { entry ->
+                    val label = shadowMetrics.firstOrNull { it.first == entry.text("metric") }?.second ?: "[redacted]"
+                    listOf(
+                        cell { date(row.text("day")) }, cell { code { +version(row.text("platformAppVersion")) } }, blockCell { candidate(entry) },
+                        cell { +"$label, of the last 20 eligible visits for this metric" }, numeric(entry.count("total")), numeric(entry.count("installs")),
+                    )
+                } + row.rows("probeRefused").map { entry ->
+                    listOf(
+                        cell { date(row.text("day")) }, cell { code { +version(row.text("platformAppVersion")) } }, blockCell { candidate(entry) },
+                        cell { chip("Probe refused", "warn") }, cell { +"—" }, numeric(entry.count("installs")),
+                    )
+                }
+            })
+    }
+}
+
+private fun FlowContent.candidate(entry: JsonObject) {
+    code { +rule(entry.text("rule")) }
+    p("muted") { +"generation "; code { +hexPrefix(entry.text("generation")) }; +" · digest "; code { +hexPrefix(entry.text("digest")) } }
 }
 
 private fun FlowContent.ledgerSection(ledger: JsonObject, today: String) = panel("ledger", "Ledger today", headingDate = today) {
@@ -421,6 +478,8 @@ internal fun version(value: String): String = safe(value.substringBefore('+')) +
 private fun validated(value: String, pattern: Regex): String = if (pattern.matches(value)) safe(value) else "[redacted]"
 internal fun platform(value: String): String = validated(value, WireGrammars.platform)
 internal fun prefix(value: String): String = validated(value, Regex("[a-fA-F0-9]{8}"))
+/** A 16-hex shadow id (#102) shown by its first 8 hex: the page never prints a 16-hex run. */
+private fun hexPrefix(value: String): String = if (Regex("[0-9a-f]{16}").matches(value)) value.take(8) else "[redacted]"
 internal fun rule(value: String): String = validated(value, WireGrammars.ruleId)
 private fun JsonObject.rows(key: String): List<JsonObject> = (get(key) as? JsonArray).orEmpty().map { it.jsonObject }
 private fun JsonObject.obj(key: String): JsonObject = get(key) as? JsonObject ?: JsonObject(emptyMap())

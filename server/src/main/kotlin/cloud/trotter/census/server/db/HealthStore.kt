@@ -100,17 +100,18 @@ class HealthStore(
         for (report in reports) {
             val tag = tagger.tag(TagPurpose.HEALTH, installId, "", report.day)
             update(
-                """INSERT INTO health_daily (epoch, install_tag, day, platform, platform_app_version, admitted, unknown, trips, rule_counts, ruleset_version, parse_shortfall)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?::jsonb)
+                """INSERT INTO health_daily (epoch, install_tag, day, platform, platform_app_version, admitted, unknown, trips, rule_counts, ruleset_version, parse_shortfall, shadow, probe_refused)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?::jsonb, ?::jsonb, ?::jsonb)
                     ON CONFLICT (install_tag, day, platform, platform_app_version) DO UPDATE SET
                         admitted = GREATEST(health_daily.admitted, EXCLUDED.admitted),
                         unknown = GREATEST(health_daily.unknown, EXCLUDED.unknown),
                         trips = GREATEST(health_daily.trips, EXCLUDED.trips),
                         rule_counts = EXCLUDED.rule_counts, ruleset_version = EXCLUDED.ruleset_version,
-                        parse_shortfall = EXCLUDED.parse_shortfall""",
+                        parse_shortfall = EXCLUDED.parse_shortfall, shadow = EXCLUDED.shadow, probe_refused = EXCLUDED.probe_refused""",
                 tag.epoch, tag.tag, report.day, report.platform, report.platformAppVersion, report.admitted, report.unknown,
                 report.trips, Json.encodeToString(report.ruleCounts), report.rulesetVersion,
                 report.parseShortfall?.let { Json.encodeToString(it) },
+                report.shadow?.let { stored.encodeToString(it) }, report.probeRefused?.let { stored.encodeToString(it) },
             )
         }
         recomputeFleet(touched)
@@ -199,6 +200,9 @@ class HealthStore(
     )
 }
 
+/** Stored shadow entries keep the wire form: an unavailable metric is absent, never null (#102). */
+private val stored = Json { explicitNulls = false }
+
 /** One `health_fleet_daily` row's key. */
 internal data class FleetKey(val day: LocalDate, val platform: String, val version: String)
 
@@ -235,10 +239,23 @@ internal fun Connection.recomputeFleet(keys: Collection<FleetKey>) {
                 ), parse AS (
                     SELECT key, sum(value::bigint) AS shortfall, count(*) AS installs
                     FROM daily, jsonb_each_text(COALESCE(parse_shortfall, '{}'::jsonb)) GROUP BY key
+                ), shadow_metrics AS (
+                    SELECT entry->>'generation' AS generation, entry->>'rule' AS rule, entry->>'digest' AS digest,
+                        metric.key AS metric, sum(metric.value::bigint) AS total, count(*) AS installs
+                    FROM daily, jsonb_array_elements(COALESCE(daily.shadow, '[]'::jsonb)) entry,
+                        jsonb_each_text(entry - 'generation' - 'rule' - 'digest') metric
+                    GROUP BY 1, 2, 3, 4
+                ), refused_probes AS (
+                    SELECT entry->>'generation' AS generation, entry->>'rule' AS rule, entry->>'digest' AS digest, count(*) AS installs
+                    FROM daily, jsonb_array_elements(COALESCE(daily.probe_refused, '[]'::jsonb)) entry GROUP BY 1, 2, 3
                 )
                 UPDATE health_fleet_daily SET installs_reporting = totals.installs, admitted = totals.admitted,
                     unknown = totals.unknown, rule_counts = (SELECT COALESCE(jsonb_object_agg(key, total), '{}'::jsonb) FROM rules),
-                    parse_shortfall = (SELECT COALESCE(jsonb_object_agg(key, jsonb_build_object('shortfall', shortfall, 'installs', installs)), '{}'::jsonb) FROM parse)
+                    parse_shortfall = (SELECT COALESCE(jsonb_object_agg(key, jsonb_build_object('shortfall', shortfall, 'installs', installs)), '{}'::jsonb) FROM parse),
+                    shadow = (SELECT COALESCE(jsonb_agg(jsonb_build_object('generation', generation, 'rule', rule, 'digest', digest,
+                        'metric', metric, 'total', total, 'installs', installs) ORDER BY rule, generation, digest, metric), '[]'::jsonb) FROM shadow_metrics),
+                    probe_refused = (SELECT COALESCE(jsonb_agg(jsonb_build_object('generation', generation, 'rule', rule, 'digest', digest,
+                        'installs', installs) ORDER BY rule, generation, digest), '[]'::jsonb) FROM refused_probes)
                 FROM totals WHERE day = ? AND platform = ? AND platform_app_version = ?""",
             key.day, key.platform, key.version, key.day, key.platform, key.version,
         )

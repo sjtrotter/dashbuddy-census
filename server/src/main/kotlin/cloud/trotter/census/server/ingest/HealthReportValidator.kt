@@ -2,6 +2,8 @@ package cloud.trotter.census.server.ingest
 
 import cloud.trotter.census.contract.health.HealthReportCheck
 import cloud.trotter.census.contract.health.HealthReportSchema
+import cloud.trotter.census.contract.health.ShadowRefDto
+import cloud.trotter.census.contract.health.ShadowTallyDto
 import cloud.trotter.census.server.Policy
 import kotlinx.serialization.json.JsonElement
 import java.time.LocalDate
@@ -18,6 +20,10 @@ data class HealthReport(
     val ruleCounts: Map<String, Int>,
     /** Per rule (#64): shortfalls among its last `PARSE_SAMPLE` eligible attempts; null when the report carried none. */
     val parseShortfall: Map<String, Int>? = null,
+    /** Shadow-rule tallies (#102); null when the report carried none. */
+    val shadow: List<ShadowTallyDto>? = null,
+    /** Probes the phone refused (#102); null when the report carried none. */
+    val probeRefused: List<ShadowRefDto>? = null,
 )
 
 sealed interface HealthReportVerdict {
@@ -36,7 +42,7 @@ object HealthReportValidator {
         is HealthReportCheck.Valid -> with(check.report) {
             HealthReportVerdict.Accepted(HealthReport(
                 LocalDate.parse(day), platform, platformAppVersion, appVersion, rulesetVersion, admitted, unknown, trips,
-                ruleCounts, parseShortfall,
+                ruleCounts, parseShortfall, shadow, probeRefused,
             ))
         }
     }
