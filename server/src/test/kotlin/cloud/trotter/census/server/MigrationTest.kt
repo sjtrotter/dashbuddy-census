@@ -200,7 +200,7 @@ class MigrationTest {
                 run("INSERT INTO health_daily (install_id, day, platform, platform_app_version, admitted, unknown, trips, rule_counts) VALUES (?, ?, 'doordash', '8.0', 1, 0, 0, '{}')", id, day)
             }
 
-            assertEquals(4, flyway().load().migrate().migrationsExecuted)  // V8, then V9 (#80) on the re-keyed rows, V10 (#81), V11 (#82)
+            assertEquals(5, flyway().load().migrate().migrationsExecuted)  // V8, then V9 (#80) on the re-keyed rows, V10 (#81), V11 (#82), V12 (#64)
             assertEquals(0, flyway().load().migrate().migrationsExecuted)
 
             fun strings(sql: String) = connection.createStatement().use { statement ->
@@ -272,7 +272,7 @@ class MigrationTest {
                 WHERE table_schema = '$schema' AND column_name = 'install_id' AND table_name IN ('token_sightings_v5', 'health_daily') ORDER BY table_name"""))
             assertEquals(before, connection.dumpRows(schema).toSet())
 
-            assertEquals(4, flyway(testKeying).load().migrate().migrationsExecuted)  // V8, then V9 (#80), V10 (#81), V11 (#82)
+            assertEquals(5, flyway(testKeying).load().migrate().migrationsExecuted)  // V8, then V9 (#80), V10 (#81), V11 (#82), V12 (#64)
             assertEquals(1L, connection.installRows("token_sightings_v5", install, today))
         }
     }
@@ -465,8 +465,9 @@ class MigrationTest {
     fun `empty database applies every migration and contains exactly twenty-seven application tables`() {
         val flyway = Database.flyway(postgres.jdbcUrl, postgres.username, postgres.password, testKeying).load()
         // V1 schema, V2 classification, V3 tombstones, V4 notifications, V5 lifecycle, V6 keep less (#79), V7 keyed (#85),
-        // V8 epoch pseudonyms (#86, which drops the three pre-V5 tables), V9 slot sightings (#80), V10 the contributor tier (#81), V11 the anchor check (#82).
-        assertEquals(11, flyway.migrate().migrationsExecuted)
+        // V8 epoch pseudonyms (#86, which drops the three pre-V5 tables), V9 slot sightings (#80), V10 the contributor tier (#81), V11 the anchor check (#82),
+        // V12 health parse counts (#64).
+        assertEquals(12, flyway.migrate().migrationsExecuted)
         val expected = setOf(
             "installs", "clusters", "cluster_samples", "trusted_envelopes", "health_daily", "health_fleet_daily", "ingest_ledger",
             "nonces", "withdrawals", "token_sightings_v5", "cluster_sightings_v5", "vocabulary_v5", "filter_floor", "ingest_pause",
@@ -536,6 +537,9 @@ class MigrationTest {
                         assertEquals(null, columns["$table.install_id"], table)
                     }
                     assertEquals(listOf("bytea", null, "NO", null), columns["epoch_keys.wrapped"])
+                    // #64: per-rule parse counts; NULL on a per-install row means the report did not carry them.
+                    assertEquals(listOf("jsonb", null, "YES", null), columns["health_daily.parse_shortfall"])
+                    assertEquals(listOf("jsonb", null, "NO", "'{}'::jsonb"), columns["health_fleet_daily.parse_shortfall"])
                     assertEquals(setOf("installs", "nonces", "ingest_ledger", "trusted_envelopes", "contributor_grants"),
                         columns.keys.filter { it.endsWith(".install_id") }.map { it.substringBefore('.') }.toSet())
                 }

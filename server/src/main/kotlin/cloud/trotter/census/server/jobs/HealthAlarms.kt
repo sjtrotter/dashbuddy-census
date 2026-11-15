@@ -1,5 +1,6 @@
 package cloud.trotter.census.server.jobs
 
+import cloud.trotter.census.contract.health.RuleParseCountDto
 import cloud.trotter.census.server.Clock
 import cloud.trotter.census.server.db.InstallStore
 import cloud.trotter.census.server.db.HealthStore
@@ -7,6 +8,7 @@ import cloud.trotter.census.server.ingest.HealthReport
 import cloud.trotter.census.server.ingest.WireGrammars
 import cloud.trotter.census.server.today
 import org.slf4j.LoggerFactory
+import java.math.BigInteger
 import java.time.Duration
 import java.time.Instant
 import java.time.LocalDate
@@ -23,6 +25,8 @@ data class DayReport(
     val unknown: Long = 0,
     val trips: Long = 0,
     val ruleCounts: Map<String, Long> = emptyMap(),
+    /** Per-rule parse counts (#64); null when no report for the day carried them. */
+    val parseShortfall: Map<String, RuleParseCountDto>? = null,
 )
 
 data class FleetDay(
@@ -77,10 +81,22 @@ fun renderAlarm(alarm: Alarm): String {
     return "kind=$kind\nplatform=$platform\nversion=$version\ninstall_prefix=-\nrule_ids=$rules"
 }
 
-private val alarmKinds = setOf("silent_rule_death", "rule_share_cliff", "trips", "fleet_unknown", "new_clusters", "silence", "lifecycle_failure", "lifecycle_backlog", "lifecycle_stale")
+/** Every kind [renderAlarm] lets through; the host publisher's `KINDS` (deploy/aws/cloud-init.yaml.tftpl) lists the same. */
+internal val alarmKinds = setOf("silent_rule_death", "parse_shortfall", "rule_share_cliff", "trips", "fleet_unknown", "new_clusters", "silence", "lifecycle_failure", "lifecycle_backlog", "lifecycle_stale")
 private val platformPattern = Regex("^[a-z_][a-z0-9_]{0,31}$")
 /** The two-line withdrawal body: `install_id_hash=<64 lower hex>\nwithdrawn_at=<ISO-8601 UTC instant>`. */
 internal val withdrawalBodyPattern = Regex("^install_id_hash=[0-9a-f]{64}\\nwithdrawn_at=\\d{4}-\\d{2}-\\d{2}T[0-9:.]+Z$")
+
+/** One day's parse counts summed across its stored versions; null when none of them carried any. */
+private fun sumParseCounts(rows: List<DayReport>): Map<String, RuleParseCountDto>? {
+    val carried = rows.mapNotNull { it.parseShortfall }.ifEmpty { return null }
+    val sums = linkedMapOf<String, RuleParseCountDto>()
+    for (counts in carried) for ((rule, count) in counts) {
+        val sum = sums[rule]
+        sums[rule] = if (sum == null) count else RuleParseCountDto(sum.shortfall + count.shortfall, sum.eligible + count.eligible)
+    }
+    return sums
+}
 
 /** Process-local counters, like PipelineStats: no identities or report contents are retained. */
 class AlarmStats {
@@ -103,6 +119,47 @@ fun silentRuleDeath(history: List<DayReport>, today: DayReport, minMedian: Int =
         } else counts[counts.size / 2].toDouble()
         median >= minMedian && today.ruleCounts.getOrDefault(rule, 0) == 0L
     }
+}
+
+/**
+ * #64: rules whose parse shortfall rate jumped against the rule's own history on one install (k = 1).
+ *
+ * A day counts for a rule when its stored reports carry that rule's parse counts, summed across app versions, with at
+ * least [minEligible] eligible attempts. The rule needs at least [minDays] such days in the 28 calendar days before
+ * the reporting day, and the reporting day must count too. It fires when the reporting day's rate (shortfall /
+ * eligible) is at least [risePercent] percentage points above the median of those days' rates. Exact rational
+ * arithmetic: a rise of exactly the threshold fires, one a hair below never rounds into an alarm.
+ */
+fun parseShortfallRise(
+    history: List<DayReport>,
+    today: DayReport,
+    minDays: Int = 3,
+    minEligible: Int = 20,
+    risePercent: Int = 25,
+): List<String> {
+    val current = today.parseShortfall ?: return emptyList()
+    val days = history.filter {
+        it.platform == today.platform && it.day >= today.day.minusDays(28) && it.day < today.day
+    }.groupBy { it.day }.values
+    return current.keys.sorted().filter { rule ->
+        val now = current.getValue(rule)
+        if (now.eligible < minEligible) return@filter false
+        val rates = days.mapNotNull { rows ->
+            sumParseCounts(rows)?.get(rule)?.takeIf { it.eligible >= minEligible }
+                ?.let { Rate(it.shortfall.toBigInteger(), it.eligible.toBigInteger()) }
+        }.sorted()
+        if (rates.size < minDays) return@filter false
+        val median = if (rates.size % 2 == 1) rates[rates.size / 2] else rates[rates.size / 2 - 1].midpoint(rates[rates.size / 2])
+        // now/eligible - median >= risePercent/100, cross-multiplied.
+        val rise = (now.shortfall.toBigInteger() * median.den - median.num * now.eligible.toBigInteger()) * 100.toBigInteger()
+        rise >= risePercent.toBigInteger() * now.eligible.toBigInteger() * median.den
+    }
+}
+
+/** A non-negative rational with a positive denominator. */
+private data class Rate(val num: BigInteger, val den: BigInteger) : Comparable<Rate> {
+    override fun compareTo(other: Rate): Int = (num * other.den).compareTo(other.num * den)
+    fun midpoint(other: Rate) = Rate(num * other.den + other.num * den, 2.toBigInteger() * den * other.den)
 }
 
 fun ruleShareCliff(previous: FleetDay, current: FleetDay, minInstalls: Int = 2, drop: Double = 0.8): List<String> {
@@ -197,11 +254,15 @@ class HealthAlarms(
             rows.first().copy(
                 platformAppVersion = rows.maxOf { it.platformAppVersion }, admitted = rows.sumOf { it.admitted },
                 unknown = rows.sumOf { it.unknown }, trips = rows.sumOf { it.trips }, ruleCounts = counts,
+                parseShortfall = sumParseCounts(rows),
             )
         }
         for (report in currentDays) {
             val rules = silentRuleDeath(inputs.history, report)
             if (rules.isNotEmpty()) emit(Alarm("silent_rule_death", report.platform, report.platformAppVersion, rules), installId)
+            // #64: delivered once per (platform, version, rule) a UTC day, whichever install trips it first.
+            val rotting = parseShortfallRise(inputs.history, report)
+            if (rotting.isNotEmpty()) emit(Alarm("parse_shortfall", report.platform, report.platformAppVersion, rotting), null)
         }
         for ((previous, current) in inputs.comparisons) {
             val rules = ruleShareCliff(previous, current)

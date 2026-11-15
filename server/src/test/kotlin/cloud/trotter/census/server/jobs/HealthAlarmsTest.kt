@@ -4,11 +4,13 @@ import ch.qos.logback.classic.Level
 import ch.qos.logback.classic.Logger
 import ch.qos.logback.classic.spi.ILoggingEvent
 import ch.qos.logback.core.read.ListAppender
+import cloud.trotter.census.contract.health.RuleParseCountDto
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.slf4j.LoggerFactory
+import java.io.File
 import java.time.Instant
 import java.time.LocalDate
 
@@ -43,6 +45,64 @@ class HealthAlarmsTest {
         assertEquals(emptyList<String>(), silentRuleDeath(history.map { it.copy(day = it.day.minusDays(28)) }, current))
         assertEquals(emptyList<String>(), silentRuleDeath(history.map { it.copy(platform = "uber") }, current))
         assertEquals(emptyList<String>(), silentRuleDeath(history.take(1) + history.drop(1).map { it.copy(ruleCounts = emptyMap()) }, current))
+    }
+
+    @Test
+    fun `a rule whose shortfall rate jumps against its own history raises parse_shortfall and a steady one does not`() {
+        // Offer reads fall short on 10% of eligible frames on a normal day; the receipt rule on 2%.
+        val history = (1L..5L).map { ago ->
+            parseDay(day.minusDays(ago), offer to RuleParseCountDto(4, 40), waiting to RuleParseCountDto(2, 100))
+        }
+        val steady = parseDay(day, offer to RuleParseCountDto(5, 40), waiting to RuleParseCountDto(3, 100))
+        assertEquals(emptyList<String>(), parseShortfallRise(history, steady))
+        val broken = parseDay(day, offer to RuleParseCountDto(30, 40), waiting to RuleParseCountDto(3, 100))
+        assertEquals(listOf(offer), parseShortfallRise(history, broken))
+        // A high count on a big day is not a jump: the rate decides, not the number.
+        assertEquals(emptyList<String>(), parseShortfallRise(history, parseDay(day, offer to RuleParseCountDto(40, 400))))
+    }
+
+    @Test
+    fun `parse_shortfall needs three counting history days, a counting reporting day and a 25-point rise`() {
+        val history = (1L..3L).map { parseDay(day.minusDays(it), offer to RuleParseCountDto(2, 20)) }
+        // 10% normal; 35% is exactly 25 points up and fires, 34% does not.
+        assertEquals(listOf(offer), parseShortfallRise(history, parseDay(day, offer to RuleParseCountDto(7, 20))))
+        assertEquals(emptyList<String>(), parseShortfallRise(history, parseDay(day, offer to RuleParseCountDto(34, 100))))
+        val jump = parseDay(day, offer to RuleParseCountDto(20, 20))
+        assertEquals(emptyList<String>(), parseShortfallRise(history.take(2), jump), "two days of history are too few")
+        assertEquals(emptyList<String>(), parseShortfallRise(history, parseDay(day, offer to RuleParseCountDto(19, 19))), "19 eligible today")
+        assertEquals(emptyList<String>(), parseShortfallRise(history.map { parseDay(it.day, offer to RuleParseCountDto(1, 19)) }, jump), "thin history days do not count")
+        assertEquals(emptyList<String>(), parseShortfallRise(history.map { it.copy(parseShortfall = null) }, jump), "history without counts")
+        assertEquals(emptyList<String>(), parseShortfallRise(history.map { parseDay(it.day, waiting to RuleParseCountDto(2, 20)) }, jump), "another rule's history")
+        assertEquals(emptyList<String>(), parseShortfallRise(history.map { it.copy(day = it.day.minusDays(28)) }, jump), "outside the 28-day window")
+        assertEquals(emptyList<String>(), parseShortfallRise(history.map { it.copy(platform = "uber") }, jump))
+        assertEquals(emptyList<String>(), parseShortfallRise(history, jump.copy(parseShortfall = null)), "a report without counts")
+        // Two versions on one history day sum into one day: 1/10 + 1/10 is 2/20, a counting day.
+        val split = history.take(2) + listOf(history[2].copy(parseShortfall = mapOf(offer to RuleParseCountDto(1, 10))),
+            history[2].copy(platformAppVersion = "8.1", parseShortfall = mapOf(offer to RuleParseCountDto(1, 10))))
+        assertEquals(listOf(offer), parseShortfallRise(split, jump))
+    }
+
+    @Test
+    fun `the median of daily rates sets the normal level, so one bad past day does not mask a break`() {
+        val history = listOf(RuleParseCountDto(2, 20), RuleParseCountDto(2, 20), RuleParseCountDto(20, 20), RuleParseCountDto(2, 20))
+            .mapIndexed { index, counts -> parseDay(day.minusDays(index + 1L), offer to counts) }
+        // Even count: the median is the mean of the two middle rates, (10% + 10%) / 2.
+        assertEquals(listOf(offer), parseShortfallRise(history, parseDay(day, offer to RuleParseCountDto(7, 20))))
+        assertEquals(emptyList<String>(), parseShortfallRise(history, parseDay(day, offer to RuleParseCountDto(6, 20))))
+    }
+
+    @Test
+    fun `parse_shortfall renders and both alarm-kind allowlists list every kind`() {
+        assertEquals(
+            "kind=parse_shortfall\nplatform=doordash\nversion=8.0\ninstall_prefix=-\nrule_ids=[$offer]",
+            renderAlarm(Alarm("parse_shortfall", "doordash", "8.0", listOf(offer))),
+        )
+        // The host publisher (cloud-init) drops a spool file whose kind it does not list, so the two lists must agree.
+        val template = File("../deploy/aws/cloud-init.yaml.tftpl").readText()
+        val kinds = Regex("""KINDS = r'\(\?:([a-z_|]+)\|\\\[redacted\\\]\)'""").find(template)
+        assertTrue(kinds != null, "KINDS line not found in cloud-init.yaml.tftpl")
+        assertEquals(alarmKinds, kinds!!.groupValues[1].split('|').toSet())
+        assertTrue("parse_shortfall" in alarmKinds)
     }
 
     @Test
@@ -85,6 +145,9 @@ class HealthAlarmsTest {
         assertFalse(silence(boundary, startedAt, now, day.minusDays(2), day, false))
         assertFalse(silence(boundary, startedAt, now, null, day, true))
     }
+
+    private fun parseDay(day: LocalDate, vararg counts: Pair<String, RuleParseCountDto>) =
+        DayReport(day, "doordash", "8.0", 800, parseShortfall = mapOf(*counts))
 
     @Test
     fun `logging sink emits only alarm dimensions at warn`() {

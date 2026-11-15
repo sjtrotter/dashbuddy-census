@@ -299,7 +299,7 @@ write_files:
       # keep the health-alarm slots. One `kind=` group either way, so the subject/dispatch is unchanged.
       # Each slot set is BOUND to its kind (a withdrawal body never publishes under a health subject and vice
       # versa); the kind is group 1 (health) or group 2 (withdrawal).
-      KINDS = r'(?:silent_rule_death|rule_share_cliff|trips|fleet_unknown|new_clusters|silence|lifecycle_failure|lifecycle_backlog|lifecycle_stale|\[redacted\])'
+      KINDS = r'(?:silent_rule_death|parse_shortfall|rule_share_cliff|trips|fleet_unknown|new_clusters|silence|lifecycle_failure|lifecycle_backlog|lifecycle_stale|\[redacted\])'
       RULE = r'(?:[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*){1,4}|\[redacted\])'
       MESSAGE = re.compile(
           r'(?:kind=(' + KINDS + r')\n'
