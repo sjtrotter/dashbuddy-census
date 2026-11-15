@@ -2,7 +2,6 @@ package cloud.trotter.census.server.ingest
 
 import cloud.trotter.census.contract.health.HealthReportCheck
 import cloud.trotter.census.contract.health.HealthReportSchema
-import cloud.trotter.census.contract.health.RuleParseCountDto
 import cloud.trotter.census.server.Policy
 import kotlinx.serialization.json.JsonElement
 import java.time.LocalDate
@@ -17,8 +16,8 @@ data class HealthReport(
     val unknown: Int,
     val trips: Int,
     val ruleCounts: Map<String, Int>,
-    /** Per-rule parse counts (#64); null when the report did not carry them. */
-    val parseShortfall: Map<String, RuleParseCountDto>? = null,
+    /** Per rule (#64): shortfalls among its last `PARSE_SAMPLE` eligible attempts; null when the report carried none. */
+    val parseShortfall: Map<String, Int>? = null,
 )
 
 sealed interface HealthReportVerdict {

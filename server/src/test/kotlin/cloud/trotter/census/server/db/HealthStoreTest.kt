@@ -459,12 +459,7 @@ class HealthStoreTest {
         val hash = hashSecret(key)
         val rule = "doordash.screen.offer_popup"
         val alarms = mutableListOf<Alarm>()
-        fun report(day: LocalDate, shortfall: Int?): JsonObject = JsonObject(healthFixture() + buildMap<String, JsonElement> {
-            put("day", JsonPrimitive(day.toString()))
-            if (shortfall != null) put("parseShortfall", JsonObject(mapOf(rule to JsonObject(mapOf(
-                "shortfall" to JsonPrimitive(shortfall), "eligible" to JsonPrimitive(40),
-            )))))
-        })
+        fun report(day: LocalDate, shortfall: Int?): JsonObject = parseReport(day, shortfall?.let { mapOf(rule to it) })
         Database.connect(config()).use { db ->
             val evaluator = HealthAlarms(HealthStore(db, clock), clock, startedAt = clock.now(), sink = AlarmSink { alarms += it })
             testApplication {
@@ -479,18 +474,19 @@ class HealthStoreTest {
                     // A report without the counts is still accepted and stores none.
                     post(first, report(day.minusDays(4), null))
                     assertEquals(listOf<String?>(null), parseColumn(first, day, day.minusDays(4)))
-                    // Normal level: 2 of 40 (5%) on three history days, then a steady reporting day.
-                    post(first, *(1L..3L).map { report(day.minusDays(it), 2) }.toTypedArray())
-                    post(first, report(day, 3))
+                    // Normal level: 1 of the 20 sampled attempts (5%) on three history days, then a steady reporting day.
+                    post(first, *(1L..3L).map { report(day.minusDays(it), 1) }.toTypedArray())
+                    post(first, report(day, 2))
                     assertTrue(alarms.none { it.kind == "parse_shortfall" })
-                    // The rule breaks: 30 of 40 (75%) is one alarm, re-sends and a second phone's break add none.
-                    post(first, report(day, 30))
-                    post(first, report(day, 30))
-                    post(second, *(1L..3L).map { report(day.minusDays(it), 2) }.toTypedArray())
-                    post(second, report(day, 30))
+                    // The rule breaks: 15 of 20 (75%) is one alarm, re-sends and a second phone's break add none.
+                    post(first, report(day, 15))
+                    post(first, report(day, 15))
+                    post(second, *(1L..3L).map { report(day.minusDays(it), 1) }.toTypedArray())
+                    post(second, report(day, 15))
                     assertEquals(listOf(Alarm("parse_shortfall", "doordash", "8.0.0", listOf(rule))), alarms.filter { it.kind == "parse_shortfall" })
-                    assertEquals(listOf<String?>("""{"$rule": {"eligible": 40, "shortfall": 30}}"""), parseColumn(first, day, day))
-                    assertEquals("""{"$rule": {"eligible": 80, "shortfall": 60}}""", sql { connection ->
+                    assertEquals(listOf<String?>("""{"$rule": 15}"""), parseColumn(first, day, day))
+                    // The fleet keeps each rule's summed shortfalls and how many installs sampled it: 30 of 2 × 20.
+                    assertEquals("""{"$rule": {"installs": 2, "shortfall": 30}}""", sql { connection ->
                         connection.select("SELECT parse_shortfall::text FROM health_fleet_daily WHERE day = ? AND platform = 'doordash' AND platform_app_version = '8.0.0'", day) { it.getString(1) }
                     })
                 } finally {
@@ -499,6 +495,47 @@ class HealthStoreTest {
             }
         }
     }
+
+    @Test
+    fun `a break across the longest parse report's rules reaches the host in spool-sized alarms, each rule once (#64)`() {
+        val day = LocalDate.of(2026, 10, 9)
+        val clock = object : Clock { override fun now(): Instant = Instant.parse("2026-10-09T12:00:00Z") }
+        val id = UUID.randomUUID()
+        val key = secret(99)
+        val rules = (0 until 64).map { "a.${"c".repeat(91)}${"%03d".format(it)}" }
+        val alarms = mutableListOf<Alarm>()
+        Database.connect(config()).use { db ->
+            val evaluator = HealthAlarms(HealthStore(db, clock), clock, startedAt = clock.now(), sink = AlarmSink { alarms += it })
+            testApplication {
+                application { module(config(), db, clock, evaluator) }
+                suspend fun post(report: JsonObject) {
+                    assertTrue(report.toString().toByteArray().size in 6_000..8_192)
+                    val response = client.signed(clock, id.toString(), key, HttpMethod.Post, "/v1/health", body(listOf(report)))
+                    assertEquals(HttpStatusCode.OK, response.status)
+                    assertEquals(Json.parseToJsonElement("""{"status":"accepted","accepted":1,"rejected":{}}"""), Json.parseToJsonElement(response.bodyAsText()))
+                }
+                assertEquals(HttpStatusCode.OK, client.enrol(id.toString(), key).status)
+                try {
+                    for (ago in 1L..3L) post(parseReport(day.minusDays(ago), rules.associateWith { 0 }))
+                    post(parseReport(day, rules.associateWith { 20 }))
+                    post(parseReport(day, rules.associateWith { 20 }))
+                    assertTrue(alarms.size > 1)
+                    for (alarm in alarms) {
+                        assertEquals("parse_shortfall", alarm.kind)
+                        assertTrue(renderAlarm(alarm).toByteArray().size <= 4_096 - 512)
+                    }
+                    assertEquals(rules, alarms.flatMap { it.ruleIds })
+                } finally {
+                    InstallStore(db, clock).withdraw(id, hashSecret(key))
+                }
+            }
+        }
+    }
+
+    private fun parseReport(day: LocalDate, counts: Map<String, Int>?): JsonObject = JsonObject(healthFixture() + buildMap<String, JsonElement> {
+        put("day", JsonPrimitive(day.toString()))
+        if (counts != null) put("parseShortfall", JsonObject(counts.mapValues { JsonPrimitive(it.value) }))
+    })
 
     private fun parseColumn(id: UUID, today: LocalDate, day: LocalDate): List<String?> = sql { connection ->
         val tag = connection.testTag(TagPurpose.HEALTH, id, "", today, day)

@@ -1,6 +1,6 @@
 package cloud.trotter.census.server.jobs
 
-import cloud.trotter.census.contract.health.RuleParseCountDto
+import cloud.trotter.census.contract.health.HealthReportSchema
 import cloud.trotter.census.server.Clock
 import cloud.trotter.census.server.db.InstallStore
 import cloud.trotter.census.server.db.HealthStore
@@ -25,9 +25,16 @@ data class DayReport(
     val unknown: Long = 0,
     val trips: Long = 0,
     val ruleCounts: Map<String, Long> = emptyMap(),
-    /** Per-rule parse counts (#64); null when no report for the day carried them. */
-    val parseShortfall: Map<String, RuleParseCountDto>? = null,
+    /** Per-rule parse samples (#64); null when no report for the day carried them. */
+    val parseShortfall: Map<String, ParseSamples>? = null,
 )
+
+/**
+ * #64: [samples] stored reports sampled a rule, each counting the shortfalls among its last
+ * [HealthReportSchema.PARSE_SAMPLE] eligible attempts; [shortfall] sums them. The rate is
+ * `shortfall / (samples × PARSE_SAMPLE)`.
+ */
+data class ParseSamples(val shortfall: Int, val samples: Int)
 
 data class FleetDay(
     val day: LocalDate,
@@ -75,7 +82,9 @@ fun renderAlarm(alarm: Alarm): String {
     val kind = alarm.kind.takeIf { it in alarmKinds } ?: "[redacted]"
     val platform = alarm.platform.takeIf { platformPattern.matches(it) } ?: "[redacted]"
     val version = alarm.version.takeIf { WireGrammars.platformAppVersion.matches(it) } ?: "[redacted]"
-    val rules = alarm.ruleIds.map { it.takeIf { rule -> WireGrammars.ruleId.matches(rule) } ?: "[redacted]" }
+    val rules = alarm.ruleIds.map {
+        it.takeIf { rule -> rule.length <= MAX_ALARM_RULE_ID_LENGTH && WireGrammars.ruleId.matches(rule) } ?: "[redacted]"
+    }
     // #79: alarms carry no install key. The line stays, always `-`, because the deployed host publisher's grammar
     // requires exactly these five lines; dropping it would need every host's publisher updated first.
     return "kind=$kind\nplatform=$platform\nversion=$version\ninstall_prefix=-\nrule_ids=$rules"
@@ -87,15 +96,44 @@ private val platformPattern = Regex("^[a-z_][a-z0-9_]{0,31}$")
 /** The two-line withdrawal body: `install_id_hash=<64 lower hex>\nwithdrawn_at=<ISO-8601 UTC instant>`. */
 internal val withdrawalBodyPattern = Regex("^install_id_hash=[0-9a-f]{64}\\nwithdrawn_at=\\d{4}-\\d{2}-\\d{2}T[0-9:.]+Z$")
 
-/** One day's parse counts summed across its stored versions; null when none of them carried any. */
-private fun sumParseCounts(rows: List<DayReport>): Map<String, RuleParseCountDto>? {
+/** One day's parse samples summed across its stored versions; null when none of them carried any. */
+private fun sumParseSamples(rows: List<DayReport>): Map<String, ParseSamples>? {
     val carried = rows.mapNotNull { it.parseShortfall }.ifEmpty { return null }
-    val sums = linkedMapOf<String, RuleParseCountDto>()
-    for (counts in carried) for ((rule, count) in counts) {
+    val sums = linkedMapOf<String, ParseSamples>()
+    for (samples in carried) for ((rule, sample) in samples) {
         val sum = sums[rule]
-        sums[rule] = if (sum == null) count else RuleParseCountDto(sum.shortfall + count.shortfall, sum.eligible + count.eligible)
+        sums[rule] = if (sum == null) sample else ParseSamples(sum.shortfall + sample.shortfall, sum.samples + sample.samples)
     }
     return sums
+}
+
+/** The host publisher (deploy/aws/cloud-init.yaml.tftpl) deletes a spool file larger than this. */
+internal const val PUBLISHER_MAX_BYTES = 4_096
+
+/** Each delivered alarm renders within this, a 512-byte margin under the publisher; see [splitForPublisher]. */
+internal const val ALARM_FILE_BUDGET = PUBLISHER_MAX_BYTES - 512
+
+/** A rule id longer than this renders as `[redacted]`, so a single rule always fits [ALARM_FILE_BUDGET]. */
+internal const val MAX_ALARM_RULE_ID_LENGTH = 128
+
+/**
+ * Splits [alarm] into alarms with the same dimensions whose rule lists, in order, cover its rules exactly once and each
+ * render within [budget] bytes. An alarm without rules, or one that already fits, comes back unchanged.
+ */
+internal fun splitForPublisher(alarm: Alarm, budget: Int = ALARM_FILE_BUDGET): List<Alarm> {
+    fun size(rules: List<String>) = renderAlarm(alarm.copy(ruleIds = rules)).toByteArray(Charsets.UTF_8).size
+    if (alarm.ruleIds.isEmpty() || size(alarm.ruleIds) <= budget) return listOf(alarm)
+    val parts = mutableListOf<Alarm>()
+    var chunk = mutableListOf<String>()
+    for (rule in alarm.ruleIds) {
+        if (chunk.isNotEmpty() && size(chunk + rule) > budget) {
+            parts += alarm.copy(ruleIds = chunk)
+            chunk = mutableListOf()
+        }
+        chunk += rule
+    }
+    parts += alarm.copy(ruleIds = chunk)
+    return parts
 }
 
 /** Process-local counters, like PipelineStats: no identities or report contents are retained. */
@@ -122,39 +160,35 @@ fun silentRuleDeath(history: List<DayReport>, today: DayReport, minMedian: Int =
 }
 
 /**
- * #64: rules whose parse shortfall rate jumped against the rule's own history on one install (k = 1).
+ * #64: rules whose sampled parse shortfall rate jumped against the rule's own history on one install (k = 1).
  *
- * A day counts for a rule when its stored reports carry that rule's parse counts, summed across app versions, with at
- * least [minEligible] eligible attempts. The rule needs at least [minDays] such days in the 28 calendar days before
- * the reporting day, and the reporting day must count too. It fires when the reporting day's rate (shortfall /
- * eligible) is at least [risePercent] percentage points above the median of those days' rates. Exact rational
- * arithmetic: a rise of exactly the threshold fires, one a hair below never rounds into an alarm.
+ * A report names a rule only when the rule had at least [HealthReportSchema.PARSE_SAMPLE] eligible attempts that day,
+ * so presence is the minimum denominator. A day's rate is its summed shortfalls over (its samples × PARSE_SAMPLE),
+ * summed across app versions. The rule needs at least [minDays] days carrying it in the 28 calendar days before the
+ * reporting day, and fires when the reporting day's rate is at least [risePercent] percentage points above the median
+ * of those days' rates. Exact rational arithmetic: a rise of exactly the threshold fires, one below never rounds up.
  */
 fun parseShortfallRise(
     history: List<DayReport>,
     today: DayReport,
     minDays: Int = 3,
-    minEligible: Int = 20,
     risePercent: Int = 25,
 ): List<String> {
     val current = today.parseShortfall ?: return emptyList()
     val days = history.filter {
         it.platform == today.platform && it.day >= today.day.minusDays(28) && it.day < today.day
-    }.groupBy { it.day }.values
+    }.groupBy { it.day }.values.mapNotNull(::sumParseSamples)
     return current.keys.sorted().filter { rule ->
-        val now = current.getValue(rule)
-        if (now.eligible < minEligible) return@filter false
-        val rates = days.mapNotNull { rows ->
-            sumParseCounts(rows)?.get(rule)?.takeIf { it.eligible >= minEligible }
-                ?.let { Rate(it.shortfall.toBigInteger(), it.eligible.toBigInteger()) }
-        }.sorted()
+        val rates = days.mapNotNull { it[rule]?.rate() }.sorted()
         if (rates.size < minDays) return@filter false
         val median = if (rates.size % 2 == 1) rates[rates.size / 2] else rates[rates.size / 2 - 1].midpoint(rates[rates.size / 2])
-        // now/eligible - median >= risePercent/100, cross-multiplied.
-        val rise = (now.shortfall.toBigInteger() * median.den - median.num * now.eligible.toBigInteger()) * 100.toBigInteger()
-        rise >= risePercent.toBigInteger() * now.eligible.toBigInteger() * median.den
+        val now = current.getValue(rule).rate()
+        // now - median >= risePercent/100, cross-multiplied.
+        (now.num * median.den - median.num * now.den) * 100.toBigInteger() >= risePercent.toBigInteger() * now.den * median.den
     }
 }
+
+private fun ParseSamples.rate() = Rate(shortfall.toBigInteger(), samples.toBigInteger() * HealthReportSchema.PARSE_SAMPLE.toBigInteger())
 
 /** A non-negative rational with a positive denominator. */
 private data class Rate(val num: BigInteger, val den: BigInteger) : Comparable<Rate> {
@@ -254,7 +288,7 @@ class HealthAlarms(
             rows.first().copy(
                 platformAppVersion = rows.maxOf { it.platformAppVersion }, admitted = rows.sumOf { it.admitted },
                 unknown = rows.sumOf { it.unknown }, trips = rows.sumOf { it.trips }, ruleCounts = counts,
-                parseShortfall = sumParseCounts(rows),
+                parseShortfall = sumParseSamples(rows),
             )
         }
         for (report in currentDays) {
@@ -299,10 +333,13 @@ class HealthAlarms(
         } else {
             alarm.ruleIds.map { AlarmKey(alarm.kind, installId, alarm.platform, alarm.version, it) }
         }.filter { it !in raised }.ifEmpty { return }
-        val delivery = alarm.copy(ruleIds = keys.mapNotNull { it.rule })
-        sink.raise(delivery)
-        delivered += delivery.copy(ruleIds = delivery.ruleIds.toList())
-        raised.addAll(keys)
-        stats.record(alarm.kind)
+        // #64: a long rule list goes out as several spool-sized alarms; each part's keys are recorded once it is delivered.
+        for (delivery in splitForPublisher(alarm.copy(ruleIds = keys.mapNotNull { it.rule }))) {
+            sink.raise(delivery)
+            delivered += delivery.copy(ruleIds = delivery.ruleIds.toList())
+            val rules = delivery.ruleIds.toSet()
+            raised.addAll(if (rules.isEmpty()) keys else keys.filter { it.rule in rules })
+            stats.record(alarm.kind)
+        }
     }
 }

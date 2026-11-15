@@ -254,7 +254,7 @@ private data class AlarmDisplay(val kind: String, val label: String, val tone: S
 private val alarmCatalogue = listOf(
     AlarmDisplay("silence", "Trusted install silence", "bad", "Active trusted install: at least 48 hours without a received health batch and stored health day at least two UTC days old."),
     AlarmDisplay("silent_rule_death", "Rule death", "bad", "At least three qualifying historical days in the preceding 28 days, median rule count ≥ 5, and a reporting day with admitted ≥ 200 but zero rule count."),
-    AlarmDisplay("parse_shortfall", "Parse shortfall rise", "bad", "One install: a rule with at least 20 eligible attempts that day and on at least three of the preceding 28 days, whose shortfall rate is at least 25 points above its median daily rate."),
+    AlarmDisplay("parse_shortfall", "Parse shortfall rise", "bad", "One install: a rule's shortfalls among its last 20 eligible attempts that day are at least 25 points above its median daily rate over at least three of the preceding 28 days."),
     AlarmDisplay("rule_share_cliff", "Rule share cliff", "warn", "Rule share falls by more than 80% against the previous-version comparison day; both days need at least two reporting installs."),
     AlarmDisplay("fleet_unknown", "UNKNOWN surge", "warn", "At least two reporting installs and UNKNOWN share ≥ 50%."),
     AlarmDisplay("trips", "Trips reported", "warn", "Stored trip count for an accepted report exceeds zero."),
