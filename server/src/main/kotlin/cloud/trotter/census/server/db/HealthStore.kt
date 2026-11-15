@@ -12,6 +12,7 @@ import cloud.trotter.census.server.secondsToUtcMidnight
 import cloud.trotter.census.server.jobs.DayReport
 import cloud.trotter.census.server.jobs.FleetDay
 import cloud.trotter.census.server.jobs.NewClusterCount
+import cloud.trotter.census.server.jobs.ParseSamples
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -99,15 +100,17 @@ class HealthStore(
         for (report in reports) {
             val tag = tagger.tag(TagPurpose.HEALTH, installId, "", report.day)
             update(
-                """INSERT INTO health_daily (epoch, install_tag, day, platform, platform_app_version, admitted, unknown, trips, rule_counts, ruleset_version)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?)
+                """INSERT INTO health_daily (epoch, install_tag, day, platform, platform_app_version, admitted, unknown, trips, rule_counts, ruleset_version, parse_shortfall)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?::jsonb)
                     ON CONFLICT (install_tag, day, platform, platform_app_version) DO UPDATE SET
                         admitted = GREATEST(health_daily.admitted, EXCLUDED.admitted),
                         unknown = GREATEST(health_daily.unknown, EXCLUDED.unknown),
                         trips = GREATEST(health_daily.trips, EXCLUDED.trips),
-                        rule_counts = EXCLUDED.rule_counts, ruleset_version = EXCLUDED.ruleset_version""",
+                        rule_counts = EXCLUDED.rule_counts, ruleset_version = EXCLUDED.ruleset_version,
+                        parse_shortfall = EXCLUDED.parse_shortfall""",
                 tag.epoch, tag.tag, report.day, report.platform, report.platformAppVersion, report.admitted, report.unknown,
                 report.trips, Json.encodeToString(report.ruleCounts), report.rulesetVersion,
+                report.parseShortfall?.let { Json.encodeToString(it) },
             )
         }
         recomputeFleet(touched)
@@ -186,6 +189,9 @@ class HealthStore(
     private fun ResultSet.dayReport(): DayReport = DayReport(
         getObject("day", LocalDate::class.java), getString("platform"), getString("platform_app_version"),
         getLong("admitted"), getLong("unknown"), getLong("trips"), Json.decodeFromString(getString("rule_counts")),
+        getString("parse_shortfall")?.let { stored ->
+            Json.decodeFromString<Map<String, Int>>(stored).mapValues { ParseSamples(it.value, 1) }
+        },
     )
     private fun ResultSet.fleetDay(): FleetDay = FleetDay(
         getObject("day", LocalDate::class.java), getString("platform"), getString("platform_app_version"),
@@ -226,9 +232,13 @@ internal fun Connection.recomputeFleet(keys: Collection<FleetKey>) {
                     SELECT count(*) AS installs, COALESCE(sum(admitted), 0) AS admitted, COALESCE(sum(unknown), 0) AS unknown FROM daily
                 ), rules AS (
                     SELECT key, sum(value::bigint) AS total FROM daily, jsonb_each_text(rule_counts) GROUP BY key
+                ), parse AS (
+                    SELECT key, sum(value::bigint) AS shortfall, count(*) AS installs
+                    FROM daily, jsonb_each_text(COALESCE(parse_shortfall, '{}'::jsonb)) GROUP BY key
                 )
                 UPDATE health_fleet_daily SET installs_reporting = totals.installs, admitted = totals.admitted,
-                    unknown = totals.unknown, rule_counts = (SELECT COALESCE(jsonb_object_agg(key, total), '{}'::jsonb) FROM rules)
+                    unknown = totals.unknown, rule_counts = (SELECT COALESCE(jsonb_object_agg(key, total), '{}'::jsonb) FROM rules),
+                    parse_shortfall = (SELECT COALESCE(jsonb_object_agg(key, jsonb_build_object('shortfall', shortfall, 'installs', installs)), '{}'::jsonb) FROM parse)
                 FROM totals WHERE day = ? AND platform = ? AND platform_app_version = ?""",
             key.day, key.platform, key.version, key.day, key.platform, key.version,
         )

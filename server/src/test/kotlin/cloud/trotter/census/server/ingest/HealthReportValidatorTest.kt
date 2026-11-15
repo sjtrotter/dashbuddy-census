@@ -2,13 +2,18 @@ package cloud.trotter.census.server.ingest
 
 import cloud.trotter.census.server.Policy
 import cloud.trotter.census.server.healthFixture
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import java.io.File
 import java.time.LocalDate
 
 class HealthReportValidatorTest {
@@ -71,6 +76,38 @@ class HealthReportValidatorTest {
         reject("bad_count", item("ruleCounts", JsonObject((0..512).associate { "a.b$it" to JsonPrimitive(0) })))
         reject("too_large", item("ruleCounts", JsonObject((0..100).associate { "a.${"b".repeat(90)}$it" to JsonPrimitive(0) })))
         reject("unknown_field", JsonObject(item("extra", JsonPrimitive(1)) + ("day" to JsonPrimitive("bad"))))
+    }
+
+    @Test
+    fun `a report with per-rule parse counts is accepted and one without them still is (#64)`() {
+        val without = HealthReportValidator.validate(fixture, today, policy) as HealthReportVerdict.Accepted
+        assertEquals(null, without.report.parseShortfall)
+        val counts = JsonObject(mapOf("doordash.screen.offer_popup" to JsonPrimitive(3), "doordash.screen.waiting_for_offer" to JsonPrimitive(0)))
+        val with = HealthReportValidator.validate(item("parseShortfall", counts), today, policy) as HealthReportVerdict.Accepted
+        assertEquals(mapOf("doordash.screen.offer_popup" to 3, "doordash.screen.waiting_for_offer" to 0), with.report.parseShortfall)
+        assertEquals(without.report.copy(parseShortfall = with.report.parseShortfall), with.report)
+        reject("bad_count", item("parseShortfall", JsonNull))
+        // A sample count of 20 at most, and never an attempt total.
+        reject("bad_count", item("parseShortfall", JsonObject(mapOf("a.b" to JsonPrimitive(21)))))
+        reject("bad_count", item("parseShortfall", JsonObject(mapOf("a.b" to JsonObject(mapOf("shortfall" to JsonPrimitive(2), "eligible" to JsonPrimitive(40)))))))
+        reject("bad_rule_id", item("parseShortfall", JsonObject(mapOf("a..b" to JsonPrimitive(0)))))
+        reject("bad_rule_id", item("parseShortfall", JsonObject(mapOf("a.${"b".repeat(95)}" to JsonPrimitive(0)))))
+    }
+
+    @Test
+    fun `the contract's health vectors get the same verdicts here`() {
+        val vectors = File(System.getProperty("census.contractDir"), "conformance/health-report-vectors.jsonl").readLines().filter { it.isNotBlank() }
+        assertTrue(vectors.size >= 10)
+        for (line in vectors) {
+            val row = Json.parseToJsonElement(line).jsonObject
+            val report = row.getValue("report").jsonObject
+            val day = LocalDate.parse(report.getValue("day").jsonPrimitive.content)
+            val verdict = HealthReportValidator.validate(report, day, policy)
+            val expected = row.getValue("verdict").jsonPrimitive.content
+            val name = row.getValue("name").jsonPrimitive.content
+            if (expected == "accepted") assertTrue(verdict is HealthReportVerdict.Accepted, name)
+            else assertEquals(HealthReportVerdict.Rejected(expected), verdict, name)
+        }
     }
 
     private fun item(key: String, value: JsonElement): JsonObject = JsonObject(fixture + (key to value))
