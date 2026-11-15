@@ -28,6 +28,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
@@ -364,15 +365,22 @@ class OpsStore(private val db: Database, private val clock: Clock, private val p
             put("day", row.getString("day")); put("platform", row.getString("platform")); put("platformAppVersion", row.getString("platform_app_version"))
             put("installsReporting", row.getInt("installs_reporting")); put("admitted", row.getLong("admitted")); put("unknown", row.getLong("unknown"))
             put("ruleCounts", Json.parseToJsonElement(row.getString("rule_counts")))
+            // #102: per (generation, rule, digest, metric) the summed hits and the installs reporting that metric.
+            put("shadow", Json.parseToJsonElement(row.getString("shadow")))
+            put("probeRefused", Json.parseToJsonElement(row.getString("probe_refused")))
         } }
         // #79 (Sol S5): per-install rows honour the retention deadline here, not only when the sweep has run.
         // #86: a row names its epoch pseudonym, never the install; the same phone shows a new one each epoch.
-        val installs = array("""SELECT left(install_tag, 8) AS prefix, day, platform, platform_app_version, admitted, unknown, trips
+        val installs = array("""SELECT left(install_tag, 8) AS prefix, day, platform, platform_app_version, admitted, unknown, trips,
+                shadow, probe_refused
             FROM health_daily WHERE day >= ? AND day <= ? AND day + ? > ?
             ORDER BY day DESC, install_tag, platform, platform_app_version""", first, today, policy.retention.healthDailyDays, today) { row -> buildJsonObject {
             put("pseudonymPrefix", row.getString("prefix")); put("day", row.getString("day")); put("platform", row.getString("platform"))
             put("version", row.getString("platform_app_version")); put("admitted", row.getLong("admitted"))
             put("unknown", row.getLong("unknown")); put("trips", row.getLong("trips"))
+            // #102: as reported; a metric the entry lacks is unavailable, and a null field was not reported.
+            put("shadow", row.getString("shadow")?.let(Json::parseToJsonElement) ?: JsonNull)
+            put("probeRefused", row.getString("probe_refused")?.let(Json::parseToJsonElement) ?: JsonNull)
         } }
         buildJsonObject { put("fleet", fleet); put("installs", installs) }
     }
