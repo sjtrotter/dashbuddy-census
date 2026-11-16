@@ -200,7 +200,7 @@ class MigrationTest {
                 run("INSERT INTO health_daily (install_id, day, platform, platform_app_version, admitted, unknown, trips, rule_counts) VALUES (?, ?, 'doordash', '8.0', 1, 0, 0, '{}')", id, day)
             }
 
-            assertEquals(6, flyway().load().migrate().migrationsExecuted)  // V8, then V9 (#80) on the re-keyed rows, V10 (#81), V11 (#82), V12 (#64), V13 (#102)
+            assertEquals(7, flyway().load().migrate().migrationsExecuted)  // V8, then V9 (#80) on the re-keyed rows, V10 (#81), V11 (#82), V12 (#64), V13 (#102), V14 (#104)
             assertEquals(0, flyway().load().migrate().migrationsExecuted)
 
             fun strings(sql: String) = connection.createStatement().use { statement ->
@@ -272,7 +272,7 @@ class MigrationTest {
                 WHERE table_schema = '$schema' AND column_name = 'install_id' AND table_name IN ('token_sightings_v5', 'health_daily') ORDER BY table_name"""))
             assertEquals(before, connection.dumpRows(schema).toSet())
 
-            assertEquals(6, flyway(testKeying).load().migrate().migrationsExecuted)  // V8, then V9 (#80), V10 (#81), V11 (#82), V12 (#64), V13 (#102)
+            assertEquals(7, flyway(testKeying).load().migrate().migrationsExecuted)  // V8, then V9 (#80), V10 (#81), V11 (#82), V12 (#64), V13 (#102), V14 (#104)
             assertEquals(1L, connection.installRows("token_sightings_v5", install, today))
         }
     }
@@ -416,6 +416,66 @@ class MigrationTest {
     }
 
     @Test
+    fun `V14 replaces the empty legacy shadow columns over populated health rows and refuses one that holds data`() {
+        // #104: no phone ever sent V13's shadow; V14 proves that on the database before it drops the columns.
+        fun flyway(schema: String) = Database.flyway(postgres.jdbcUrl, postgres.username, postgres.password, testKeying)
+            .schemas(schema).defaultSchema(schema)
+        val legacy = """[{"generation":"0123456789abcdef","rule":"doordash.screen.offer_shadow","digest":"fedcba9876543210","maskFail":4}]"""
+        val probe = """[{"generation":"0123456789abcdef","rule":"doordash.probe.store_banner","digest":"fedcba9876543210"}]"""
+        fun seed(connection: java.sql.Connection, dailyShadow: List<String?>, fleetShadow: String) {
+            dailyShadow.forEachIndexed { index, shadow ->
+                connection.prepareStatement(
+                    """INSERT INTO health_daily (epoch, install_tag, day, platform, platform_app_version, admitted, unknown, trips, rule_counts,
+                        parse_shortfall, shadow, probe_refused) VALUES (1, ?, '2026-11-14', 'doordash', '8.0', 9, 1, 0, '{"doordash.screen.offer":3}',
+                        '{"doordash.screen.offer":2}', ?::jsonb, ?::jsonb)""",
+                ).use { statement -> statement.setString(1, "$index".repeat(64)); statement.setString(2, shadow); statement.setString(3, probe); statement.executeUpdate() }
+            }
+            connection.prepareStatement(
+                """INSERT INTO health_fleet_daily (day, platform, platform_app_version, installs_reporting, admitted, unknown, rule_counts, shadow)
+                    VALUES ('2026-11-14', 'doordash', '8.0', ?, 18, 2, '{"doordash.screen.offer":6}', ?::jsonb)""",
+            ).use { statement -> statement.setInt(1, dailyShadow.size); statement.setString(2, fleetShadow); statement.executeUpdate() }
+        }
+        fun strings(connection: java.sql.Connection, sql: String) = connection.createStatement().use { statement ->
+            statement.executeQuery(sql).use { rows -> buildList { while (rows.next()) add(rows.getString(1)) } }
+        }
+        fun shadowColumns(connection: java.sql.Connection, schema: String) = strings(connection,
+            """SELECT table_name || '.' || column_name FROM information_schema.columns WHERE table_schema = '$schema'
+                AND column_name LIKE 'shadow%' ORDER BY 1""")
+
+        val upgraded = "shadow_daily_upgrade"
+        flyway(upgraded).target("13").load().migrate()
+        DriverManager.getConnection(schemaUrl(upgraded), postgres.username, postgres.password).use { connection ->
+            seed(connection, listOf(null, "[]"), "[]")
+            assertEquals(1, flyway(upgraded).load().migrate().migrationsExecuted)
+            assertEquals(
+                listOf("health_daily.shadow_daily", "health_daily.shadow_daily_truncated", "health_fleet_daily.shadow_daily",
+                    "health_fleet_daily.shadow_daily_truncated_installs"),
+                shadowColumns(connection, upgraded),
+            )
+            // The base health rows survive whole; the new columns start unreported.
+            assertEquals(listOf("2"), strings(connection, """SELECT count(*)::text FROM health_daily WHERE admitted = 9 AND unknown = 1
+                AND trips = 0 AND rule_counts = '{"doordash.screen.offer":3}'::jsonb AND parse_shortfall = '{"doordash.screen.offer":2}'::jsonb
+                AND probe_refused = '$probe'::jsonb AND shadow_daily IS NULL AND shadow_daily_truncated IS NULL"""))
+            assertEquals(listOf("2|18|2|[]|0"), strings(connection,
+                "SELECT concat_ws('|', installs_reporting, admitted, unknown, shadow_daily, shadow_daily_truncated_installs) FROM health_fleet_daily"))
+        }
+
+        for ((schema, daily, fleet) in listOf(
+            Triple("shadow_daily_refuse_daily", listOf(null, legacy), "[]"),
+            Triple("shadow_daily_refuse_fleet", listOf<String?>(null), legacy),
+        )) {
+            flyway(schema).target("13").load().migrate()
+            DriverManager.getConnection(schemaUrl(schema), postgres.username, postgres.password).use { connection ->
+                seed(connection, daily, fleet)
+                val refused = assertThrows(org.flywaydb.core.api.FlywayException::class.java) { flyway(schema).load().migrate() }
+                assertTrue(refused.stackTraceToString().contains("V14 refuses: a legacy shadow column holds data"), schema)
+                assertEquals(listOf("health_daily.shadow", "health_fleet_daily.shadow"), shadowColumns(connection, schema), schema)
+                assertEquals(listOf("13"), strings(connection, "SELECT max(version::int)::text FROM flyway_schema_history WHERE success"), schema)
+            }
+        }
+    }
+
+    @Test
     fun `V3 to V4 backfills screen and preserves sample relationship`() {
         fun migration(target: String) = Flyway.configure()
             .dataSource(postgres.jdbcUrl, postgres.username, postgres.password)
@@ -466,8 +526,8 @@ class MigrationTest {
         val flyway = Database.flyway(postgres.jdbcUrl, postgres.username, postgres.password, testKeying).load()
         // V1 schema, V2 classification, V3 tombstones, V4 notifications, V5 lifecycle, V6 keep less (#79), V7 keyed (#85),
         // V8 epoch pseudonyms (#86, which drops the three pre-V5 tables), V9 slot sightings (#80), V10 the contributor tier (#81), V11 the anchor check (#82),
-        // V12 health parse counts (#64), V13 health shadow counts (#102).
-        assertEquals(13, flyway.migrate().migrationsExecuted)
+        // V12 health parse counts (#64), V13 health shadow counts (#102), V14 daily shadow levels (#104).
+        assertEquals(14, flyway.migrate().migrationsExecuted)
         val expected = setOf(
             "installs", "clusters", "cluster_samples", "trusted_envelopes", "health_daily", "health_fleet_daily", "ingest_ledger",
             "nonces", "withdrawals", "token_sightings_v5", "cluster_sightings_v5", "vocabulary_v5", "filter_floor", "ingest_pause",
@@ -540,11 +600,16 @@ class MigrationTest {
                     // #64: per-rule parse counts; NULL on a per-install row means the report did not carry them.
                     assertEquals(listOf("jsonb", null, "YES", null), columns["health_daily.parse_shortfall"])
                     assertEquals(listOf("jsonb", null, "NO", "'{}'::jsonb"), columns["health_fleet_daily.parse_shortfall"])
-                    // #102: shadow counts and refused probes; NULL on a per-install row means the report did not carry them.
-                    for (column in listOf("shadow", "probe_refused")) {
+                    // #102 refused probes, #104 daily shadow levels; NULL on a per-install row means the report did not carry them.
+                    for (column in listOf("shadow_daily", "probe_refused")) {
                         assertEquals(listOf("jsonb", null, "YES", null), columns["health_daily.$column"])
                         assertEquals(listOf("jsonb", null, "NO", "'[]'::jsonb"), columns["health_fleet_daily.$column"])
                     }
+                    assertEquals(listOf("boolean", null, "YES", null), columns["health_daily.shadow_daily_truncated"])
+                    assertEquals(listOf("integer", null, "NO", "0"), columns["health_fleet_daily.shadow_daily_truncated_installs"])
+                    // #104: V14 retired V13's shadow counts.
+                    assertEquals(null, columns["health_daily.shadow"])
+                    assertEquals(null, columns["health_fleet_daily.shadow"])
                     assertEquals(setOf("installs", "nonces", "ingest_ledger", "trusted_envelopes", "contributor_grants"),
                         columns.keys.filter { it.endsWith(".install_id") }.map { it.substringBefore('.') }.toSet())
                 }

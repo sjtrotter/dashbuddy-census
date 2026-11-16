@@ -1,5 +1,7 @@
 package cloud.trotter.census.server.ops
 
+import cloud.trotter.census.contract.health.CountLevel
+import cloud.trotter.census.contract.health.FractionLevel
 import cloud.trotter.census.server.db.CLUSTER_STATUSES
 import cloud.trotter.census.server.db.OpsClusterSummaryRow
 import cloud.trotter.census.server.db.OpsVocabularyDisplay
@@ -342,50 +344,88 @@ private fun FlowContent.healthSection(health: JsonObject, today: String) = panel
 private val shadowMetrics = listOf("tied" to "Tied with a live rule", "onUnknown" to "On an UNKNOWN frame",
     "emptyParse" to "Required field empty", "maskFail" to "Value survived the masks")
 
-/** #102: shadow-rule counts and refused probes. Diagnostics only: nothing here feeds an alarm. */
+/** #104: the fields of a shadow entry, in wire order, with their labels. */
+private val shadowFields = listOf("visits" to "Visits", "evaluated" to "Frames evaluated") + shadowMetrics
+
+/** #104: a level as the page shows it; only the contract's tokens print. */
+private fun levelLabel(field: String, token: String): String = when (field) {
+    "visits", "evaluated" -> CountLevel.fromWire(token)?.let { if (field == "visits" && it == CountLevel.NONE) "no recorded visits" else it.wire }
+    else -> FractionLevel.fromWire(token)?.let { fractionLabels.getValue(it) }
+} ?: "[redacted]"
+
+private val fractionLabels = mapOf(
+    FractionLevel.NONE to "none of the visits", FractionLevel.SOME to "under half of the visits",
+    FractionLevel.HALF_OR_MORE to "half or more of the visits", FractionLevel.ALL to "all of the visits",
+)
+
+/** #104: a field's tokens in level order. */
+private fun levelOrder(field: String): List<String> =
+    if (field == "visits" || field == "evaluated") CountLevel.entries.map { it.wire } else FractionLevel.entries.map { it.wire }
+
+/** #102, #104: shadow-rule levels and refused probes. Diagnostics only: nothing here feeds an alarm. */
 private fun FlowContent.shadowSection(fleet: List<JsonObject>, installs: List<JsonObject>) {
-    val reported = installs.filter { it["shadow"] is JsonArray || it["probeRefused"] is JsonArray }
-    val folded = fleet.filter { it.rows("shadow").isNotEmpty() || it.rows("probeRefused").isNotEmpty() }
+    val reported = installs.filter { it["shadowDaily"] is JsonArray || it["probeRefused"] is JsonArray }
+    val folded = fleet.filter {
+        it.rows("shadowDaily").isNotEmpty() || it.rows("probeRefused").isNotEmpty() || it.count("shadowDailyTruncatedInstalls") > 0
+    }
     details {
         summary { +"Shadow rules · ${number(reported.size)} per-install rows" }
         p("muted") {
-            +"Each metric counts hits of the last 20 eligible visits for this metric. A metric whose sample was not full is "
-            +"unavailable, not 0. Generation and digest show their first 8 hex; /ops/health has them whole. No alarm reads these."
+            +"Levels, not counts: the phone keeps the exact numbers. Frames evaluated is recorded evaluation coverage, not a match. "
+            +"Each metric is the share of the visits where it could be measured; with no such visit it is unavailable. "
+            +"Fleet rows count installs reporting this day, per version; they are never summed into unique phones. "
+            +"Generation and digest show their first 8 hex; /ops/health has them whole. No alarm reads these."
         }
-        if (reported.isEmpty()) emptyState("No shadow counts in this window.")
-        else dataTable("Shadow rules per install · last 7 UTC days", listOf("Pseudonym", "Day", "Version", "Candidate", "Counts"),
+        if (reported.isEmpty()) emptyState("No shadow levels in this window.")
+        else dataTable("Shadow rules per install · last 7 UTC days", listOf("Pseudonym", "Day", "Version", "Candidate", "Levels"),
             reported.flatMap { row ->
-                row.rows("shadow").map { entry ->
-                    listOf(
-                        cell { code { +prefix(row.text("pseudonymPrefix")) } }, cell { date(row.text("day")) },
-                        cell { code { +version(row.text("version")) } }, blockCell { candidate(entry) },
-                        blockCell { ul { shadowMetrics.forEach { (key, label) ->
-                            val value = (entry[key] as? JsonPrimitive)?.long
-                            li { +"$label: "; if (value == null) +"unavailable" else +"${number(value)} of the last 20 eligible visits for this metric" }
+                fun lead() = listOf(
+                    cell { code { +prefix(row.text("pseudonymPrefix")) } }, cell { date(row.text("day")) },
+                    cell { code { +version(row.text("version")) } },
+                )
+                row.rows("shadowDaily").map { entry ->
+                    lead() + listOf(
+                        blockCell { candidate(entry) },
+                        blockCell { ul { shadowFields.forEach { (key, label) ->
+                            val token = entry.optionalText(key)
+                            li { +"$label: "; +(token?.let { levelLabel(key, it) } ?: "unavailable") }
                         } } },
                     )
-                } + row.rows("probeRefused").map { entry ->
-                    listOf(
-                        cell { code { +prefix(row.text("pseudonymPrefix")) } }, cell { date(row.text("day")) },
-                        cell { code { +version(row.text("version")) } }, blockCell { candidate(entry) }, cell { chip("Probe refused", "warn") },
-                    )
+                } + (if (row.flag("shadowDailyTruncated")) listOf(
+                    lead() + listOf(cell { +"—" }, cell { chip("Truncated", "warn"); +" the phone held more candidates than it reported" }),
+                ) else emptyList()) + row.rows("probeRefused").map { entry ->
+                    lead() + listOf(blockCell { candidate(entry) }, cell { chip("Probe refused", "warn") })
                 }
             })
-        if (folded.isNotEmpty()) dataTable("Shadow rules, fleet · last 7 UTC days", listOf("Day", "Version", "Candidate", "Metric", "Σ hits", "Installs"),
+        if (folded.isNotEmpty()) dataTable(
+            "Shadow rules, fleet · last 7 UTC days",
+            listOf("Day", "Version", "Candidate", "Field", "Installs reporting this day"),
             folded.flatMap { row ->
-                row.rows("shadow").map { entry ->
-                    val label = shadowMetrics.firstOrNull { it.first == entry.text("metric") }?.second ?: "[redacted]"
-                    listOf(
-                        cell { date(row.text("day")) }, cell { code { +version(row.text("platformAppVersion")) } }, blockCell { candidate(entry) },
-                        cell { +"$label, of the last 20 eligible visits for this metric" }, numeric(entry.count("total")), numeric(entry.count("installs")),
-                    )
-                } + row.rows("probeRefused").map { entry ->
-                    listOf(
-                        cell { date(row.text("day")) }, cell { code { +version(row.text("platformAppVersion")) } }, blockCell { candidate(entry) },
-                        cell { chip("Probe refused", "warn") }, cell { +"—" }, numeric(entry.count("installs")),
-                    )
+                fun lead() = listOf(cell { date(row.text("day")) }, cell { code { +version(row.text("platformAppVersion")) } })
+                row.rows("shadowDaily").flatMap { entry ->
+                    // Every reporting install has a visits level; an install without a metric's level had it unavailable.
+                    val reporting = entry.obj("visits").values.sumOf { (it as? JsonPrimitive)?.long ?: 0L }
+                    shadowFields.map { (key, label) ->
+                        val histogram = entry.obj(key)
+                        val unavailable = reporting - histogram.values.sumOf { (it as? JsonPrimitive)?.long ?: 0L }
+                        lead() + listOf(
+                            blockCell { candidate(entry) }, cell { +label },
+                            blockCell { ul {
+                                levelOrder(key).forEach { token ->
+                                    val installs = histogram.count(token)
+                                    if (installs > 0) li { +"${levelLabel(key, token)}: ${number(installs)}" }
+                                }
+                                if (unavailable > 0) li { +"unavailable: ${number(unavailable)}" }
+                            } },
+                        )
+                    }
+                } + (if (row.count("shadowDailyTruncatedInstalls") > 0) listOf(
+                    lead() + listOf(cell { +"—" }, cell { chip("Truncated", "warn") }, numeric(row.count("shadowDailyTruncatedInstalls"))),
+                ) else emptyList()) + row.rows("probeRefused").map { entry ->
+                    lead() + listOf(blockCell { candidate(entry) }, cell { chip("Probe refused", "warn") }, numeric(entry.count("installs")))
                 }
-            })
+            },
+        )
     }
 }
 

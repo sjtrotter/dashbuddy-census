@@ -32,7 +32,7 @@ Our intended operating promise is to store hashes and counts, never plaintext be
 | Token sightings (presence per epoch pseudonym) | 30 days |
 | Cluster sightings (presence per epoch pseudonym and day, no counts) | 30 days |
 | Trusted envelopes | 30 days |
-| Per-install daily health (keyed by an epoch pseudonym), including its shadow-rule counts | 30 days, then folded into fleet totals |
+| Per-install daily health (keyed by an epoch pseudonym), including its shadow-rule levels | 30 days, then folded into fleet totals |
 | Epoch keys (wrapped under the pepper) | until their epoch is older than the previous one, then destroyed |
 | Fleet health totals (no install) | kept |
 | Cluster samples (shared, no install) | 90 days after the cluster was last seen |
