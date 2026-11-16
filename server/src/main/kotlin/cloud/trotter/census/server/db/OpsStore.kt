@@ -365,21 +365,23 @@ class OpsStore(private val db: Database, private val clock: Clock, private val p
             put("day", row.getString("day")); put("platform", row.getString("platform")); put("platformAppVersion", row.getString("platform_app_version"))
             put("installsReporting", row.getInt("installs_reporting")); put("admitted", row.getLong("admitted")); put("unknown", row.getLong("unknown"))
             put("ruleCounts", Json.parseToJsonElement(row.getString("rule_counts")))
-            // #102: per (generation, rule, digest, metric) the summed hits and the installs reporting that metric.
-            put("shadow", Json.parseToJsonElement(row.getString("shadow")))
+            // #104: per (generation, rule, digest), installs per level of each field, and installs whose report was truncated.
+            put("shadowDaily", Json.parseToJsonElement(row.getString("shadow_daily")))
+            put("shadowDailyTruncatedInstalls", row.getInt("shadow_daily_truncated_installs"))
             put("probeRefused", Json.parseToJsonElement(row.getString("probe_refused")))
         } }
         // #79 (Sol S5): per-install rows honour the retention deadline here, not only when the sweep has run.
         // #86: a row names its epoch pseudonym, never the install; the same phone shows a new one each epoch.
         val installs = array("""SELECT left(install_tag, 8) AS prefix, day, platform, platform_app_version, admitted, unknown, trips,
-                shadow, probe_refused
+                shadow_daily, shadow_daily_truncated, probe_refused
             FROM health_daily WHERE day >= ? AND day <= ? AND day + ? > ?
             ORDER BY day DESC, install_tag, platform, platform_app_version""", first, today, policy.retention.healthDailyDays, today) { row -> buildJsonObject {
             put("pseudonymPrefix", row.getString("prefix")); put("day", row.getString("day")); put("platform", row.getString("platform"))
             put("version", row.getString("platform_app_version")); put("admitted", row.getLong("admitted"))
             put("unknown", row.getLong("unknown")); put("trips", row.getLong("trips"))
-            // #102: as reported; a metric the entry lacks is unavailable, and a null field was not reported.
-            put("shadow", row.getString("shadow")?.let(Json::parseToJsonElement) ?: JsonNull)
+            // #102, #104: as reported; a metric the entry lacks is unavailable, and a null field was not reported.
+            put("shadowDaily", row.getString("shadow_daily")?.let(Json::parseToJsonElement) ?: JsonNull)
+            put("shadowDailyTruncated", JsonPrimitive(row.getObject("shadow_daily_truncated") as Boolean?))
             put("probeRefused", row.getString("probe_refused")?.let(Json::parseToJsonElement) ?: JsonNull)
         } }
         buildJsonObject { put("fleet", fleet); put("installs", installs) }
