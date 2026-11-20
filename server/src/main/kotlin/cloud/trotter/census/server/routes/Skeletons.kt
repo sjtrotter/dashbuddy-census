@@ -1,5 +1,6 @@
 package cloud.trotter.census.server.routes
 
+import cloud.trotter.census.contract.ClickedIdentity
 import cloud.trotter.census.contract.UiSkeletonDto
 import cloud.trotter.census.server.Clock
 import cloud.trotter.census.server.ErrorResponse
@@ -70,9 +71,8 @@ fun Route.skeletonRoutes(store: InstallStore, skeletons: SkeletonStore, clock: C
             call.respond(HttpStatusCode.UnprocessableEntity, BatchQualityResponse(rejected = rejected))
             return@post
         }
-        // Both contract kinds share this accepted count, deduplication and ledger transaction. #69: a matched item is
-        // its layout under its rule, so the same layout sent unmatched and matched in one batch is two items.
-        val duplicate = accepted.size - accepted.map { it.item.fingerprint to (it.item as? UiSkeletonDto)?.ruleId }.toSet().size
+        // Both contract kinds share this accepted count, deduplication and ledger transaction.
+        val duplicate = accepted.size - accepted.map { it.duplicateKey() }.toSet().size
         val outcome = skeletons.ingest(
             installId, keyHash, today, accepted, duplicate, rejected,
             batchId, rawBody.size.toLong(),
@@ -102,6 +102,23 @@ fun Route.skeletonRoutes(store: InstallStore, skeletons: SkeletonStore, clock: C
         }
     }
 }
+
+/**
+ * What makes two accepted items of one batch the same item. An unknown screen or a notification is its fingerprint.
+ * #69: a matched item is its layout under its rule, so the same layout sent unmatched and matched in one batch is two
+ * items. #87: a clicked item is its full identity ([ClickedIdentity]: day, fingerprint, raw layout and owner path),
+ * never its fingerprint alone, so two buttons tapped on one screen, or one button in two layouts that share a
+ * fingerprint, are two items. The three key shapes cannot equal each other: a clicked identity is never a fingerprint.
+ */
+internal fun ItemVerdict.Accepted.duplicateKey(): Pair<String, String?> {
+    val screen = item as? UiSkeletonDto
+    if (screen != null && screen.isClicked) {
+        return CLICKED_KEY to checkNotNull(ClickedIdentity.of(screen)) { "a clicked item has an identity" }
+    }
+    return item.fingerprint to screen?.ruleId
+}
+
+private const val CLICKED_KEY = "clicked"
 
 /** Counts only: no install key of any length (#79). */
 private fun logBatch(accepted: Int, duplicate: Int, rejected: Map<String, Int>, bytes: Int, status: String) {

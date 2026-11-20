@@ -33,6 +33,9 @@ sealed interface ItemVerdict {
     data class Accepted(val item: CensusSkeletonDto, val canonicalJson: String, val bytes: Int, val tokens: List<Token>) : ItemVerdict {
         /** A matched skeleton (#69): stored only by `recordMatched`, never by a path that writes the cluster tables. */
         val isMatched: Boolean get() = (item as? UiSkeletonDto)?.isMatched == true
+
+        /** A clicked skeleton (#87): stored only by `recordClicked`, never by a path that writes the cluster tables. */
+        val isClicked: Boolean get() = (item as? UiSkeletonDto)?.isClicked == true
     }
     data class Rejected(val reason: String) : ItemVerdict
 }
@@ -55,6 +58,12 @@ enum class AdmissionReason(val wire: String) { FILTER_REV_TOO_OLD("filter_rev_to
  * #69: a `uinode.matched.v1` item is a screen with the v2 body rules plus one REQUIRED top-level `ruleId`, a rule id
  * of the item's own platform ([WireTokenGrammars.isRuleIdFor], else `bad_rule_id`). A v1 or v2 item carrying
  * `ruleId` is `unknown_field`, as any other key outside its allowlist.
+ *
+ * #87: a `uinode.clicked.v1` item is a screen with the v2 body rules plus one REQUIRED top-level `tap` object
+ * (`ownerPath` and `generation` required strings, `tapPath` an optional one; a missing or mistyped field is
+ * `bad_item`). Every other item carrying `tap`, and a clicked item carrying `ruleId`, is `unknown_field`. The paths and
+ * the generation are judged by the contract's decode ([cloud.trotter.census.contract.TapRef]): when the clicked item
+ * fails it but the same body decodes as a v2 screen, the tap is what failed, and the verdict is `bad_tap_ref`.
  */
 object SkeletonValidator {
     fun validate(element: JsonElement, policy: Policy, today: LocalDate): ItemVerdict {
@@ -62,8 +71,9 @@ object SkeletonValidator {
         val schema = element.string("schemaId")
         if (schema == null || schema !in policy.acceptedSchemaIds) return reject("unknown_schema")
         val matched = schema == SkeletonSchema.SCHEMA_ID_MATCHED
+        val clicked = schema == SkeletonSchema.SCHEMA_ID_CLICKED
         val notificationVersion = SkeletonVersion.ofNotificationSchema(schema)
-        val version = if (matched) SkeletonVersion.V2 else notificationVersion ?: SkeletonVersion.ofScreenSchema(schema)
+        val version = if (matched || clicked) SkeletonVersion.V2 else notificationVersion ?: SkeletonVersion.ofScreenSchema(schema)
             ?: return reject("unknown_schema")
         val notification = notificationVersion != null
         val v2 = version == SkeletonVersion.V2
@@ -71,7 +81,13 @@ object SkeletonValidator {
         if ("kind" in element && SkeletonKind.fromWire(kind ?: "") == null) return reject("unknown_skeleton_kind")
         if ((notification && kind != SkeletonKind.NOTIFICATION.wire) ||
             (!notification && kind != null && kind != SkeletonKind.SCREEN.wire)) return reject("kind_schema_mismatch")
-        val structure = inspect(element, notification, v2, matched)
+        val top = when {
+            notification -> Shape.NOTIFICATION
+            matched -> Shape.MATCHED
+            clicked -> Shape.CLICKED
+            else -> Shape.ITEM
+        }
+        val structure = inspect(element, v2, top)
         if (structure.unknownField || structure.textKeys.any { it !in policy.acceptedTextKeys }) return reject("unknown_field")
         if (structure.plaintext) return reject("plaintext_field")
         if (structure.badType) return reject("bad_item")
@@ -136,14 +152,30 @@ object SkeletonValidator {
         val item = try {
             CensusSkeletonSchema.deserialize(element.toString())
         } catch (_: SerializationException) {
-            return reject("bad_item")
+            return reject(decodeFailure(element, clicked))
         } catch (_: IllegalArgumentException) {
-            return reject("bad_item")
+            return reject(decodeFailure(element, clicked))
         }
         val measured = CensusSkeletonSchema.measure(item)
         if (measured.bytes > policy.maxSkeletonBytes) return reject("too_large")
         if (CensusFingerprint.of(item) != item.fingerprint) return reject("fingerprint_mismatch")
         return ItemVerdict.Accepted(item, measured.json, measured.bytes, tokens)
+    }
+
+    /**
+     * #87: why the contract refused [element]. A clicked item whose body, with its `tap` taken off and named a v2
+     * screen, still decodes failed on its tap alone: `bad_tap_ref`. Anything else is `bad_item`, as before.
+     */
+    private fun decodeFailure(element: JsonObject, clicked: Boolean): String {
+        if (!clicked) return "bad_item"
+        val body = JsonObject(element - TAP + ("schemaId" to JsonPrimitive(SkeletonSchema.SCHEMA_ID_V2)))
+        return try {
+            CensusSkeletonSchema.deserialize(body.toString())
+            "bad_tap_ref"
+        } catch (_: IllegalArgumentException) {
+            // SerializationException is an IllegalArgumentException: either way the body itself is at fault.
+            "bad_item"
+        }
     }
 
     private fun reject(reason: String): ItemVerdict.Rejected =
@@ -154,7 +186,7 @@ object SkeletonValidator {
         (this[key] as? JsonPrimitive)?.takeIf { it.isString }?.content
 
     private enum class Shape {
-        ITEM, MATCHED, NOTIFICATION, NOTIF_SLOTS, NODE, SLOT, OPTIONAL_SLOT, TEXT_MAP, CHILDREN, ACTIONS, STRING, OPTIONAL_STRING, INTEGER, OPTIONAL_INTEGER, BOOLEAN, INVALID,
+        ITEM, MATCHED, CLICKED, TAP, NOTIFICATION, NOTIF_SLOTS, NODE, SLOT, OPTIONAL_SLOT, TEXT_MAP, CHILDREN, ACTIONS, STRING, OPTIONAL_STRING, INTEGER, OPTIONAL_INTEGER, BOOLEAN, INVALID,
     }
 
     private data class Visit(val value: JsonElement, val shape: Shape, val depth: Int)
@@ -169,17 +201,18 @@ object SkeletonValidator {
         val textKeys = mutableListOf<String>()
     }
 
-    private fun inspect(item: JsonObject, notification: Boolean, v2: Boolean, matched: Boolean): Structure {
+    private fun inspect(item: JsonObject, v2: Boolean, top: Shape): Structure {
         val result = Structure()
         val pending = ArrayDeque<Visit>()
-        pending.addLast(Visit(item, if (notification) Shape.NOTIFICATION else if (matched) Shape.MATCHED else Shape.ITEM, 0))
+        pending.addLast(Visit(item, top, 0))
         while (pending.isNotEmpty()) {
             val (value, shape, depth) = pending.removeLast()
             if (value is JsonPrimitive && value.isString && shape != Shape.STRING && shape != Shape.OPTIONAL_STRING) {
                 result.plaintext = true
             }
             val validType = when (shape) {
-                Shape.ITEM, Shape.MATCHED, Shape.NOTIFICATION, Shape.NOTIF_SLOTS, Shape.NODE, Shape.SLOT, Shape.TEXT_MAP -> value is JsonObject
+                Shape.ITEM, Shape.MATCHED, Shape.CLICKED, Shape.TAP, Shape.NOTIFICATION, Shape.NOTIF_SLOTS, Shape.NODE, Shape.SLOT,
+                Shape.TEXT_MAP -> value is JsonObject
                 Shape.OPTIONAL_SLOT -> value is JsonObject || value == JsonNull
                 Shape.CHILDREN, Shape.ACTIONS -> value is JsonArray
                 Shape.STRING -> value is JsonPrimitive && value.isString
@@ -195,6 +228,8 @@ object SkeletonValidator {
                     val fields = when (shape) {
                         Shape.ITEM -> itemFields
                         Shape.MATCHED -> matchedItemFields
+                        Shape.CLICKED -> clickedItemFields
+                        Shape.TAP -> tapFields
                         Shape.NOTIFICATION -> if (v2) notificationFieldsV2 else notificationFields
                         Shape.NOTIF_SLOTS -> NotifTextField.entries.associate { it.wire to Shape.SLOT }
                         Shape.NODE -> if (v2) nodeFieldsV2 else nodeFields
@@ -205,6 +240,8 @@ object SkeletonValidator {
                     when (shape) {
                         Shape.ITEM -> if (requiredItemKeys.any { it !in value }) result.badType = true
                         Shape.MATCHED -> if (requiredMatchedKeys.any { it !in value }) result.badType = true
+                        Shape.CLICKED -> if (requiredClickedKeys.any { it !in value }) result.badType = true
+                        Shape.TAP -> if (requiredTapKeys.any { it !in value }) result.badType = true
                         Shape.NOTIFICATION -> if (requiredNotificationKeys.any { it !in value }) result.badType = true
                         Shape.NOTIF_SLOTS -> if (value.keys != NotifTextField.entries.map { it.wire }.toSet()) result.badType = true
                         Shape.NODE -> {
@@ -251,6 +288,13 @@ object SkeletonValidator {
     private const val RULE_ID = "ruleId"
     private val matchedItemFields = itemFields + (RULE_ID to Shape.STRING)
     private val requiredMatchedKeys = requiredItemKeys + RULE_ID
+    // #87: a clicked item is a screen item plus its tap: index paths into its own root and a 16-hex generation id,
+    // read by the contract's decode. Any other string in it is still plaintext.
+    private const val TAP = "tap"
+    private val clickedItemFields = itemFields + (TAP to Shape.TAP)
+    private val requiredClickedKeys = requiredItemKeys + TAP
+    private val tapFields = mapOf("ownerPath" to Shape.STRING, "tapPath" to Shape.OPTIONAL_STRING, "generation" to Shape.STRING)
+    private val requiredTapKeys = setOf("ownerPath", "generation")
     private val notificationFields = (itemFields - setOf("root", "windowTitle")) + mapOf(
         "kind" to Shape.STRING, "channelId" to Shape.STRING, "slots" to Shape.NOTIF_SLOTS,
     )

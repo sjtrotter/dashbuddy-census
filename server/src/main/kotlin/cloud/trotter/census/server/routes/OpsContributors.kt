@@ -99,7 +99,7 @@ fun Route.opsContributorRoutes(contributors: ContributorStore, quarantine: Quara
         val bytes = call.readLimitedBody() ?: return@post
         val element = parseBounded(bytes) ?: throw BadRequestException("Invalid operator request")
         val accepted = (SkeletonValidator.validate(element, policy, clock.today()) as? ItemVerdict.Accepted)
-            ?.takeUnless { it.isMatched } // #69: a matched skeleton never becomes a cluster sample
+            ?.takeUnless { it.isMatched || it.isClicked } // #69, #87: a matched or clicked skeleton never becomes a cluster sample
         if (accepted == null) {
             call.respond(HttpStatusCode.UnprocessableEntity, ErrorResponse("bad_artifact"))
             return@post

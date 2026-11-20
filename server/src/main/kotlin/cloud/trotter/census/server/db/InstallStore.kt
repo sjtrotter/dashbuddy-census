@@ -563,6 +563,8 @@ class InstallStore(private val db: Database, private val clock: Clock) {
             "slot_confirmations", "slot_roles", "slot_release", "contributor_grants",
             // #69: matched sightings; matched_samples names no install, like cluster_samples, and stays.
             "matched_sightings", "matched_slot_sightings",
+            // #87: clicked sightings; clicked_samples names no install and stays until its purge day.
+            "clicked_sightings",
             "ingest_ledger", "nonces", "installs",
         )
 
