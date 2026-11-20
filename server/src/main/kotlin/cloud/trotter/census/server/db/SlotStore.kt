@@ -31,6 +31,24 @@ internal object SlotObject {
 }
 
 /**
+ * The table a slot sighting is written to and read from (#69): the clusters' `slot_sightings`, or
+ * `matched_slot_sightings` under one rule id. A matched row's tag object is `<ruleId>:` before the slot identity, under
+ * its own purpose, so one install's matched and unmatched rows for the same layout carry unrelated tags.
+ */
+internal class SlotTable private constructor(val table: String, val purpose: TagPurpose, val ruleId: String?) {
+    fun objectKey(fingerprint: String, variant: SlotVariant, slot: String, value: String): String =
+        (ruleId?.let { "$it:" } ?: "") + SlotObject.of(fingerprint, variant, slot, value)
+
+    /** The leading key columns, comma-terminated: the rule id for the matched table, nothing for the clusters'. */
+    val keyColumns: String get() = if (ruleId == null) "" else "rule_id, "
+
+    companion object {
+        val CLUSTERS = SlotTable("slot_sightings", TagPurpose.SLOT, null)
+        fun matched(ruleId: String) = SlotTable("matched_slot_sightings", TagPurpose.MATCHED_SLOT, ruleId)
+    }
+}
+
+/**
  * The cluster variant support is counted in (#80): one app version under one hash domain and filter revision, and one
  * raw layout ([SlotWalk.layout], Sol S4), so a slot path names the same node in every row counted together.
  */
@@ -63,7 +81,7 @@ internal class SlotSighting(val item: CensusSkeletonDto, val variant: SlotVarian
  */
 internal fun Connection.recordSlotSightings(
     tagger: Tagger, installId: UUID, trusted: Boolean, countsFrom: LocalDate?, fingerprint: String,
-    sightings: List<SlotSighting>, slotLimit: Int, received: LocalDate,
+    sightings: List<SlotSighting>, slotLimit: Int, received: LocalDate, table: SlotTable = SlotTable.CLUSTERS,
 ) {
     data class Row(val variant: SlotVariant, val epoch: Int, val slot: String, val value: String)
     val lastDays = LinkedHashMap<Row, LocalDate>()
@@ -76,25 +94,26 @@ internal fun Connection.recordSlotSightings(
         }
     }
     var written = 0
+    val name = table.table
     prepareStatement(
-        """INSERT INTO slot_sightings (fingerprint, platform_app_version, hash_domain, filter_rev, layout, slot, value, epoch,
+        """INSERT INTO $name (${table.keyColumns}fingerprint, platform_app_version, hash_domain, filter_rev, layout, slot, value, epoch,
                 install_tag, trusted, counts_from, last_day, first_received, received_day)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT (fingerprint, platform_app_version, hash_domain, filter_rev, layout, slot, epoch, value, install_tag) DO UPDATE SET
+                VALUES (${if (table.ruleId == null) "" else "?, "}?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (${table.keyColumns}fingerprint, platform_app_version, hash_domain, filter_rev, layout, slot, epoch, value, install_tag) DO UPDATE SET
                 -- #81 (Sol S6): the first write on a new receipt day keeps the row's state before that day.
-                prev_last_day = CASE WHEN slot_sightings.received_day < EXCLUDED.received_day
-                    THEN slot_sightings.last_day ELSE slot_sightings.prev_last_day END,
-                received_day = GREATEST(slot_sightings.received_day, EXCLUDED.received_day),
-                last_day = GREATEST(slot_sightings.last_day, EXCLUDED.last_day),
-                counts_from = CASE WHEN slot_sightings.counts_from IS NULL OR EXCLUDED.counts_from IS NULL
-                    THEN NULL ELSE LEAST(slot_sightings.counts_from, EXCLUDED.counts_from) END""",
+                prev_last_day = CASE WHEN $name.received_day < EXCLUDED.received_day
+                    THEN $name.last_day ELSE $name.prev_last_day END,
+                received_day = GREATEST($name.received_day, EXCLUDED.received_day),
+                last_day = GREATEST($name.last_day, EXCLUDED.last_day),
+                counts_from = CASE WHEN $name.counts_from IS NULL OR EXCLUDED.counts_from IS NULL
+                    THEN NULL ELSE LEAST($name.counts_from, EXCLUDED.counts_from) END""",
     ).use { statement ->
         for ((row, day) in lastDays) {
             val variant = row.variant
-            val tag = tagger.tag(TagPurpose.SLOT, installId, SlotObject.of(fingerprint, variant, row.slot, row.value), day)
+            val tag = tagger.tag(table.purpose, installId, table.objectKey(fingerprint, variant, row.slot, row.value), day)
             check(tag.epoch == row.epoch)
-            listOf(fingerprint, variant.platformAppVersion, variant.hashDomain, variant.filterRev, variant.layout, row.slot,
-                row.value, tag.epoch, tag.tag, trusted, countsFrom, day, received, received)
+            (listOfNotNull(table.ruleId) + listOf(fingerprint, variant.platformAppVersion, variant.hashDomain, variant.filterRev, variant.layout, row.slot,
+                row.value, tag.epoch, tag.tag, trusted, countsFrom, day, received, received))
                 .forEachIndexed { index, parameter -> statement.setObject(index + 1, parameter) }
             statement.addBatch()
             if (++written % 500 == 0) statement.executeBatch()
@@ -119,7 +138,9 @@ internal fun Policy.classify(counts: SlotCounts): SlotClass =
  * epoch tags of non-trusted, out-of-quarantine rows. Operator views only: a contributor's phone reads the day's release,
  * with its own rows left out ([SlotRelease], #81), never these live readings.
  */
-internal fun Connection.slotReadings(policy: Policy, today: LocalDate, fingerprints: List<String>): Map<String, List<SlotVariantReading>> {
+internal fun Connection.slotReadings(
+    policy: Policy, today: LocalDate, fingerprints: List<String>, table: SlotTable = SlotTable.CLUSTERS,
+): Map<String, List<SlotVariantReading>> {
     if (fingerprints.isEmpty()) return emptyMap()
     data class Key(val fingerprint: String, val variant: SlotVariant, val slot: String, val epoch: Int)
     val present = HashMap<Key, Int>()
@@ -128,12 +149,14 @@ internal fun Connection.slotReadings(policy: Policy, today: LocalDate, fingerpri
     try {
         prepareStatement(
             """SELECT fingerprint, platform_app_version, hash_domain, filter_rev, layout, slot, epoch, value, count(*) AS installs
-                FROM slot_sightings
-                WHERE fingerprint = ANY(?::bpchar[]) AND ${policy.countedSlotRows()}
+                FROM ${table.table}
+                WHERE ${if (table.ruleId == null) "" else "rule_id = ? AND "}fingerprint = ANY(?::bpchar[]) AND ${policy.countedSlotRows()}
                 GROUP BY fingerprint, platform_app_version, hash_domain, filter_rev, layout, slot, epoch, value""",
         ).use { statement ->
-            statement.setArray(1, keys)
-            statement.setObject(2, today); statement.setObject(3, today)
+            var index = 0
+            table.ruleId?.let { statement.setString(++index, it) }
+            statement.setArray(++index, keys)
+            statement.setObject(++index, today); statement.setObject(++index, today)
             statement.executeQuery().use { rows ->
                 while (rows.next()) {
                     val key = Key(rows.getString(1), SlotVariant(rows.getString(2), rows.getInt(3), rows.getInt(4), rows.getString(5)),

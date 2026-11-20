@@ -59,6 +59,10 @@ class LifecycleStore(private val db: Database, private val clock: Clock, private
         // #80: slot sightings keep the cluster sightings' retention; their quarantine marks clear like token sightings'.
         result["slots"] = delete("slot_sightings", "last_day + ${policy.retention.clusterSightingsDays} <= ?", today)
         result["slot_quarantine_marks"] = quarantineMarks(today, "slot_sightings")
+        // #69: matched skeletons keep the cluster sightings' retention, samples included (purge_after was set from
+        // their observation day at ingest).
+        for ((name, table, predicate) in matchedRetention()) result[name] = delete(table, predicate, today)
+        result["matched_slot_quarantine_marks"] = quarantineMarks(today, "matched_slot_sightings")
         // #81: the contributor tier. A release is served on its own day only; an expired one goes even when today's
         // build fails. The build runs after every slot deletion above, so it copies only rows that still count.
         result["slot_release_expired"] = delete("slot_release_days", "release_day < ?", today)
@@ -149,6 +153,16 @@ class LifecycleStore(private val db: Database, private val clock: Clock, private
         )
     }
 
+    /** #69: what the matched tables keep: every row the cluster sightings' days after its observation. */
+    private fun matchedRetention(): List<Triple<String, String, String>> {
+        val days = policy.retention.clusterSightingsDays
+        return listOf(
+            Triple("matched_samples", "matched_samples", "purge_after <= ?"),
+            Triple("matched_sightings", "matched_sightings", "day + $days <= ?"),
+            Triple("matched_slots", "matched_slot_sightings", "last_day + $days <= ?"),
+        )
+    }
+
     /** #82: anchor-check audit rows go after [AnchorCheckPolicy.auditDays], budget rows with the ingest ledger's days. */
     private fun anchorRetention(): List<Triple<String, String, String>> = listOf(
         Triple("anchor_checks", "anchor_checks", "day + ${policy.anchorCheck.auditDays} <= ?"),
@@ -184,6 +198,8 @@ class LifecycleStore(private val db: Database, private val clock: Clock, private
                 put("sightings", select("SELECT count(*) FROM cluster_sightings_v5 WHERE day+${policy.retention.clusterSightingsDays} <= ?",today) { it.getLong(1) }!!)
                 put("slots", select("SELECT count(*) FROM slot_sightings WHERE last_day+${policy.retention.clusterSightingsDays} <= ?",today) { it.getLong(1) }!!)
                 put("slot_quarantine_marks", select("SELECT count(*) FROM slot_sightings WHERE counts_from <= ?",today) { it.getLong(1) }!!)
+                for ((name, table, predicate) in matchedRetention()) put(name, select("SELECT count(*) FROM $table WHERE $predicate", today) { it.getLong(1) }!!)
+                put("matched_slot_quarantine_marks", select("SELECT count(*) FROM matched_slot_sightings WHERE counts_from <= ?",today) { it.getLong(1) }!!)
                 for (kind in listOf("screen","notification")) put("samples_$kind",
                     select("SELECT count(*) FROM cluster_samples s JOIN clusters c USING(fingerprint) WHERE c.kind=? AND ${sampleDue()}",kind,today,today) { it.getLong(1) }!!)
                 put("vocabulary", select("SELECT count(*) FROM vocabulary_v5 WHERE ${vocabularyPredicate()}",today,*VocabularyEligibility.args(today)) { it.getLong(1) }!!)

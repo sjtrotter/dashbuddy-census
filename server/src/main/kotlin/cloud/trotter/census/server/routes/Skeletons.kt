@@ -1,5 +1,6 @@
 package cloud.trotter.census.server.routes
 
+import cloud.trotter.census.contract.UiSkeletonDto
 import cloud.trotter.census.server.Clock
 import cloud.trotter.census.server.ErrorResponse
 import cloud.trotter.census.server.Policy
@@ -69,8 +70,9 @@ fun Route.skeletonRoutes(store: InstallStore, skeletons: SkeletonStore, clock: C
             call.respond(HttpStatusCode.UnprocessableEntity, BatchQualityResponse(rejected = rejected))
             return@post
         }
-        // Both contract kinds share this accepted count, deduplication and ledger transaction.
-        val duplicate = accepted.size - accepted.map { it.item.fingerprint }.toSet().size
+        // Both contract kinds share this accepted count, deduplication and ledger transaction. #69: a matched item is
+        // its layout under its rule, so the same layout sent unmatched and matched in one batch is two items.
+        val duplicate = accepted.size - accepted.map { it.item.fingerprint to (it.item as? UiSkeletonDto)?.ruleId }.toSet().size
         val outcome = skeletons.ingest(
             installId, keyHash, today, accepted, duplicate, rejected,
             batchId, rawBody.size.toLong(),

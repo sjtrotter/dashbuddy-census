@@ -12,7 +12,9 @@ import cloud.trotter.census.contract.NotifTextField
 import cloud.trotter.census.contract.ShapeTemplate
 import cloud.trotter.census.contract.SkeletonKind
 import cloud.trotter.census.contract.SkeletonRejectionReason
+import cloud.trotter.census.contract.SkeletonSchema
 import cloud.trotter.census.contract.SkeletonVersion
+import cloud.trotter.census.contract.WireTokenGrammars
 import cloud.trotter.census.contract.WireStrings
 import cloud.trotter.census.server.Policy
 import kotlinx.serialization.SerializationException
@@ -45,21 +47,27 @@ enum class AdmissionReason(val wire: String) { FILTER_REV_TOO_OLD("filter_rev_to
  * `unknown_field` as before (the contract's strict v1 decode would refuse it too). A v2 item may add the node flags
  * `hasClickAction` and `isVisibleToUser`, a slot's `shape` (only a template of the closed list, else `bad_shape`)
  * and a notification's `actions`, whose slots are hashed, counted and keyed like every other slot.
+ *
+ * #69: a `uinode.matched.v1` item is a screen with the v2 body rules plus one REQUIRED top-level `ruleId`, a rule id
+ * of the item's own platform ([WireTokenGrammars.isRuleIdFor], else `bad_rule_id`). A v1 or v2 item carrying
+ * `ruleId` is `unknown_field`, as any other key outside its allowlist.
  */
 object SkeletonValidator {
     fun validate(element: JsonElement, policy: Policy, today: LocalDate): ItemVerdict {
         if (element !is JsonObject) return reject("bad_item")
         val schema = element.string("schemaId")
         if (schema == null || schema !in policy.acceptedSchemaIds) return reject("unknown_schema")
+        val matched = schema == SkeletonSchema.SCHEMA_ID_MATCHED
         val notificationVersion = SkeletonVersion.ofNotificationSchema(schema)
-        val version = notificationVersion ?: SkeletonVersion.ofScreenSchema(schema) ?: return reject("unknown_schema")
+        val version = if (matched) SkeletonVersion.V2 else notificationVersion ?: SkeletonVersion.ofScreenSchema(schema)
+            ?: return reject("unknown_schema")
         val notification = notificationVersion != null
         val v2 = version == SkeletonVersion.V2
         val kind = element.string("kind")
         if ("kind" in element && SkeletonKind.fromWire(kind ?: "") == null) return reject("unknown_skeleton_kind")
         if ((notification && kind != SkeletonKind.NOTIFICATION.wire) ||
             (!notification && kind != null && kind != SkeletonKind.SCREEN.wire)) return reject("kind_schema_mismatch")
-        val structure = inspect(element, notification, v2)
+        val structure = inspect(element, notification, v2, matched)
         if (structure.unknownField || structure.textKeys.any { it !in policy.acceptedTextKeys }) return reject("unknown_field")
         if (structure.plaintext) return reject("plaintext_field")
         if (structure.badType) return reject("bad_item")
@@ -102,6 +110,8 @@ object SkeletonValidator {
         }
         val platform = requireNotNull(element.string("platform"))
         if (!platformPattern.matches(platform) || platform !in policy.acceptedPlatforms) return reject("bad_platform")
+        // `_unknown` never has a rule: the grammar starts with a letter, so its prefix cannot match.
+        if (matched && !WireTokenGrammars.isRuleIdFor(platform, requireNotNull(element.string(RULE_ID)))) return reject("bad_rule_id")
         val dayString = requireNotNull(element.string("day"))
         if (!dayPattern.matches(dayString)) return reject("bad_day")
         val day = try {
@@ -140,7 +150,7 @@ object SkeletonValidator {
         (this[key] as? JsonPrimitive)?.takeIf { it.isString }?.content
 
     private enum class Shape {
-        ITEM, NOTIFICATION, NOTIF_SLOTS, NODE, SLOT, OPTIONAL_SLOT, TEXT_MAP, CHILDREN, ACTIONS, STRING, OPTIONAL_STRING, INTEGER, OPTIONAL_INTEGER, BOOLEAN, INVALID,
+        ITEM, MATCHED, NOTIFICATION, NOTIF_SLOTS, NODE, SLOT, OPTIONAL_SLOT, TEXT_MAP, CHILDREN, ACTIONS, STRING, OPTIONAL_STRING, INTEGER, OPTIONAL_INTEGER, BOOLEAN, INVALID,
     }
 
     private data class Visit(val value: JsonElement, val shape: Shape, val depth: Int)
@@ -155,17 +165,17 @@ object SkeletonValidator {
         val textKeys = mutableListOf<String>()
     }
 
-    private fun inspect(item: JsonObject, notification: Boolean, v2: Boolean): Structure {
+    private fun inspect(item: JsonObject, notification: Boolean, v2: Boolean, matched: Boolean): Structure {
         val result = Structure()
         val pending = ArrayDeque<Visit>()
-        pending.addLast(Visit(item, if (notification) Shape.NOTIFICATION else Shape.ITEM, 0))
+        pending.addLast(Visit(item, if (notification) Shape.NOTIFICATION else if (matched) Shape.MATCHED else Shape.ITEM, 0))
         while (pending.isNotEmpty()) {
             val (value, shape, depth) = pending.removeLast()
             if (value is JsonPrimitive && value.isString && shape != Shape.STRING && shape != Shape.OPTIONAL_STRING) {
                 result.plaintext = true
             }
             val validType = when (shape) {
-                Shape.ITEM, Shape.NOTIFICATION, Shape.NOTIF_SLOTS, Shape.NODE, Shape.SLOT, Shape.TEXT_MAP -> value is JsonObject
+                Shape.ITEM, Shape.MATCHED, Shape.NOTIFICATION, Shape.NOTIF_SLOTS, Shape.NODE, Shape.SLOT, Shape.TEXT_MAP -> value is JsonObject
                 Shape.OPTIONAL_SLOT -> value is JsonObject || value == JsonNull
                 Shape.CHILDREN, Shape.ACTIONS -> value is JsonArray
                 Shape.STRING -> value is JsonPrimitive && value.isString
@@ -180,6 +190,7 @@ object SkeletonValidator {
                 is JsonObject -> {
                     val fields = when (shape) {
                         Shape.ITEM -> itemFields
+                        Shape.MATCHED -> matchedItemFields
                         Shape.NOTIFICATION -> if (v2) notificationFieldsV2 else notificationFields
                         Shape.NOTIF_SLOTS -> NotifTextField.entries.associate { it.wire to Shape.SLOT }
                         Shape.NODE -> if (v2) nodeFieldsV2 else nodeFields
@@ -189,6 +200,7 @@ object SkeletonValidator {
                     if (fields != null && value.keys.any { it !in fields }) result.unknownField = true
                     when (shape) {
                         Shape.ITEM -> if (requiredItemKeys.any { it !in value }) result.badType = true
+                        Shape.MATCHED -> if (requiredMatchedKeys.any { it !in value }) result.badType = true
                         Shape.NOTIFICATION -> if (requiredNotificationKeys.any { it !in value }) result.badType = true
                         Shape.NOTIF_SLOTS -> if (value.keys != NotifTextField.entries.map { it.wire }.toSet()) result.badType = true
                         Shape.NODE -> {
@@ -231,6 +243,10 @@ object SkeletonValidator {
         "windowTitle" to Shape.OPTIONAL_SLOT, "root" to Shape.NODE,
     )
     private val requiredItemKeys = setOf("schemaId", "hashDomain", "filterRev", "platform", "engineVersion", "day", "root")
+    // #69: a matched item is a screen item plus its rule id; any other string in it is still plaintext.
+    private const val RULE_ID = "ruleId"
+    private val matchedItemFields = itemFields + (RULE_ID to Shape.STRING)
+    private val requiredMatchedKeys = requiredItemKeys + RULE_ID
     private val notificationFields = (itemFields - setOf("root", "windowTitle")) + mapOf(
         "kind" to Shape.STRING, "channelId" to Shape.STRING, "slots" to Shape.NOTIF_SLOTS,
     )
