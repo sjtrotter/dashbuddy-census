@@ -24,6 +24,7 @@ Public health/policy, identity, ingest and operator routes are implemented. Noti
 | GET, POST | `/ops/contributors…`, `/ops/quarantine…` | Implemented | Grants, gated words and the quarantine (operator; POST needs TOTP, #81) |
 | GET, POST | `/ops/pause` | Implemented | Read or set the upload pause switch (operator; POST needs TOTP) |
 | GET | `/ops/rules`, `/ops/rules/{ruleId}` (and `/view`) | Implemented | Matched-skeleton rules and one rule's layouts (operator, #69) |
+| GET | `/ops/taps`, `/ops/taps/view?fingerprint=` | Implemented | Tapped buttons by screen, and one screen's buttons (operator, read-only pages, #87) |
 | GET | `/ops/` | Implemented | Authenticated operator dashboard |
 
 `/healthz` returns `200 {"status":"ok"}`. `/readyz` returns the same when its bounded database probe succeeds, otherwise `503 {"status":"db_unavailable"}`. No database error details are exposed.
@@ -43,7 +44,7 @@ Public health/policy, identity, ingest and operator routes are implemented. Noti
     "maxSkeletonBytes": 65536,
     "maxBatchItems": 100,
     "maxBatchBytes": 1048576,
-    "acceptedSchemaIds": ["uinode.skeleton.v1", "uinode.skeleton.v2", "uinode.matched.v1"],
+    "acceptedSchemaIds": ["uinode.skeleton.v1", "uinode.skeleton.v2", "uinode.matched.v1", "uinode.clicked.v1"],
     "retention": {
         "tokenSightingsDays": 30,
         "clusterSightingsDays": 30,
@@ -97,7 +98,7 @@ Rotation and withdrawal revalidate the current credential within their own trans
 
 Authentication captures one instant in `RequestInstantKey` for admission, the signature timestamp window, the last-seen UTC day, and the route's ledger day and `resetInSeconds`. Routes fall back to the clock only when the attribute is absent. Last-seen updates are monotonic, bound to the verified credential, and exclude revoked rows; `GET /v1/me` re-reads the stored row instead of echoing the attempted day. Counters and reset describe the same UTC day even at midnight.
 
-Withdrawal deletes `trusted_envelopes`, `health_daily`, `token_sightings_v5`, `cluster_sightings_v5`, `slot_sightings`, the contributor tier's `slot_confirmations`, `slot_roles`, `slot_release`, `quarantine_items` and `contributor_grants` (with their audit rows, #81), `matched_sightings` and `matched_slot_sightings` (#69), `ingest_ledger`, `nonces`, and `installs` in one transaction (`InstallStore.WITHDRAWAL_TABLES`; a test fails when a table that can hold the install is missing from it), and recomputes the `health_fleet_daily` rows the erased health still fed. The content tables carry epoch pseudonyms, not the install ID (#86): the server finds the install's rows by recomputing its pseudonyms under every stored epoch key. Rows under a destroyed epoch key cannot be found, by the server or anyone else, and are past retention. Shared aggregate/catalog tables are retained; health days already folded into fleet totals hold no trace of the install.
+Withdrawal deletes `trusted_envelopes`, `health_daily`, `token_sightings_v5`, `cluster_sightings_v5`, `slot_sightings`, the contributor tier's `slot_confirmations`, `slot_roles`, `slot_release`, `quarantine_items` and `contributor_grants` (with their audit rows, #81), `matched_sightings` and `matched_slot_sightings` (#69), `clicked_sightings` (#87), `ingest_ledger`, `nonces`, and `installs` in one transaction (`InstallStore.WITHDRAWAL_TABLES`; a test fails when a table that can hold the install is missing from it), and recomputes the `health_fleet_daily` rows the erased health still fed. The content tables carry epoch pseudonyms, not the install ID (#86): the server finds the install's rows by recomputing its pseudonyms under every stored epoch key. Rows under a destroyed epoch key cannot be found, by the server or anyone else, and are past retention. Shared aggregate/catalog tables are retained; health days already folded into fleet totals hold no trace of the install.
 
 "Delete my data" (`DELETE /v1/installs/me/data`, #79) runs the same erasure in one transaction, parent row locked first, except that the `installs` row and the ledger rows from today on stay: the credential keeps working, today's quota is not reset, and a batch sent before the deletion is answered `duplicate` rather than stored again. It writes the same hashed tombstone as a withdrawal and the same off-host journal notice, and copies the tombstone instant into `installs.erased_through`; startup replay leaves a generation alone when that marker covers its tombstone. After a restore from a backup older than the deletion the marker is missing, and replay erases that generation whole (the journal does not record which kind of erasure it was), so the app re-enrols. Shared cluster samples carry no install ID: the hashes only this install sent expire at the next lifecycle pass, as do vocabulary entries it alone held at k, before `completionDeadline`. Neither request is refused by the pause switch. Deletion is synchronous; the deadline preserves a future asynchronous contract. Nonces are single-use with a 300-second validity window. HMAC signatures remain replayable within their timestamp window; S4 batch admission will use the ledger for replay protection.
 
@@ -337,6 +338,26 @@ Operator reads, behind the `/ops` gate:
 - `GET /ops/rules/{ruleId}` (and `/view`): `layouts`, each a fingerprint with `sameAsCluster` (a cluster with that fingerprint is resolved to the rule), `installs28d`, `seenByTrusted`, `unblinded`, `versions`, `samples` (newest first, the cluster sample projection: kinds and `shape:<template>`, never a hash) and `slots` (class, installs and distinct hashes per variant); then `olderLayouts`, the clusters whose `resolvedRuleId` is the rule. Layouts are ordered by their newest sample. A malformed rule id is `400` (the HTML page answers the invalid shell); a well-formed one without samples is `404`.
 
 The k gate is the clusters': class and view id render as `~<8 hex>` until k non-trusted installs or a trusted sighting, and slot classes read `unknown` below k.
+
+## Clicked skeletons — #87
+
+The policy always ends with `uinode.clicked.v1`, after `uinode.matched.v1`, notifications on or off (the contract's `SUPPORTED_SCHEMA_IDS` order). A clicked skeleton is the screen of the window a dasher tapped when the app did not recognize the tap (gig.log#1634). Its body follows the v2 rules exactly, plus one required top-level object, `tap`, with exactly these keys: `ownerPath` (required), `tapPath` (optional, omitted when absent) and `generation` (required). The paths are index paths into the item's own `root` (`root`, then each child index: `root/1/0`); `ownerPath` names the node that takes the click, `tapPath` the tapped node below it; `generation` is the 16-hex id of the rules generation the phone classified the click with. Verdicts, beyond the v2 ones:
+
+- `tap` missing, `null` or not an object, `ownerPath` or `generation` missing, `null` or not a string: `bad_item`;
+- a key inside `tap` outside those three: `unknown_field`;
+- a path off the canonical grammar (no leading zeros, at most 64 steps of at most four digits, no text key) or off the tree, an owner that takes no click, a `tapPath` that is not strictly below its nearest clickable owner, a `tapPath` sent as `null`, or a `generation` that is not 16 lowercase hex: `bad_tap_ref`. The contract's decode decides it: when the clicked item fails it and the same body decodes as a v2 screen, the tap is at fault;
+- `tap` on any other item, any value including `null`, or `ruleId` on a clicked item: `unknown_field`.
+
+The contract's `conformance/clicked-vectors.jsonl` names each vector's server verdict; `ClickedSkeletonValidatorTest` replays them.
+
+A clicked item counts toward one target: (fingerprint, raw layout, owner path). The raw layout is `SlotWalk.layout`, the contract's `ContributorSlots.layout`; the fingerprint splices anonymous wrappers away, so one owner path names one node only within one layout, and two layouts of one fingerprint keep their buttons apart. Clicked items share the batch, the ledger transaction and the daily skeleton budget with every other item. The in-batch duplicate key of a clicked item is its full identity (`ClickedIdentity`: day, fingerprint, layout, owner path), never its fingerprint: two buttons of one screen in one batch are two accepted items. A batch is admitted once per install, UTC day and batch id, as every batch is; the app's clicked batch id (`c-` and 32 hex) is a digest of the batch's identities, so the two halves of a split batch and a backlogged day each carry their own id and none is a false duplicate. Nothing on the server depends on arrival order. They are stored apart from the clusters: no cluster is created or touched, and nothing feeds token or slot sightings, vocabulary, the anchor check or the contributor release. `clicked_samples` keeps one anonymous sample per (target, app version, observation day), the first that arrives, until the observation day (clamped to the receipt day) + 30; it names no install and survives an install's withdrawal or data deletion until that day, as cluster and matched samples do. `clicked_sightings` keeps presence per epoch tag (object `<fingerprint>:<layout>:<ownerPath>`) and observation day for 30 days, and goes with the install's other sightings on withdrawal, data deletion, revocation and the restore replay. The phone owns the sending limits (ten a day); the server adds no separate cap.
+
+Operator reads, behind the `/ops` gate, read-only HTML pages:
+
+- `GET /ops/taps`: the screens with a live clicked sample, newest receipt first: fingerprint prefix, platform, layouts, buttons (targets), versions, installs (the most non-trusted installs one button was tapped by within one epoch in 28 days; an install's tags differ per button, so buttons are never summed) and the newest receipt day.
+- `GET /ops/taps/view?fingerprint=`: one screen's buttons, by layout then owner path: owner path, layout prefix, the owner node's class, id and flags from the newest sample at that path, installs, label visibility and versions, and a link to the cluster with the same fingerprint when there is one. A malformed or missing fingerprint is `400` (the invalid shell); a well-formed one without samples is `404`.
+
+The k gate is the clusters': the owner's class and view id render as `~<8 hex>` until k non-trusted installs tapped that button within one epoch or a trusted install tapped it.
 
 ## Notification skeletons — #1189 slice 2
 

@@ -5,7 +5,7 @@ DashBuddy Census will help the DashBuddy Android app understand unfamiliar scree
 What is live (v0.11.0):
 
 - Enrol, rotate, revoke, and withdraw, with signed requests.
-- Skeleton ingest (`uinode.skeleton.v1` and `.v2`, with shape slots and click flags; `uinode.matched.v1`, screens a rule matched while failing to read them, kept apart from the clusters with a per-rule operator view, #69), trusted-envelope ingest (`uinode.v1`, trusted installs only, paired to existing clusters by fingerprint), and daily recognition health (`/v1/health`).
+- Skeleton ingest (`uinode.skeleton.v1` and `.v2`, with shape slots and click flags; `uinode.matched.v1`, screens a rule matched while failing to read them, kept apart from the clusters with a per-rule operator view, #69; `uinode.clicked.v1`, the button a dasher tapped on an unrecognized screen as a position in its layout, kept apart from the clusters with a read-only tap view, #87), trusted-envelope ingest (`uinode.v1`, trusted installs only, paired to existing clusters by fingerprint), and daily recognition health (`/v1/health`).
 - Structural-fingerprint clustering, k-gated label unblinding, and the vocabulary queue.
 - Health rollup and alarms delivered by email.
 - The operator dashboard, served ONLY on the WireGuard listener with bearer or TOTP session login: platform → version cluster summary, per-group review pages, and cluster detail with skeleton samples and the trusted-capture wireframe.
@@ -38,6 +38,8 @@ Our intended operating promise is to store hashes and counts, never plaintext be
 | Cluster samples (shared, no install) | 90 days after the cluster was last seen |
 | Matched samples (shared, no install, #69) | 30 days after the observation day |
 | Matched and matched-slot sightings (presence per epoch pseudonym, #69) | 30 days |
+| Clicked samples (shared, no install, #87) | 30 days after the observation day |
+| Clicked sightings (presence per epoch pseudonym, #87) | 30 days |
 | Ingest ledger | 7 days |
 | Withdrawal and deletion tombstones (hashed install ID) | 60 days |
 | Backups | 14 days |
