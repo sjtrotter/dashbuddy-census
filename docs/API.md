@@ -23,6 +23,7 @@ Public health/policy, identity, ingest and operator routes are implemented. Noti
 | POST | `/v1/contributor/quarantine` | Implemented | "Ask the developer": the artifact, sealed to the operator (#81) |
 | GET, POST | `/ops/contributors…`, `/ops/quarantine…` | Implemented | Grants, gated words and the quarantine (operator; POST needs TOTP, #81) |
 | GET, POST | `/ops/pause` | Implemented | Read or set the upload pause switch (operator; POST needs TOTP) |
+| GET | `/ops/rules`, `/ops/rules/{ruleId}` (and `/view`) | Implemented | Matched-skeleton rules and one rule's layouts (operator, #69) |
 | GET | `/ops/` | Implemented | Authenticated operator dashboard |
 
 `/healthz` returns `200 {"status":"ok"}`. `/readyz` returns the same when its bounded database probe succeeds, otherwise `503 {"status":"db_unavailable"}`. No database error details are exposed.
@@ -42,7 +43,7 @@ Public health/policy, identity, ingest and operator routes are implemented. Noti
     "maxSkeletonBytes": 65536,
     "maxBatchItems": 100,
     "maxBatchBytes": 1048576,
-    "acceptedSchemaIds": ["uinode.skeleton.v1", "uinode.skeleton.v2"],
+    "acceptedSchemaIds": ["uinode.skeleton.v1", "uinode.skeleton.v2", "uinode.matched.v1"],
     "retention": {
         "tokenSightingsDays": 30,
         "clusterSightingsDays": 30,
@@ -96,7 +97,7 @@ Rotation and withdrawal revalidate the current credential within their own trans
 
 Authentication captures one instant in `RequestInstantKey` for admission, the signature timestamp window, the last-seen UTC day, and the route's ledger day and `resetInSeconds`. Routes fall back to the clock only when the attribute is absent. Last-seen updates are monotonic, bound to the verified credential, and exclude revoked rows; `GET /v1/me` re-reads the stored row instead of echoing the attempted day. Counters and reset describe the same UTC day even at midnight.
 
-Withdrawal deletes `trusted_envelopes`, `health_daily`, `token_sightings_v5`, `cluster_sightings_v5`, `slot_sightings`, the contributor tier's `slot_confirmations`, `slot_roles`, `slot_release`, `quarantine_items` and `contributor_grants` (with their audit rows, #81), `ingest_ledger`, `nonces`, and `installs` in one transaction (`InstallStore.WITHDRAWAL_TABLES`; a test fails when a table that can hold the install is missing from it), and recomputes the `health_fleet_daily` rows the erased health still fed. The content tables carry epoch pseudonyms, not the install ID (#86): the server finds the install's rows by recomputing its pseudonyms under every stored epoch key. Rows under a destroyed epoch key cannot be found, by the server or anyone else, and are past retention. Shared aggregate/catalog tables are retained; health days already folded into fleet totals hold no trace of the install.
+Withdrawal deletes `trusted_envelopes`, `health_daily`, `token_sightings_v5`, `cluster_sightings_v5`, `slot_sightings`, the contributor tier's `slot_confirmations`, `slot_roles`, `slot_release`, `quarantine_items` and `contributor_grants` (with their audit rows, #81), `matched_sightings` and `matched_slot_sightings` (#69), `ingest_ledger`, `nonces`, and `installs` in one transaction (`InstallStore.WITHDRAWAL_TABLES`; a test fails when a table that can hold the install is missing from it), and recomputes the `health_fleet_daily` rows the erased health still fed. The content tables carry epoch pseudonyms, not the install ID (#86): the server finds the install's rows by recomputing its pseudonyms under every stored epoch key. Rows under a destroyed epoch key cannot be found, by the server or anyone else, and are past retention. Shared aggregate/catalog tables are retained; health days already folded into fleet totals hold no trace of the install.
 
 "Delete my data" (`DELETE /v1/installs/me/data`, #79) runs the same erasure in one transaction, parent row locked first, except that the `installs` row and the ledger rows from today on stay: the credential keeps working, today's quota is not reset, and a batch sent before the deletion is answered `duplicate` rather than stored again. It writes the same hashed tombstone as a withdrawal and the same off-host journal notice, and copies the tombstone instant into `installs.erased_through`; startup replay leaves a generation alone when that marker covers its tombstone. After a restore from a backup older than the deletion the marker is missing, and replay erases that generation whole (the journal does not record which kind of erasure it was), so the app re-enrols. Shared cluster samples carry no install ID: the hashes only this install sent expire at the next lifecycle pass, as do vocabulary entries it alone held at k, before `completionDeadline`. Neither request is refused by the pause switch. Deletion is synchronous; the deadline preserves a future asynchronous contract. Nonces are single-use with a 300-second validity window. HMAC signatures remain replayable within their timestamp window; S4 batch admission will use the ledger for replay protection.
 
@@ -317,6 +318,25 @@ A shape outside the list, a `shape` key on a slot whose kind is not `shape`, or 
 Fingerprints ignore the v2 additions: a screen's covers class, id and structure only, and a notification's omits the actions and reads a shape slot as `mixed`, the kind v1 sent for the same value. An install moving from v1 to v2 therefore keeps its clusters; a cluster can hold v1 and v2 samples side by side. Action-label hashes are tokens like any slot hash: they count toward k and the vocabulary queue, expire from stored samples on the token deadline, and are keyed under the pepper before storage (#85). Shape slots hold no hash and are stored as sent; shapes are not vocabulary.
 
 Operator projections show a shape slot as `shape:<template>` in `kinds` (a stored template off the list reads plain `shape`), the node flags as `clickable`, `clickAction` and `hidden`, and a notification's `actions` as kind badges. v1 samples carry only `clickable`. The trusted-envelope wireframe draws a node as clickable when it is clickable or advertises the click action, as the authoring walk does.
+
+## Matched skeletons — #69
+
+The policy always ends with `uinode.matched.v1`, after the version ladder, notifications on or off (the contract's `SUPPORTED_SCHEMA_IDS` order). A matched skeleton is a screen a recognition rule matched while the rule was failing to read it on the phone (gig.log#1573). Its body follows the v2 rules exactly (node flags, shape slots), plus one required top-level string, `ruleId`: the rule that matched. Verdicts, beyond the v2 ones:
+
+- `ruleId` missing, `null` or not a string: `bad_item`;
+- `ruleId` not a rule id of the item's own platform (the contract's `WireTokenGrammars.isRuleIdFor`: at most 96 characters, two to five lowercase dotted segments, the `"<platform>."` prefix): `bad_rule_id`. A `_unknown` item can never carry one;
+- `ruleId` on a `uinode.skeleton.v1` or `.v2` item, any value including `null`: `unknown_field`.
+
+The contract's `conformance/matched-vectors.jsonl` names each vector's server verdict; `MatchedSkeletonValidatorTest` replays them.
+
+Matched items share the batch, the ledger transaction and the daily skeleton budget with every other item, and count once each: the same layout sent unmatched and matched in one batch is two accepted items, not a duplicate (the in-batch duplicate count runs over fingerprint and rule id). They are stored apart from the clusters: no cluster is created or touched, and nothing feeds token or slot sightings, vocabulary, the anchor check or the contributor release. `matched_samples` keeps at most 5 samples per (rule, fingerprint, app version), one per receipt day, until the item's observation day (clamped to the receipt day) + 30; `matched_sightings` and `matched_slot_sightings` keep presence per epoch tag for 30 days, like cluster and slot sightings. The phone owns the sending limits (1 per rule and 10 in all per UTC day); the server adds no separate cap.
+
+Operator reads, behind the `/ops` gate:
+
+- `GET /ops/rules` (and `/ops/rules/view`): the rules with a live matched sample, newest receipt first: `ruleId`, `platform`, `layouts` (distinct fingerprints), `versions`, `installs` (the most non-trusted installs one layout was seen by within one epoch in 28 days; an install's tags differ per layout, so layouts are never summed) and `newestReceivedDay`.
+- `GET /ops/rules/{ruleId}` (and `/view`): `layouts`, each a fingerprint with `sameAsCluster` (a cluster with that fingerprint is resolved to the rule), `installs28d`, `seenByTrusted`, `unblinded`, `versions`, `samples` (newest first, the cluster sample projection: kinds and `shape:<template>`, never a hash) and `slots` (class, installs and distinct hashes per variant); then `olderLayouts`, the clusters whose `resolvedRuleId` is the rule. Layouts are ordered by their newest sample. A malformed rule id is `400` (the HTML page answers the invalid shell); a well-formed one without samples is `404`.
+
+The k gate is the clusters': class and view id render as `~<8 hex>` until k non-trusted installs or a trusted sighting, and slot classes read `unknown` below k.
 
 ## Notification skeletons — #1189 slice 2
 

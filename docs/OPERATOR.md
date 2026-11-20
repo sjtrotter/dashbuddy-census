@@ -86,7 +86,7 @@ Per-install quotas apply at admission whether or not the switch is on: per UTC d
 
 ## Revoke, withdraw or delete an install's data
 
-`DELETE /v1/installs/me` lets an authenticated install withdraw; `DELETE /v1/installs/me/data` deletes its server data and keeps it enrolled (#79). The deletion erases every per-install row except the install row and today's ledger row (kept for the quota and batch replay protection, expiring with the 7-day ledger), writes the same tombstone and journal notice as a withdrawal, and is replayed the same way: after a restore from a backup older than the deletion, replay erases that install whole, and the app re-enrols. The response counts the rows erased. The operator can revoke credentials using the endpoint below. Revocation also deletes the install's token, cluster and slot sightings (#86, #80: they no longer name the install, so k counting cannot filter them by a join) and its contributor rows (#81: confirmations, role tags, released slot rows, quarantine items); its health rows stay until retention. Withdrawal deletes every row tied to the install in one transaction: install-keyed rows by id, content rows through its epoch tags under every stored key. See [Backup and restore](#backup-and-restore) for mandatory tombstone replay and journal recovery. Foreign keys currently do not cascade. Do not pretend a manual `DELETE FROM installs` is a complete withdrawal procedure.
+`DELETE /v1/installs/me` lets an authenticated install withdraw; `DELETE /v1/installs/me/data` deletes its server data and keeps it enrolled (#79). The deletion erases every per-install row except the install row and today's ledger row (kept for the quota and batch replay protection, expiring with the 7-day ledger), writes the same tombstone and journal notice as a withdrawal, and is replayed the same way: after a restore from a backup older than the deletion, replay erases that install whole, and the app re-enrols. The response counts the rows erased. The operator can revoke credentials using the endpoint below. Revocation also deletes the install's token, cluster, slot and matched sightings (#86, #80, #69: they no longer name the install, so k counting cannot filter them by a join) and its contributor rows (#81: confirmations, role tags, released slot rows, quarantine items); its health rows stay until retention. Withdrawal deletes every row tied to the install in one transaction: install-keyed rows by id, content rows through its epoch tags under every stored key. See [Backup and restore](#backup-and-restore) for mandatory tombstone replay and journal recovery. Foreign keys currently do not cascade. Do not pretend a manual `DELETE FROM installs` is a complete withdrawal procedure.
 
 ## Contributor tier (#81)
 
@@ -358,6 +358,8 @@ Vocabulary hashes (keyed under the pepper, #85) are available only on the dedica
 | `GET /ops/enrol` | `{"counts": {...}}`: process-local enrol outcome counts by reason (`enrolled`, `unsupported_schema`, `bad_request`, `unauthorized`, `install_exists`, `revoked`), every key present, zero included; reset on restart. Counts only, no identities. Not counted: a `413` or `408` from the body reader, and any answer given before the enrol handler runs (a routing-level `400` such as a malformed query escape, the rate limiter's `429`, a `500` or `503`). |
 | `GET /ops/pause` | `{"paused":bool,"changedDay":"YYYY-MM-DD"}` (`changedDay` absent until first set). `POST` with `{"paused":bool}` and TOTP sets it; see [Pause uploads](#pause-uploads). |
 | `GET /ops/ledger?day=YYYY-MM-DD` | Per-install prefix counters and totals; defaults to today. `batches` is a count, never the batch IDs. |
+| `GET /ops/rules` | #69: the rules with a live matched sample, newest receipt first: rule id, platform, layout count, versions, installs (the most non-trusted installs one layout was seen by in one epoch, 28 days) and newest receipt day. `/ops/rules/view` is the page. |
+| `GET /ops/rules/{ruleId}` | #69: the rule's layouts, newest sample first, each with `sameAsCluster`, counts, gate flags, gated samples and slot classes, then `olderLayouts` (clusters resolved to the rule). A malformed id is `400`, an unknown one `404`. `/ops/rules/{ruleId}/view` is the page. |
 | `GET /ops/vocabulary/queue?limit=` | Keyed hash (`tokenHash`, the stored `HMAC(pepper, hash)`, not the phone's public census hash; #85), kind, distinct non-trusted install count (within one epoch, #86), first/last day for eligible hashes absent from vocabulary; default 50, maximum 200. |
 
 Cluster ranking is computed at read time as `distinctInstalls28d × log2(1 + sightings28d) ×
@@ -471,6 +473,20 @@ The generator refuses weak anchors; the server also refuses generated output con
 identifiers that would violate the page's privacy rules, keeping preview and download bytes
 identical. A draft does not prove recognition safety: **the APP test suite is the gate**,
 including compilation and positive/negative corpus checks. The server only drafts.
+
+## Matched skeletons (#69)
+
+A matched skeleton is a screen a recognition rule matched while it was failing to read it on a phone (an open
+parse-rot incident, gig.log#1573), tagged with the rule's id. The phone sends at most one per rule and ten in all per
+UTC day. They never enter the clusters: open **Matched rules** from the dashboard's Clusters panel
+(`/ops/rules/view`), then a rule. A rule's page groups its samples by layout, newest first. "Same layout as cluster
+…" means a cluster resolved to this rule has that fingerprint, so the rule still sees the screen it was drafted from
+and the failure is in a value, not the layout; "New layout" means the screen changed shape. **Older layouts** lists
+the clusters resolved to the rule. A cluster's page links to its resolved rule's matched samples when there are any.
+Labels follow the display gate above (k non-trusted installs or a trusted sighting), and the slot table reads
+`unknown` below k, so at tester scale the shapes and the layout comparison carry the evidence. Matched rows keep 30
+days and are erased with an install like its other sightings. Deploying V15 needs no `.env` change; after deploy,
+check that `/v1/policy` lists `uinode.matched.v1` last and that `/ops/rules/view` renders.
 
 ## Notification review — #1189 slice 2
 
