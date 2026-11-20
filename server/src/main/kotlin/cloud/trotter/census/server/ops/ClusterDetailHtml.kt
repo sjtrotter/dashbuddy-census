@@ -176,7 +176,7 @@ object ClusterDetailHtml {
         if (template != null) chip("shape: ${safe(template)}", "neutral") else chip(prefix + safe(kind), "neutral")
     }
 
-    private fun FlowContent.nodeField(label: String, value: String?) {
+    internal fun FlowContent.nodeField(label: String, value: String?) {
         span("node-field") {
             +"$label "
             if (value == null) +"Not supplied" else {

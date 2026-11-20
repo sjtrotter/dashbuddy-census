@@ -134,14 +134,15 @@ internal fun isOpsPath(path: String): Boolean = path == "/ops" || path.startsWit
 /** The ops paths that answer a browser page rather than JSON: a request-level failure on them must answer HTML too. */
 /**
  * Judged on routing's DECODED segments so the answer agrees with the route that would have run: exactly the
- * home page, the review page, a one-segment cluster detail page and the matched-rule pages (#69). An undecodable path
- * answers false (JSON).
+ * home page, the review page, a one-segment cluster detail page, the matched-rule pages (#69) and the tap pages (#87).
+ * An undecodable path answers false (JSON).
  * `/ops/login` deliberately stays out: its form rejections answer the JSON envelope (pinned by OpsLoginTest).
  */
 internal fun isOpsHtmlPath(path: String): Boolean {
     val segments = decodedOpsSegments(path) ?: return false
     return segments.isEmpty() ||
-        (segments.size == 2 && segments[0] in setOf("clusters", "quarantine", "rules") && segments[1] == "view") ||
+        (segments.size == 1 && segments[0] == "taps") ||
+        (segments.size == 2 && segments[0] in setOf("clusters", "quarantine", "rules", "taps") && segments[1] == "view") ||
         (segments.size == 3 && segments[0] == "rules" && segments[2] == "view") ||
         (segments.size == 3 && segments[0] == "clusters" && segments[2] in setOf("view", "draft")) ||
         (segments.size == 4 && segments[0] == "clusters" && segments[2] == "draft" && segments[3] in setOf("preview", "shape"))
@@ -151,7 +152,7 @@ internal fun isOpsHtmlPath(path: String): Boolean {
 internal fun opsLogPath(path: String): String {
     val segment = path.removePrefix("/ops").trimStart('/').substringBefore('/')
     return if (segment in setOf("clusters", "installs", "health", "alarms", "enrol", "ledger", "vocabulary", "lifecycle", "login", "logout", "pause",
-        "contributors", "quarantine", "anchor-check", "anchor-checks", "rules")) "/ops/$segment" else "/ops"
+        "contributors", "quarantine", "anchor-check", "anchor-checks", "rules", "taps")) "/ops/$segment" else "/ops"
 }
 
 /** Application scope includes routing failures; CallLogging excludes these to produce exactly one INFO line. */

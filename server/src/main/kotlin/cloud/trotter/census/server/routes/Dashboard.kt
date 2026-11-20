@@ -19,6 +19,7 @@ import cloud.trotter.census.server.ops.ClusterFilter
 import cloud.trotter.census.server.ops.ClustersPageHtml
 import cloud.trotter.census.server.ops.RuleDetailHtml
 import cloud.trotter.census.server.ops.RulesPageHtml
+import cloud.trotter.census.server.ops.TapsHtml
 import cloud.trotter.census.server.ops.DashboardHtml
 import cloud.trotter.census.server.ops.DraftDecode
 import cloud.trotter.census.server.ops.DraftForm
@@ -51,6 +52,7 @@ fun Route.dashboardRoute(
     lifecycle: cloud.trotter.census.server.jobs.LifecycleReport? = null,
     contributors: cloud.trotter.census.server.db.ContributorStore? = null,
     matched: cloud.trotter.census.server.db.MatchedOpsStore? = null,
+    clicked: cloud.trotter.census.server.db.ClickedOpsStore? = null,
 ) {
     get("/") {
         val html = DashboardHtml.render(
@@ -99,6 +101,25 @@ fun Route.dashboardRoute(
                 val rule = matched.rule(ruleId)
                 call.respondText(RuleDetailHtml.render(policy.serverVersion, policy.k, today, rule), ContentType.Text.Html,
                     if (rule == null) HttpStatusCode.NotFound else HttpStatusCode.OK)
+            }
+        }
+    }
+    if (clicked != null) {
+        // #87: the tapped buttons, read-only. A malformed fingerprint is the invalid shell, one without samples 404.
+        get("/taps") {
+            call.response.headers.append("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'")
+            call.respondText(TapsHtml.renderList(policy.serverVersion, policy.k, clock.today().toString(), clicked.screens()), ContentType.Text.Html)
+        }
+        get("/taps/view") {
+            call.response.headers.append("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'")
+            val today = clock.today().toString()
+            val fingerprint = call.request.queryParameters["fingerprint"]?.takeIf { fingerprintPattern.matches(it) }
+            if (fingerprint == null) {
+                call.respondText(TapsHtml.renderInvalid(policy.serverVersion, policy.k, today), ContentType.Text.Html, HttpStatusCode.BadRequest)
+            } else {
+                val detail = clicked.screen(fingerprint)
+                call.respondText(TapsHtml.render(policy.serverVersion, policy.k, today, detail), ContentType.Text.Html,
+                    if (detail == null) HttpStatusCode.NotFound else HttpStatusCode.OK)
             }
         }
     }
