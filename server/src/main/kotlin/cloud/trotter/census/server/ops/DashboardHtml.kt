@@ -111,7 +111,7 @@ object DashboardHtml {
         panel("clusters", "Clusters") {
             p("muted") { +"One row per platform, app version and kind. Review opens the clusters of that row, untriaged first." }
             // #69: screens a rule matched while failing to read them live on their own page, never in the clusters.
-            // #87: so do the buttons tapped on unrecognized screens.
+            // #87: so do the buttons a dasher tapped that no click rule recognized.
             p { a(href = "/ops/rules/view") { +"Matched rules" }; +" · "; a(href = "/ops/taps") { +"Taps" } }
             if (clusters.isEmpty()) emptyState("No clusters to review yet. Rows appear when cluster sightings arrive.")
             else dataTable("Clusters by platform, app version and kind · latest version first",

@@ -220,7 +220,7 @@ identifier, never screen text, and no ingest log line names it.
 
 ## Clicked skeletons (#87)
 
-A clicked skeleton (`uinode.clicked.v1`) is the screen of the window a dasher tapped on an unrecognized screen, built
+A clicked skeleton (`uinode.clicked.v1`) is the screen of the window a dasher tapped when no click rule recognized the tap, built
 and filtered on the phone like an UNKNOWN skeleton, plus a `tap`: index paths into that screen (the button, and the
 tapped node below it when it survived the filter) and the rules generation as a 16-hex id. It carries no tap time,
 no text and no order of taps. The server validates the body like a v2 screen, takes the `tap` keys only from a closed

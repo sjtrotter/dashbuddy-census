@@ -27,7 +27,7 @@ object TapsHtml {
     ) {
         h1 { +"Taps" }
         p("muted") {
-            +("Buttons a dasher tapped on a screen the app did not recognize, as a position in the screen's layout, " +
+            +("Buttons a dasher tapped that no click rule recognized, as a position in the screen's layout, " +
                 "never its words. Installs are the most non-trusted installs one button was tapped by within one epoch in 28 days.")
         }
         if (screens.isEmpty()) emptyState("No clicked samples retained.")
