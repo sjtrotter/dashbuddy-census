@@ -69,6 +69,7 @@ fun Route.opsRoutes(
     quarantine: cloud.trotter.census.server.db.QuarantineStore? = null,
     anchorChecks: cloud.trotter.census.server.db.AnchorCheckStore? = null,
     matched: cloud.trotter.census.server.db.MatchedOpsStore? = null,
+    clicked: cloud.trotter.census.server.db.ClickedOpsStore? = null,
 ) {
     route("/ops") {
         install(OpsAuth) {
@@ -117,7 +118,7 @@ fun Route.opsRoutes(
                 route("/{rest...}") { handle { call.respond(HttpStatusCode.ServiceUnavailable, ErrorResponse("db_unavailable")) } }
                 return@run
             }
-            dashboardRoute(store, alarms, clock, policy, config, lifecycle, contributors, matched)
+            dashboardRoute(store, alarms, clock, policy, config, lifecycle, contributors, matched, clicked)
             if (contributors != null) opsContributorRoutes(contributors, quarantine, clock, policy, config)
             if (anchorChecks != null) opsAnchorCheckRoutes(anchorChecks, policy)
             get("/lifecycle") { call.respond(lifecycleView(config, policy, store, lifecycle)) }

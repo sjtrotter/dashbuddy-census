@@ -138,7 +138,7 @@ class QuarantineStore(private val db: Database, private val clock: Clock, privat
      * False when the item is gone or expired, or the copy's cluster exists with another kind.
      */
     suspend fun approve(id: UUID, sanitized: ItemVerdict.Accepted, today: LocalDate): Boolean {
-        require(!sanitized.isMatched) { "a matched skeleton is never a cluster sample" }
+        require(!sanitized.isMatched && !sanitized.isClicked) { "a matched or clicked skeleton is never a cluster sample" }
         return query {
             // Sol S7: the item, then its cluster: the order erasure takes too (quarantine items before the trusted envelopes
             // whose deletion locks clusters, InstallStore.WITHDRAWAL_TABLES), so approval and erasure never deadlock.

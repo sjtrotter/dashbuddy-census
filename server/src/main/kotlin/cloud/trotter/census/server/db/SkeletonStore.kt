@@ -35,7 +35,7 @@ class SkeletonStore(
     private val clock: Clock,
     // #80: the per-skeleton slot cap, Policy.slotConstancy.maxSlotsPerSkeleton.
     private val slotLimit: Int = SlotConstancyPolicy().maxSlotsPerSkeleton,
-    // #69: matched samples live until their observation day + the cluster-sighting retention.
+    // #69, #87: matched and clicked samples live until their observation day + the cluster-sighting retention.
     private val retention: Retention = Retention(),
 ) {
     private suspend fun <T> query(block: Connection.() -> T): T = withContext(Dispatchers.IO) {
@@ -108,8 +108,10 @@ class SkeletonStore(
             is ConsumeOutcome.BudgetExhausted -> return@query IngestOutcome.BudgetExhausted(outcome.retryAfterSeconds)
             is ConsumeOutcome.Consumed -> outcome
         }
-        // #69: matched items go to their own tables ([recordMatched]); the cluster loop sees only the rest.
-        val (matched, unmatched) = accepted.partition { it.matchedRuleId != null }
+        // #69: matched items go to their own tables ([recordMatched]); #87: so do clicked ones ([recordClicked]). The
+        // cluster loop sees only the rest.
+        val (clicked, unclicked) = accepted.partition { it.isClicked }
+        val (matched, unmatched) = unclicked.partition { it.matchedRuleId != null }
         val groups = unmatched.groupBy { it.item.fingerprint }
         var newClusters = 0
         var samplesStored = 0
@@ -183,6 +185,9 @@ class SkeletonStore(
         }
         if (matched.isNotEmpty()) {
             samplesStored += recordMatched(tagger, installId, trusted, countsFrom, day, matched, slotLimit, retention)
+        }
+        if (clicked.isNotEmpty()) {
+            samplesStored += recordClicked(tagger, installId, trusted, day, clicked, retention)
         }
         recordIngestCounters(installId, day, duplicateInBatch, rejected)
         IngestOutcome.Stored(IngestSummary(groups.size, newClusters, samplesStored, tokensTouched), consumed)

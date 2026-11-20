@@ -160,8 +160,8 @@ class NotificationIngestTest {
                 application { module(configured, db, clock) }
                 val published = Json.parseToJsonElement(client.get("/v1/policy").bodyAsText()).jsonObject
                 assertEquals(2, published.getValue("minimumFilterRev").jsonPrimitive.int)
-                // #69: the matched schema is listed either way.
-                assertEquals(if (enabled) 5 else 3, published.getValue("acceptedSchemaIds").jsonArray.size)
+                // #69, #87: the matched and clicked schemas are listed either way.
+                assertEquals(if (enabled) 6 else 4, published.getValue("acceptedSchemaIds").jsonArray.size)
                 val id = UUID.randomUUID().toString(); val key=secret(121)
                 val enrol = Json.parseToJsonElement(client.enrol(id,key).bodyAsText()).jsonObject
                 assertEquals(published, JsonObject(enrol - "installIdPrefix"))

@@ -86,7 +86,7 @@ Per-install quotas apply at admission whether or not the switch is on: per UTC d
 
 ## Revoke, withdraw or delete an install's data
 
-`DELETE /v1/installs/me` lets an authenticated install withdraw; `DELETE /v1/installs/me/data` deletes its server data and keeps it enrolled (#79). The deletion erases every per-install row except the install row and today's ledger row (kept for the quota and batch replay protection, expiring with the 7-day ledger), writes the same tombstone and journal notice as a withdrawal, and is replayed the same way: after a restore from a backup older than the deletion, replay erases that install whole, and the app re-enrols. The response counts the rows erased. The operator can revoke credentials using the endpoint below. Revocation also deletes the install's token, cluster, slot and matched sightings (#86, #80, #69: they no longer name the install, so k counting cannot filter them by a join) and its contributor rows (#81: confirmations, role tags, released slot rows, quarantine items); its health rows stay until retention. Withdrawal deletes every row tied to the install in one transaction: install-keyed rows by id, content rows through its epoch tags under every stored key. See [Backup and restore](#backup-and-restore) for mandatory tombstone replay and journal recovery. Foreign keys currently do not cascade. Do not pretend a manual `DELETE FROM installs` is a complete withdrawal procedure.
+`DELETE /v1/installs/me` lets an authenticated install withdraw; `DELETE /v1/installs/me/data` deletes its server data and keeps it enrolled (#79). The deletion erases every per-install row except the install row and today's ledger row (kept for the quota and batch replay protection, expiring with the 7-day ledger), writes the same tombstone and journal notice as a withdrawal, and is replayed the same way: after a restore from a backup older than the deletion, replay erases that install whole, and the app re-enrols. The response counts the rows erased. The operator can revoke credentials using the endpoint below. Revocation also deletes the install's token, cluster, slot, matched and clicked sightings (#86, #80, #69, #87: they no longer name the install, so k counting cannot filter them by a join) and its contributor rows (#81: confirmations, role tags, released slot rows, quarantine items); its health rows stay until retention. Withdrawal deletes every row tied to the install in one transaction: install-keyed rows by id, content rows through its epoch tags under every stored key. See [Backup and restore](#backup-and-restore) for mandatory tombstone replay and journal recovery. Foreign keys currently do not cascade. Do not pretend a manual `DELETE FROM installs` is a complete withdrawal procedure.
 
 ## Contributor tier (#81)
 
@@ -360,6 +360,8 @@ Vocabulary hashes (keyed under the pepper, #85) are available only on the dedica
 | `GET /ops/ledger?day=YYYY-MM-DD` | Per-install prefix counters and totals; defaults to today. `batches` is a count, never the batch IDs. |
 | `GET /ops/rules` | #69: the rules with a live matched sample, newest receipt first: rule id, platform, layout count, versions, installs (the most non-trusted installs one layout was seen by in one epoch, 28 days) and newest receipt day. `/ops/rules/view` is the page. |
 | `GET /ops/rules/{ruleId}` | #69: the rule's layouts, newest sample first, each with `sameAsCluster`, counts, gate flags, gated samples and slot classes, then `olderLayouts` (clusters resolved to the rule). A malformed id is `400`, an unknown one `404`. `/ops/rules/{ruleId}/view` is the page. |
+| `GET /ops/taps` | #87: the page of screens with tapped buttons, newest receipt first: fingerprint prefix, platform, layouts, buttons, versions, installs (the most non-trusted installs one button was tapped by in one epoch, 28 days) and newest receipt day. Read-only, HTML only. |
+| `GET /ops/taps/view?fingerprint=` | #87: one screen's buttons: owner path, layout, the owner node's class, id and flags (gated), installs and versions. A malformed fingerprint is `400`, an unknown one `404`. Read-only, HTML only. |
 | `GET /ops/vocabulary/queue?limit=` | Keyed hash (`tokenHash`, the stored `HMAC(pepper, hash)`, not the phone's public census hash; #85), kind, distinct non-trusted install count (within one epoch, #86), first/last day for eligible hashes absent from vocabulary; default 50, maximum 200. |
 
 Cluster ranking is computed at read time as `distinctInstalls28d × log2(1 + sightings28d) ×
@@ -487,6 +489,21 @@ Labels follow the display gate above (k non-trusted installs or a trusted sighti
 `unknown` below k, so at tester scale the shapes and the layout comparison carry the evidence. Matched rows keep 30
 days and are erased with an install like its other sightings. Deploying V15 needs no `.env` change; after deploy,
 check that `/v1/policy` lists `uinode.matched.v1` last and that `/ops/rules/view` renders.
+
+## Clicked skeletons (#87)
+
+A clicked skeleton is the screen of a window a dasher tapped when the app did not recognize the tap (gig.log#1634),
+with the button as a position in that screen's layout: the owner path, `root/1/0`, the node that takes the click. It
+carries no words, no tap time and no order. The phone sends at most ten a day, chosen by a hash of each tap's identity, not by arrival.
+They never enter the clusters: open **Taps** from the dashboard's Clusters panel (`/ops/taps`), then a screen. A
+screen's page lists one row per button: an owner path in one raw layout (two layouts of one fingerprint keep their
+buttons apart, because one path can name different nodes in them), the owner node's class, id and flags read from the
+newest sample at that path, and its installs. Labels follow the display gate above (k non-trusted installs or a
+trusted sighting), so your own trusted phone's taps show their labels the next day. The page links the cluster with
+the same fingerprint when there is one. Clicked sightings keep 30 days and are erased with an install like its other
+sightings. A clicked sample names no install: it survives the install's withdrawal or data deletion until its purge
+day (the observation day + 30), as cluster and matched samples do. Deploying V16 needs no `.env` change; after deploy,
+check that `/v1/policy` lists `uinode.clicked.v1` last and that `/ops/taps` renders.
 
 ## Notification review — #1189 slice 2
 

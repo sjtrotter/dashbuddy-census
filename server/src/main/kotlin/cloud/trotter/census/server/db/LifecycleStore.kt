@@ -63,6 +63,8 @@ class LifecycleStore(private val db: Database, private val clock: Clock, private
         // their observation day at ingest).
         for ((name, table, predicate) in matchedRetention()) result[name] = delete(table, predicate, today)
         result["matched_slot_quarantine_marks"] = quarantineMarks(today, "matched_slot_sightings")
+        // #87: clicked skeletons keep the same days, samples included (purge_after was set from their observation day).
+        for ((name, table, predicate) in clickedRetention()) result[name] = delete(table, predicate, today)
         // #81: the contributor tier. A release is served on its own day only; an expired one goes even when today's
         // build fails. The build runs after every slot deletion above, so it copies only rows that still count.
         result["slot_release_expired"] = delete("slot_release_days", "release_day < ?", today)
@@ -163,6 +165,12 @@ class LifecycleStore(private val db: Database, private val clock: Clock, private
         )
     }
 
+    /** #87: what the clicked tables keep: every row the cluster sightings' days after its observation, as matched. */
+    private fun clickedRetention(): List<Triple<String, String, String>> = listOf(
+        Triple("clicked_samples", "clicked_samples", "purge_after <= ?"),
+        Triple("clicked_sightings", "clicked_sightings", "day + ${policy.retention.clusterSightingsDays} <= ?"),
+    )
+
     /** #82: anchor-check audit rows go after [AnchorCheckPolicy.auditDays], budget rows with the ingest ledger's days. */
     private fun anchorRetention(): List<Triple<String, String, String>> = listOf(
         Triple("anchor_checks", "anchor_checks", "day + ${policy.anchorCheck.auditDays} <= ?"),
@@ -200,6 +208,7 @@ class LifecycleStore(private val db: Database, private val clock: Clock, private
                 put("slot_quarantine_marks", select("SELECT count(*) FROM slot_sightings WHERE counts_from <= ?",today) { it.getLong(1) }!!)
                 for ((name, table, predicate) in matchedRetention()) put(name, select("SELECT count(*) FROM $table WHERE $predicate", today) { it.getLong(1) }!!)
                 put("matched_slot_quarantine_marks", select("SELECT count(*) FROM matched_slot_sightings WHERE counts_from <= ?",today) { it.getLong(1) }!!)
+                for ((name, table, predicate) in clickedRetention()) put(name, select("SELECT count(*) FROM $table WHERE $predicate", today) { it.getLong(1) }!!)
                 for (kind in listOf("screen","notification")) put("samples_$kind",
                     select("SELECT count(*) FROM cluster_samples s JOIN clusters c USING(fingerprint) WHERE c.kind=? AND ${sampleDue()}",kind,today,today) { it.getLong(1) }!!)
                 put("vocabulary", select("SELECT count(*) FROM vocabulary_v5 WHERE ${vocabularyPredicate()}",today,*VocabularyEligibility.args(today)) { it.getLong(1) }!!)

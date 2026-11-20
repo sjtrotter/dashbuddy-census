@@ -13,6 +13,7 @@ import cloud.trotter.census.server.ingest.ItemVerdict
 import cloud.trotter.census.server.ingest.SkeletonValidator
 import cloud.trotter.census.server.ingest.atRest
 import cloud.trotter.census.server.routes.QuarantineArtifact
+import cloud.trotter.census.server.clickedFixture
 import cloud.trotter.census.server.testKeying
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
@@ -286,6 +287,28 @@ class QuarantineTest : LifecycleTestDatabase() {
             }
             assertEquals(0L, count("clusters"))
             assertEquals(0L, count("cluster_samples"))
+            assertEquals(1L, count("quarantine_items"))
+        }
+    }
+
+    @Test fun `a clicked skeleton is never quarantined and never approved into the cluster tables`() = runBlocking {
+        Database.connect(config()).use { db ->
+            val id = granted(db)
+            // #87: a tapped window's screen with its tap; it belongs to the clicked tables only.
+            val clicked = clickedFixture(day)
+            val accepted = SkeletonValidator.validate(clicked, policy, day) as ItemVerdict.Accepted
+            assertTrue(accepted.isClicked)
+            // Submission: the artifact is refused before storage.
+            assertNull(QuarantineArtifact.parse("""{"skeleton":$clicked}""".toByteArray(), testKeying, policy, day))
+            // Approval: the store refuses a clicked copy and writes no cluster row.
+            store(db).submit(id, key, day, artifact(), null, emptyList())
+            val entry = store(db).list(day).single()
+            assertThrows(IllegalArgumentException::class.java) {
+                runBlocking { store(db).approve(entry.id, testKeying.atRest(accepted), day) }
+            }
+            assertEquals(0L, count("clusters"))
+            assertEquals(0L, count("cluster_samples"))
+            assertEquals(0L, count("clicked_samples"))
             assertEquals(1L, count("quarantine_items"))
         }
     }

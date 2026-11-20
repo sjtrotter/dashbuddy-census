@@ -64,6 +64,12 @@ enum class TagPurpose(val label: String) {
      * ([cloud.trotter.census.server.db.SlotObject]); a rule id has no `:`, so the object stays unambiguous.
      */
     MATCHED_SLOT("matched_slot"),
+
+    /**
+     * A clicked sighting (#87): the object is `<fingerprint>:<layout>:<ownerPath>`, one tapped button of one raw layout
+     * ([cloud.trotter.census.server.db.ClickedTarget]); no part holds a `:`, so the object stays unambiguous.
+     */
+    CLICKED("clicked"),
 }
 
 /**

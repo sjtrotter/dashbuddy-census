@@ -84,3 +84,32 @@ internal fun matchedFixture(
 
 internal fun matchedAccepted(day: LocalDate, policy: Policy = notificationPolicy, ruleId: String = MATCHED_RULE, rootId: String? = null, filterRev: Int = 1, version: String = "8.1"): ItemVerdict.Accepted =
     SkeletonValidator.validate(matchedFixture(day, ruleId, rootId = rootId, filterRev = filterRev, version = version), policy, day) as ItemVerdict.Accepted
+
+/** #87: the generation a clicked fixture names: 16 lowercase hex, the contract's wire form of a rules generation. */
+internal const val CLICK_GENERATION = "a1b2c3d4e5f60718"
+
+/**
+ * #87: a `uinode.clicked.v1` item: [screenV2Fixture]'s body (the same layout, so the same fingerprint) with a tap.
+ * The body's clickable nodes are the root and `root/1` (the button); `root/0` and `root/2` take no click. [rootId]
+ * gives the root a view id, which changes the fingerprint; [extraWrapper] appends an empty anonymous wrapper, which
+ * changes the raw layout and keeps the fingerprint.
+ */
+internal fun clickedFixture(
+    day: LocalDate = LocalDate.of(2026, 10, 2), ownerPath: String = "root/1", tapPath: String? = null,
+    platform: String = "doordash", version: String = "8.1", hash: String = "0123456789abcdef", rootId: String? = null,
+    extraWrapper: Boolean = false, filterRev: Int = 1,
+): JsonObject {
+    val v2 = CensusSkeletonSchema.deserialize(screenV2Fixture(day, platform, version, hash).toString()) as UiSkeletonDto
+    val children = if (extraWrapper) v2.root.children + UiSkeletonNodeDto(className = "android.view.View") else v2.root.children
+    val root = v2.root.copy(id = rootId, children = children)
+    val item = v2.copy(schemaId = SkeletonSchema.SCHEMA_ID_CLICKED, tap = TapRef(ownerPath, tapPath, CLICK_GENERATION),
+        filterRev = filterRev, root = root, fingerprint = requireNotNull(CensusFingerprint.of(root)))
+    return Json.parseToJsonElement(SkeletonSchema.serialize(item)).jsonObject
+}
+
+internal fun clickedAccepted(
+    day: LocalDate, policy: Policy = notificationPolicy, ownerPath: String = "root/1", tapPath: String? = null,
+    rootId: String? = null, extraWrapper: Boolean = false, filterRev: Int = 1, version: String = "8.1",
+): ItemVerdict.Accepted = SkeletonValidator.validate(
+    clickedFixture(day, ownerPath, tapPath, rootId = rootId, extraWrapper = extraWrapper, filterRev = filterRev, version = version), policy, day,
+) as ItemVerdict.Accepted

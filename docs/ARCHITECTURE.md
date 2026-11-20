@@ -16,11 +16,11 @@ AWS wrapper: account budgets + automatic EC2 stop; daily cost anomalies;
              multi-region CloudTrail management events --> S3 (14 days)
 ```
 
-Census validates environment configuration (including the required hash pepper), migrates through V15 and checks the pepper against the database's, replays withdrawals, applies the monotonic filter floor, and drains startup lifecycle work before accepting HTTP. The five-connection Hikari pool is registered with Exposed. Migration, recovery or lifecycle failure aborts startup. Readiness runs a bounded `SELECT 1`; liveness does not check the database. Signed, budgeted ingestion and authenticated operator review share the same effective policy.
+Census validates environment configuration (including the required hash pepper), migrates through V16 and checks the pepper against the database's, replays withdrawals, applies the monotonic filter floor, and drains startup lifecycle work before accepting HTTP. The five-connection Hikari pool is registered with Exposed. Migration, recovery or lifecycle failure aborts startup. Readiness runs a bounded `SELECT 1`; liveness does not check the database. Signed, budgeted ingestion and authenticated operator review share the same effective policy.
 
 ## Contract seam
 
-`../DashBuddy/census-contract` is an Apache-2.0 Gradle included build with coordinates `cloud.trotter.census:contract:0.0.0-local` and package `cloud.trotter.census.contract`. `censusContractPath` overrides its location. A reference to `CensusHash` proves dependency substitution at compile time. DTOs, fingerprinting, hashing, and grammars stay in that build; no crypto dependency or duplicate wire implementation is introduced here. The included contract owns hash-domain, DTO and fingerprint constants; both workflows retain pin `a562e80893eb66a886fa7038d8edef9d37a3f05e` (the matched skeletons, #69).
+`../DashBuddy/census-contract` is an Apache-2.0 Gradle included build with coordinates `cloud.trotter.census:contract:0.0.0-local` and package `cloud.trotter.census.contract`. `censusContractPath` overrides its location. A reference to `CensusHash` proves dependency substitution at compile time. DTOs, fingerprinting, hashing, and grammars stay in that build; no crypto dependency or duplicate wire implementation is introduced here. The included contract owns hash-domain, DTO and fingerprint constants; both workflows retain pin `bcda0027e01efd25255053816ee88afccd1272b3` (the clicked skeletons, #87).
 
 ## Storage and deployment boundary
 
@@ -84,6 +84,24 @@ revocation, trust changes and the restore replay reach them; the lifecycle sweep
 The operator's per-rule view (`MatchedOpsStore`, `/ops/rules…`) counts installs and gates labels the way the cluster
 views do, and links a layout to the cluster resolved to the rule (`clusters.resolved_rule_id`).
 
+V16 (#87, gig.log#1634) adds the clicked-skeleton tables. A `uinode.clicked.v1` item is a v2 screen body of the
+window the dasher tapped plus a `tap`: the owner node (the one that takes the click) as an index path into that body,
+an optional path to the tapped node below it, and the 16-hex rules generation the phone classified the click with. The
+contract decode checks the paths against the tree; a decode the tap alone fails is `bad_tap_ref`. A target is
+(fingerprint, raw layout, owner path), `ClickedTarget`: the fingerprint splices anonymous wrappers away, so one path
+names one node only within one layout (`SlotWalk.layout`). Ingest partitions clicked items out first, beside the
+matched ones; `recordClicked` (`ClickedStore`) writes `clicked_samples` (no install; one per target, app version and
+observation day, kept until the observation day + 30) and `clicked_sightings` (presence per epoch tag,
+`TagPurpose.CLICKED`, object `<fingerprint>:<layout>:<ownerPath>`), in key order. No arrival order is stored or relied
+on: a batch is admitted once per (install, day, batch id), and the phone's `c-` batch id is a digest of the batch's
+identities, so split halves and a backlogged day each carry their own; the in-batch duplicate key is the full
+`ClickedIdentity` (day, fingerprint, layout, owner path), never the fingerprint. A clicked item never upserts
+`clusters` and feeds nothing else. `clicked_sightings` is a `TaggedTable`, so withdrawal, data deletion, revocation,
+trust changes, the restore replay and the tag-ordered backup reach it; the lifecycle sweep and the filter floor cover
+both tables. The operator's view (`ClickedOpsStore`, `/ops/taps`) counts support per target the way `/ops/rules`
+counts it per layout and reads the owner's class, id and flags from the newest sample at the owner path, through the
+gated projection.
+
 Configuration is injected, stdout carries logs, and PostgreSQL holds durable state. The runtime is non-root, drops capabilities in Compose, and writes only under `/tmp`. Flyway coordination handles concurrent migration attempts, but operators must still review backward compatibility for rolling deployments.
 
 ## AWS wrapper — S2
@@ -94,7 +112,7 @@ GitHub Actions assumes a ref-restricted OIDC role to deploy through SSM. Account
 
 ## Notification storage and operator boundary — #1189 slice 2
 
-Both workflows pin the included DashBuddy contract to reviewed commit `a562e80893eb66a886fa7038d8edef9d37a3f05e` (the matched skeletons, #69; the v2 skeletons came with #78). The server uses its DTOs, dispatcher, fingerprint and rejection vocabulary directly. Conformance reads the pinned JSONL corpus, notification vectors and manifest (counts and SHA-256), rather than fixed row counts. The synthetic metadata identity vector remains valid at the contract layer but is rejected by the unchanged server release-tag policy as `bad_version`.
+Both workflows pin the included DashBuddy contract to reviewed commit `bcda0027e01efd25255053816ee88afccd1272b3` (the clicked skeletons, #87; the matched skeletons came with #69, the v2 skeletons came with #78). The server uses its DTOs, dispatcher, fingerprint and rejection vocabulary directly. Conformance reads the pinned JSONL corpus, notification vectors and manifest (counts and SHA-256), rather than fixed row counts. The synthetic metadata identity vector remains valid at the contract layer but is rejected by the unchanged server release-tag policy as `bad_version`.
 
 V4 adds checked, non-null `clusters.kind`, backfilling existing rows to `screen`; V1–V3 are unchanged. Ingest persists the submitted contract kind without updating an existing cluster's kind and refuses conflicting kinds transactionally. Canonical samples, cluster sightings, token sightings and shared quota accounting commit in one transaction. Samples are capped at five per `(fingerprint, platform_app_version)`, with at most one per receipt day. V5 tokens used `(hash_domain, token_hash, filter_rev, install_id)`; since V8 (#86) the key is `(hash_domain, token_hash, filter_rev, epoch, install_tag)`, and equal chrome tokens still count an install once per epoch across screen and notification surfaces.
 

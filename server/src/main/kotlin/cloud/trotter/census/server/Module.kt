@@ -6,6 +6,7 @@ import cloud.trotter.census.server.db.ContributorStore
 import cloud.trotter.census.server.db.EnvelopeStore
 import cloud.trotter.census.server.db.HealthStore
 import cloud.trotter.census.server.db.InstallStore
+import cloud.trotter.census.server.db.ClickedOpsStore
 import cloud.trotter.census.server.db.MatchedOpsStore
 import cloud.trotter.census.server.db.OpsStore
 import cloud.trotter.census.server.db.PauseStore
@@ -163,7 +164,7 @@ fun Application.module(
         val quarantine = db?.let { database -> config.operatorPublicKey?.let { QuarantineStore(database, clock, policy, it) } }
         opsRoutes(config, db?.let { OpsStore(it, clock, policy) }, alarms, clock, policy, lifecycle = lifecycle, enrolStats = enrolStats, pause = pause,
             contributors = contributors, quarantine = quarantine, anchorChecks = db?.let { AnchorCheckStore(it, clock, policy) },
-            matched = db?.let { MatchedOpsStore(it, clock, policy) })
+            matched = db?.let { MatchedOpsStore(it, clock, policy) }, clicked = db?.let { ClickedOpsStore(it, clock, policy) })
         identityRoutes(store, clock, policy, alarms, enrolStats) {
             if (store != null && skeletons != null && pause != null) skeletonRoutes(store, skeletons, clock, policy, pause)
             if (contributors != null && pause != null) contributorRoutes(contributors, quarantine, config.hashKeying, clock, policy, pause)

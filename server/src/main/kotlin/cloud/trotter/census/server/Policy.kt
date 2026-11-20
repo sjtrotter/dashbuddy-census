@@ -151,10 +151,11 @@ internal val SERVED_SKELETON_VERSIONS: List<SkeletonVersion> = listOf(SkeletonVe
 
 /**
  * The advertised schema ids (#78), oldest version first and screen before notification, then the matched schema
- * (#69), the contract's own order (`CensusSkeletonSchema.SUPPORTED_SCHEMA_IDS`). The app sends the newest version
- * listed; notification ids appear only while notifications are enabled. The matched schema is always on: it is a
- * screen skeleton tagged with the rule that matched it, stored apart from the clusters ([SkeletonSchema.SCHEMA_ID_MATCHED]).
+ * (#69) and the clicked schema (#87), the contract's own order (`CensusSkeletonSchema.SUPPORTED_SCHEMA_IDS`). The app
+ * sends the newest version listed; notification ids appear only while notifications are enabled. The matched and
+ * clicked schemas are always on: each is a screen skeleton stored apart from the clusters, tagged with the rule that
+ * matched it ([SkeletonSchema.SCHEMA_ID_MATCHED]) or with the node the dasher tapped ([SkeletonSchema.SCHEMA_ID_CLICKED]).
  */
 fun acceptedSchemaIds(notificationsEnabled: Boolean): List<String> = SERVED_SKELETON_VERSIONS.flatMap {
     listOfNotNull(it.screenSchemaId, it.notificationSchemaId.takeIf { notificationsEnabled })
-} + SkeletonSchema.SCHEMA_ID_MATCHED
+} + SkeletonSchema.SCHEMA_ID_MATCHED + SkeletonSchema.SCHEMA_ID_CLICKED

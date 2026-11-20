@@ -150,6 +150,10 @@ internal enum class TaggedTable(
     /** #69: matched slot sightings; the object is the rule id before the slot sighting's identity. */
     MATCHED_SLOTS("matched_slot_sightings", TagPurpose.MATCHED_SLOT,
         "SELECT DISTINCT rule_id || ':' || ${SlotObject.SQL} FROM matched_slot_sightings WHERE epoch = ?"),
+
+    /** #87: clicked sightings; the object is `<fingerprint>:<layout>:<ownerPath>` ([ClickedTarget.objectKey]). */
+    CLICKED("clicked_sightings", TagPurpose.CLICKED,
+        "SELECT DISTINCT fingerprint::text || ':' || layout::text || ':' || owner_path FROM clicked_sightings WHERE epoch = ?"),
     ;
 
     /** Deletes [installId]'s rows of this table under every key in [keys] (#86, #81). */
@@ -224,21 +228,21 @@ internal fun Connection.forInstallTags(
 
 /**
  * Deletes [installId]'s rows in every tagged table but health under every key in [keys] (#86): its token, cluster and
- * slot (#80) sightings, its contributor rows (#81: confirmations, role tags, released slot rows, quarantine items) and
- * its matched sightings (#69).
+ * slot (#80) sightings, its contributor rows (#81: confirmations, role tags, released slot rows, quarantine items), its
+ * matched sightings (#69) and its clicked sightings (#87).
  * Install revocation. The caller holds the install row lock, so no new row of it can appear meanwhile.
  */
 internal fun Connection.deleteSightings(keys: List<EpochKey>, installId: UUID): Map<String, Int> =
     (TaggedTable.entries - TaggedTable.HEALTH).associate { table -> table.table to table.erase(this, keys, installId) }
 
 /**
- * Marks [installId]'s sightings (matched ones too, #69), confirmations and role tags (#81) under [keys] trusted or not, with the installs row in
+ * Marks [installId]'s sightings (matched ones too, #69, and clicked ones, #87), confirmations and role tags (#81) under [keys] trusted or not, with the installs row in
  * the same transaction (#86). A release holds only counted, non-trusted rows, so trusting an install also removes its
  * rows from the day's release; untrusting adds them back at the next release.
  */
 internal fun Connection.markSightingsTrusted(keys: List<EpochKey>, installId: UUID, trusted: Boolean): Int =
     listOf(TaggedTable.TOKENS, TaggedTable.CLUSTERS, TaggedTable.SLOTS, TaggedTable.CONFIRMATIONS, TaggedTable.ROLES,
-        TaggedTable.MATCHED, TaggedTable.MATCHED_SLOTS).sumOf { table ->
+        TaggedTable.MATCHED, TaggedTable.MATCHED_SLOTS, TaggedTable.CLICKED).sumOf { table ->
         forInstallTags(keys, table, installId,
             "UPDATE ${table.table} SET trusted = ? WHERE epoch = ? AND install_tag = ANY(?::bpchar[])") { epoch, tags ->
             arrayOf(trusted, epoch, tags)
