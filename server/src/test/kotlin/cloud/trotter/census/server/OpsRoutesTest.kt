@@ -1205,6 +1205,10 @@ class OpsLogPathTest {
         for (html in listOf("/ops/rules/view", "/ops/rules/doordash.screen.offer/view", "/ops/rules/Bad.Id/view")) assertTrue(isOpsHtmlPath(html), html)
         for (json in listOf("/ops/rules", "/ops/rules/doordash.screen.offer", "/ops/rules/a/b/view")) assertFalse(isOpsHtmlPath(json), json)
         assertEquals("/ops/rules", opsLogPath("/ops/rules/doordash.screen.offer/view"))
+        // #87: the tap list and one screen's taps are pages; the log names no fingerprint.
+        for (html in listOf("/ops/taps", "/ops/taps/view")) assertTrue(isOpsHtmlPath(html), html)
+        for (json in listOf("/ops/taps/x", "/ops/taps/view/x")) assertFalse(isOpsHtmlPath(json), json)
+        assertEquals("/ops/taps", opsLogPath("/ops/taps/view"))
     }
 
     @Test

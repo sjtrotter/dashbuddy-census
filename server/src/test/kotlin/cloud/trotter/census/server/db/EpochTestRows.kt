@@ -94,3 +94,14 @@ internal fun Connection.seedMatchedRows(installId: UUID, fingerprint: String, da
             VALUES (?, ?, '1.0', 1, 1, repeat('a', 64), 'root/text', 'present', ?, ?, false, ?, ?, ?)""",
         ruleId, fingerprint, slot.epoch, slot.tag, day, day, day)
 }
+
+/**
+ * #87: one clicked sighting for [installId], tagged as ingest tags it. A clicked target need not be a cluster;
+ * [fingerprint] is only the screen.
+ */
+internal fun Connection.seedClickedRows(installId: UUID, fingerprint: String, day: LocalDate, ownerPath: String = "root/1") {
+    val target = ClickedTarget(fingerprint, "a".repeat(64), ownerPath)
+    val sighting = testTag(TagPurpose.CLICKED, installId, target.objectKey, day)
+    update("""INSERT INTO clicked_sightings (fingerprint, layout, owner_path, epoch, install_tag, trusted, day, platform_app_version, hash_domain, filter_rev)
+            VALUES (?, ?, ?, ?, ?, false, ?, '1.0', 1, 1)""", target.fingerprint, target.layout, target.ownerPath, sighting.epoch, sighting.tag, day)
+}

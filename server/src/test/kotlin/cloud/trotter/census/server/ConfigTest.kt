@@ -13,12 +13,14 @@ class ConfigTest {
         assertFalse(defaults.notificationsEnabled)
         assertEquals(1, defaults.minimumFilterRev)
         // #78: v1 and v2 screens, oldest first; notifications only when enabled, each version's screen before its notification.
-        // #69: the matched schema is always on and always last, so the enabled list is still the contract's own.
-        assertEquals(listOf("uinode.skeleton.v1", "uinode.skeleton.v2", "uinode.matched.v1"), defaults.policy().acceptedSchemaIds)
+        // #69, #87: the matched and clicked schemas are always on and always last, so the enabled list is still the
+        // contract's own.
+        assertEquals(listOf("uinode.skeleton.v1", "uinode.skeleton.v2", "uinode.matched.v1", "uinode.clicked.v1"), defaults.policy().acceptedSchemaIds)
         assertEquals(defaults.policy().acceptedSchemaIds, Policy().acceptedSchemaIds)
         val enabled = Config.fromEnv(testEnvironment() + mapOf("CENSUS_NOTIFICATIONS_ENABLED" to "true", "CENSUS_MIN_FILTER_REV" to "3"))
         assertEquals(
-            listOf("uinode.skeleton.v1", "notification.skeleton.v1", "uinode.skeleton.v2", "notification.skeleton.v2", "uinode.matched.v1"),
+            listOf("uinode.skeleton.v1", "notification.skeleton.v1", "uinode.skeleton.v2", "notification.skeleton.v2", "uinode.matched.v1",
+                "uinode.clicked.v1"),
             enabled.policy().acceptedSchemaIds,
         )
         assertEquals(cloud.trotter.census.contract.CensusSkeletonSchema.SUPPORTED_SCHEMA_IDS, enabled.policy().acceptedSchemaIds)
