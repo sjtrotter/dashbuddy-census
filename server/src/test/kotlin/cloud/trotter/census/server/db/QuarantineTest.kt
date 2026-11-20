@@ -25,6 +25,7 @@ import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
@@ -263,6 +264,29 @@ class QuarantineTest : LifecycleTestDatabase() {
             // A sample with no sighting behind it: nothing is counted.
             assertEquals(0L, count("cluster_sightings_v5"))
             assertFalse(store(db).approve(entry.id, testKeying.atRest(sanitized), day))
+        }
+    }
+
+    @Test fun `a matched skeleton is never quarantined and never approved into the cluster tables`() = runBlocking {
+        Database.connect(config()).use { db ->
+            val id = granted(db)
+            val matched = JsonObject(skeleton() + mapOf(
+                "schemaId" to JsonPrimitive(SkeletonSchema.SCHEMA_ID_MATCHED),
+                "ruleId" to JsonPrimitive("doordash.screen.delivery_summary_expanded"),
+            ))
+            val accepted = SkeletonValidator.validate(matched, policy, day) as ItemVerdict.Accepted
+            assertTrue(accepted.isMatched)
+            // Submission: the artifact is refused before storage.
+            assertNull(QuarantineArtifact.parse("""{"skeleton":$matched}""".toByteArray(), testKeying, policy, day))
+            // Approval: the store refuses a matched copy and writes no cluster row.
+            store(db).submit(id, key, day, artifact(), null, emptyList())
+            val entry = store(db).list(day).single()
+            assertThrows(IllegalArgumentException::class.java) {
+                runBlocking { store(db).approve(entry.id, testKeying.atRest(accepted), day) }
+            }
+            assertEquals(0L, count("clusters"))
+            assertEquals(0L, count("cluster_samples"))
+            assertEquals(1L, count("quarantine_items"))
         }
     }
 

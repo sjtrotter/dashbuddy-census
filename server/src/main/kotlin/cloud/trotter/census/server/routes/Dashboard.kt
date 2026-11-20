@@ -17,6 +17,8 @@ import cloud.trotter.census.server.ops.ClusterDetailHtml
 import cloud.trotter.census.server.ops.ClusterDraftHtml
 import cloud.trotter.census.server.ops.ClusterFilter
 import cloud.trotter.census.server.ops.ClustersPageHtml
+import cloud.trotter.census.server.ops.RuleDetailHtml
+import cloud.trotter.census.server.ops.RulesPageHtml
 import cloud.trotter.census.server.ops.DashboardHtml
 import cloud.trotter.census.server.ops.DraftDecode
 import cloud.trotter.census.server.ops.DraftForm
@@ -48,6 +50,7 @@ fun Route.dashboardRoute(
     store: OpsStore, alarms: HealthAlarms, clock: Clock, policy: Policy, config: cloud.trotter.census.server.Config,
     lifecycle: cloud.trotter.census.server.jobs.LifecycleReport? = null,
     contributors: cloud.trotter.census.server.db.ContributorStore? = null,
+    matched: cloud.trotter.census.server.db.MatchedOpsStore? = null,
 ) {
     get("/") {
         val html = DashboardHtml.render(
@@ -74,10 +77,30 @@ fun Route.dashboardRoute(
     }
     get("/clusters/{fingerprint}/view") {
         val fingerprint = call.parameters["fingerprint"]
-        val cluster = if (fingerprint != null && fingerprintPattern.matches(fingerprint)) store.cluster(fingerprint, withWireframe = true) else null
+        val found = if (fingerprint != null && fingerprintPattern.matches(fingerprint)) store.cluster(fingerprint, withWireframe = true) else null
+        val cluster = found?.copy(matchedRuleView = found.resolvedRuleId?.let { matched?.hasSamples(it) } == true)
         val html = ClusterDetailHtml.render(policy.serverVersion, policy.k, clock.today().toString(), cluster)
         call.response.headers.append("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'")
         call.respondText(html, ContentType.Text.Html, if (cluster == null) HttpStatusCode.NotFound else HttpStatusCode.OK)
+    }
+    if (matched != null) {
+        // #69: the matched-skeleton rules and one rule's view; a malformed rule id is the invalid shell, an unknown one 404.
+        get("/rules/view") {
+            call.response.headers.append("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'")
+            call.respondText(RulesPageHtml.render(policy.serverVersion, policy.k, clock.today().toString(), matched.rules()), ContentType.Text.Html)
+        }
+        get("/rules/{ruleId}/view") {
+            call.response.headers.append("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'")
+            val today = clock.today().toString()
+            val ruleId = call.ruleId()
+            if (ruleId == null) {
+                call.respondText(RuleDetailHtml.renderInvalid(policy.serverVersion, policy.k, today), ContentType.Text.Html, HttpStatusCode.BadRequest)
+            } else {
+                val rule = matched.rule(ruleId)
+                call.respondText(RuleDetailHtml.render(policy.serverVersion, policy.k, today, rule), ContentType.Text.Html,
+                    if (rule == null) HttpStatusCode.NotFound else HttpStatusCode.OK)
+            }
+        }
     }
     get("/clusters/{fingerprint}/draft") {
         val fp = call.draftFingerprint()

@@ -2,6 +2,7 @@ package cloud.trotter.census.server.db
 
 import cloud.trotter.census.server.Clock
 import cloud.trotter.census.server.Database
+import cloud.trotter.census.server.Retention
 import cloud.trotter.census.server.SlotConstancyPolicy
 import cloud.trotter.census.server.TagPurpose
 import cloud.trotter.census.server.ingest.LifecycleDeadline
@@ -34,6 +35,8 @@ class SkeletonStore(
     private val clock: Clock,
     // #80: the per-skeleton slot cap, Policy.slotConstancy.maxSlotsPerSkeleton.
     private val slotLimit: Int = SlotConstancyPolicy().maxSlotsPerSkeleton,
+    // #69: matched samples live until their observation day + the cluster-sighting retention.
+    private val retention: Retention = Retention(),
 ) {
     private suspend fun <T> query(block: Connection.() -> T): T = withContext(Dispatchers.IO) {
         transaction(db.exposed) {
@@ -105,7 +108,9 @@ class SkeletonStore(
             is ConsumeOutcome.BudgetExhausted -> return@query IngestOutcome.BudgetExhausted(outcome.retryAfterSeconds)
             is ConsumeOutcome.Consumed -> outcome
         }
-        val groups = accepted.groupBy { it.item.fingerprint }
+        // #69: matched items go to their own tables ([recordMatched]); the cluster loop sees only the rest.
+        val (matched, unmatched) = accepted.partition { it.matchedRuleId != null }
+        val groups = unmatched.groupBy { it.item.fingerprint }
         var newClusters = 0
         var samplesStored = 0
         var tokensTouched = 0
@@ -175,6 +180,9 @@ class SkeletonStore(
             }
             // #80: where each value sat, for per-slot constancy; keyed by epoch tags like the sightings above.
             recordSlotSightings(tagger, installId, trusted, countsFrom, fingerprint, slotSightings, slotLimit, received = day)
+        }
+        if (matched.isNotEmpty()) {
+            samplesStored += recordMatched(tagger, installId, trusted, countsFrom, day, matched, slotLimit, retention)
         }
         recordIngestCounters(installId, day, duplicateInBatch, rejected)
         IngestOutcome.Stored(IngestSummary(groups.size, newClusters, samplesStored, tokensTouched), consumed)

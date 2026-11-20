@@ -1,5 +1,6 @@
 package cloud.trotter.census.server
 
+import cloud.trotter.census.contract.SkeletonSchema
 import cloud.trotter.census.contract.SkeletonVersion
 import kotlinx.serialization.Serializable
 
@@ -149,10 +150,11 @@ fun Config.policy(effectiveFloor: Int = minimumFilterRev): Policy = Policy(
 internal val SERVED_SKELETON_VERSIONS: List<SkeletonVersion> = listOf(SkeletonVersion.V1, SkeletonVersion.V2)
 
 /**
- * The advertised schema ids (#78), oldest version first and screen before notification, the contract's own order
- * (`CensusSkeletonSchema.SUPPORTED_SCHEMA_IDS`). The app sends the newest version listed; notification ids appear
- * only while notifications are enabled.
+ * The advertised schema ids (#78), oldest version first and screen before notification, then the matched schema
+ * (#69), the contract's own order (`CensusSkeletonSchema.SUPPORTED_SCHEMA_IDS`). The app sends the newest version
+ * listed; notification ids appear only while notifications are enabled. The matched schema is always on: it is a
+ * screen skeleton tagged with the rule that matched it, stored apart from the clusters ([SkeletonSchema.SCHEMA_ID_MATCHED]).
  */
 fun acceptedSchemaIds(notificationsEnabled: Boolean): List<String> = SERVED_SKELETON_VERSIONS.flatMap {
     listOfNotNull(it.screenSchemaId, it.notificationSchemaId.takeIf { notificationsEnabled })
-}
+} + SkeletonSchema.SCHEMA_ID_MATCHED

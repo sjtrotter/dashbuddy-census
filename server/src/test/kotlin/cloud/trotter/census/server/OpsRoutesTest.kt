@@ -1201,6 +1201,10 @@ class OpsLogPathTest {
         for (json in listOf("/ops/login", "/ops/clusters", "/ops/clusters/a/b/view", "/ops/clusters/view/view/x", "/ops/%ZZ/view", "/v1/health", "/opsx")) {
             assertFalse(isOpsHtmlPath(json), json)
         }
+        // #69: the rule list and a rule's view are pages; their JSON twins are not, and the log names no rule.
+        for (html in listOf("/ops/rules/view", "/ops/rules/doordash.screen.offer/view", "/ops/rules/Bad.Id/view")) assertTrue(isOpsHtmlPath(html), html)
+        for (json in listOf("/ops/rules", "/ops/rules/doordash.screen.offer", "/ops/rules/a/b/view")) assertFalse(isOpsHtmlPath(json), json)
+        assertEquals("/ops/rules", opsLogPath("/ops/rules/doordash.screen.offer/view"))
     }
 
     @Test

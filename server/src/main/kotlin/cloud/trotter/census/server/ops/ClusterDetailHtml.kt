@@ -157,7 +157,7 @@ object ClusterDetailHtml {
         }
     }
 
-    private fun FlowContent.tree(node: RenderedSkeleton) {
+    internal fun FlowContent.tree(node: RenderedSkeleton) {
         div("node-line") {
             nodeField("Class", node.className)
             nodeField("ID", node.id)
@@ -171,7 +171,7 @@ object ClusterDetailHtml {
     }
 
     /** #78: a shape slot shows its format template; any other slot its kind. */
-    private fun FlowContent.slotChip(kind: String, prefix: String = "") {
+    internal fun FlowContent.slotChip(kind: String, prefix: String = "") {
         val template = kind.removePrefix("shape:").takeIf { kind.startsWith("shape:") }
         if (template != null) chip("shape: ${safe(template)}", "neutral") else chip(prefix + safe(kind), "neutral")
     }

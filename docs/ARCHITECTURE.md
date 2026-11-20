@@ -16,11 +16,11 @@ AWS wrapper: account budgets + automatic EC2 stop; daily cost anomalies;
              multi-region CloudTrail management events --> S3 (14 days)
 ```
 
-Census validates environment configuration (including the required hash pepper), migrates through V11 and checks the pepper against the database's, replays withdrawals, applies the monotonic filter floor, and drains startup lifecycle work before accepting HTTP. The five-connection Hikari pool is registered with Exposed. Migration, recovery or lifecycle failure aborts startup. Readiness runs a bounded `SELECT 1`; liveness does not check the database. Signed, budgeted ingestion and authenticated operator review share the same effective policy.
+Census validates environment configuration (including the required hash pepper), migrates through V15 and checks the pepper against the database's, replays withdrawals, applies the monotonic filter floor, and drains startup lifecycle work before accepting HTTP. The five-connection Hikari pool is registered with Exposed. Migration, recovery or lifecycle failure aborts startup. Readiness runs a bounded `SELECT 1`; liveness does not check the database. Signed, budgeted ingestion and authenticated operator review share the same effective policy.
 
 ## Contract seam
 
-`../DashBuddy/census-contract` is an Apache-2.0 Gradle included build with coordinates `cloud.trotter.census:contract:0.0.0-local` and package `cloud.trotter.census.contract`. `censusContractPath` overrides its location. A reference to `CensusHash` proves dependency substitution at compile time. DTOs, fingerprinting, hashing, and grammars stay in that build; no crypto dependency or duplicate wire implementation is introduced here. The included contract owns hash-domain, DTO and fingerprint constants; both workflows retain pin `cb175f9ec58f7186ea6efe811766a3042be45550`.
+`../DashBuddy/census-contract` is an Apache-2.0 Gradle included build with coordinates `cloud.trotter.census:contract:0.0.0-local` and package `cloud.trotter.census.contract`. `censusContractPath` overrides its location. A reference to `CensusHash` proves dependency substitution at compile time. DTOs, fingerprinting, hashing, and grammars stay in that build; no crypto dependency or duplicate wire implementation is introduced here. The included contract owns hash-domain, DTO and fingerprint constants; both workflows retain pin `a562e80893eb66a886fa7038d8edef9d37a3f05e` (the matched skeletons, #69).
 
 ## Storage and deployment boundary
 
@@ -70,6 +70,20 @@ no text and is read only inside its 30 days. A phrase is compared only in lower 
 (`ChromeShape.caseVariants`), and a phrase with any capitalized word after its first is refused. Every slot class
 runs the same statements and the same hashing; only `constant` supplies a value to compare against.
 
+V15 (#69, gig.log#1573) adds the matched-skeleton tables. A `uinode.matched.v1` item is a v2 screen body plus the
+`ruleId` of the rule that matched the frame while it was failing to read it on the phone. Ingest partitions the
+accepted list in the same transaction as the ledger consume: the cluster loop sees only unmatched items, and
+`recordMatched` (`MatchedStore`) writes the matched ones to `matched_samples` (no install; at most 5 per rule,
+fingerprint and app version, one per receipt day, kept until the observation day + 30), `matched_sightings` (presence
+per epoch tag, `TagPurpose.MATCHED`, object `<ruleId>:<fingerprint>`) and `matched_slot_sightings` (`slot_sightings`'
+columns and checks plus the rule id, written by the one slot writer through a table descriptor, `SlotTable`,
+`TagPurpose.MATCHED_SLOT`). A matched item never upserts `clusters`, so a known screen stays out of the UNKNOWN
+catalogue and never moves a cluster's `last_seen_day`, and nothing matched feeds token sightings, vocabulary, the
+anchor check or the contributor release. The two sighting tables are `TaggedTable`s, so withdrawal, data deletion,
+revocation, trust changes and the restore replay reach them; the lifecycle sweep and the filter floor cover all three.
+The operator's per-rule view (`MatchedOpsStore`, `/ops/rules…`) counts installs and gates labels the way the cluster
+views do, and links a layout to the cluster resolved to the rule (`clusters.resolved_rule_id`).
+
 Configuration is injected, stdout carries logs, and PostgreSQL holds durable state. The runtime is non-root, drops capabilities in Compose, and writes only under `/tmp`. Flyway coordination handles concurrent migration attempts, but operators must still review backward compatibility for rolling deployments.
 
 ## AWS wrapper — S2
@@ -80,7 +94,7 @@ GitHub Actions assumes a ref-restricted OIDC role to deploy through SSM. Account
 
 ## Notification storage and operator boundary — #1189 slice 2
 
-Both workflows pin the included DashBuddy contract to reviewed commit `cb175f9ec58f7186ea6efe811766a3042be45550` (the v2 skeletons, #78). The server uses its DTOs, dispatcher, fingerprint and rejection vocabulary directly. Conformance reads the pinned JSONL corpus, notification vectors and manifest (counts and SHA-256), rather than fixed row counts. The synthetic metadata identity vector remains valid at the contract layer but is rejected by the unchanged server release-tag policy as `bad_version`.
+Both workflows pin the included DashBuddy contract to reviewed commit `a562e80893eb66a886fa7038d8edef9d37a3f05e` (the matched skeletons, #69; the v2 skeletons came with #78). The server uses its DTOs, dispatcher, fingerprint and rejection vocabulary directly. Conformance reads the pinned JSONL corpus, notification vectors and manifest (counts and SHA-256), rather than fixed row counts. The synthetic metadata identity vector remains valid at the contract layer but is rejected by the unchanged server release-tag policy as `bad_version`.
 
 V4 adds checked, non-null `clusters.kind`, backfilling existing rows to `screen`; V1–V3 are unchanged. Ingest persists the submitted contract kind without updating an existing cluster's kind and refuses conflicting kinds transactionally. Canonical samples, cluster sightings, token sightings and shared quota accounting commit in one transaction. Samples are capped at five per `(fingerprint, platform_app_version)`, with at most one per receipt day. V5 tokens used `(hash_domain, token_hash, filter_rev, install_id)`; since V8 (#86) the key is `(hash_domain, token_hash, filter_rev, epoch, install_tag)`, and equal chrome tokens still count an install once per epoch across screen and notification surfaces.
 

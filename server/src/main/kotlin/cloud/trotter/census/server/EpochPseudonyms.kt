@@ -55,6 +55,15 @@ enum class TagPurpose(val label: String) {
 
     /** A quarantine item (#81): the object is the item's random id. */
     QUARANTINE("quarantine"),
+
+    /** A matched sighting (#69): the object is `<ruleId>:<fingerprint>`. */
+    MATCHED("matched"),
+
+    /**
+     * A matched slot sighting (#69): the object is `<ruleId>:` and the slot sighting's identity
+     * ([cloud.trotter.census.server.db.SlotObject]); a rule id has no `:`, so the object stays unambiguous.
+     */
+    MATCHED_SLOT("matched_slot"),
 }
 
 /**

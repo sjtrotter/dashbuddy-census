@@ -20,6 +20,7 @@ import cloud.trotter.census.server.db.MutationOutcome
 import cloud.trotter.census.server.db.TokenObject
 import cloud.trotter.census.server.db.installRows
 import cloud.trotter.census.server.db.seedContributorRows
+import cloud.trotter.census.server.db.seedMatchedRows
 import cloud.trotter.census.server.db.testTag
 import cloud.trotter.census.server.db.update
 import cloud.trotter.census.server.ingest.BudgetPolicy
@@ -310,8 +311,10 @@ class IdentityRoutesTest {
                 application { module(config().copy(notificationsEnabled = enabled), db, clock) }
                 val published = Json.parseToJsonElement(client.get("/v1/policy").bodyAsText()).jsonObject
                 assertEquals(
-                    // #78: v2 is listed beside v1, in the contract's oldest-first order.
-                    if (enabled) CensusSkeletonSchema.SUPPORTED_SCHEMA_IDS else listOf(SkeletonSchema.SCHEMA_ID, SkeletonSchema.SCHEMA_ID_V2),
+                    // #78: v2 is listed beside v1, in the contract's oldest-first order. #69 (S2): the matched schema
+                    // last, notifications on or off.
+                    if (enabled) CensusSkeletonSchema.SUPPORTED_SCHEMA_IDS
+                    else listOf(SkeletonSchema.SCHEMA_ID, SkeletonSchema.SCHEMA_ID_V2, SkeletonSchema.SCHEMA_ID_MATCHED),
                     published.getValue("acceptedSchemaIds").jsonArray.map { it.jsonPrimitive.content },
                 )
                 // Phase 0 enrols a fresh install while off; phases 1 and 2 enrol the same install while on, then off.
@@ -369,7 +372,7 @@ class IdentityRoutesTest {
     fun `the contract's supported schema ids enrol against the default policy`() {
         // This is the test that would have caught DashBuddy #1522: the app declares every schema the contract can
         // build, and the server's default policy (notifications off) refused that list, so a reinstalled phone could
-        // never enrol.
+        // never enrol. #69 (S2): the list now ends with the matched schema, five ids in all.
         val clock = FixedClock()
         val defaults = config()
         assertFalse(defaults.notificationsEnabled)
@@ -377,6 +380,7 @@ class IdentityRoutesTest {
             testApplication {
                 application { module(defaults, db, clock) }
                 val id = UUID.randomUUID().toString()
+                assertEquals(5, CensusSkeletonSchema.SUPPORTED_SCHEMA_IDS.size)
                 assertEquals(HttpStatusCode.OK, client.enrolSchemas(id, secret(44), CensusSkeletonSchema.SUPPORTED_SCHEMA_IDS).status)
             }
         }
@@ -773,6 +777,8 @@ class IdentityRoutesTest {
             fingerprint, slot.epoch, slot.tag, day, day, day)
         // #81: the contributor tier's rows.
         connection.seedContributorRows(install, fingerprint, day)
+        // #69: the matched-skeleton rows.
+        connection.seedMatchedRows(install, fingerprint, day)
     }
 
     private fun tableCounts(id: String): Map<String, Int> = sql { connection ->

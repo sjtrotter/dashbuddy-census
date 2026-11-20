@@ -78,3 +78,19 @@ internal fun Connection.seedContributorRows(installId: UUID, fingerprint: String
     update("INSERT INTO contributor_grants (grant_id, install_id, granted_day, expires_day) VALUES (?, ?, ?, ?)",
         UUID.randomUUID(), installId, day, day.plusDays(30))
 }
+
+/**
+ * #69: one matched sighting and one matched slot sighting for [installId], tagged as ingest tags them. A matched layout
+ * need not be a cluster; [fingerprint] is only the layout.
+ */
+internal fun Connection.seedMatchedRows(installId: UUID, fingerprint: String, day: LocalDate, ruleId: String = "doordash.screen.offer") {
+    val sighting = testTag(TagPurpose.MATCHED, installId, "$ruleId:$fingerprint", day)
+    update("""INSERT INTO matched_sightings (rule_id, fingerprint, epoch, install_tag, trusted, day, platform_app_version, hash_domain, filter_rev)
+            VALUES (?, ?, ?, ?, false, ?, '1.0', 1, 1)""", ruleId, fingerprint, sighting.epoch, sighting.tag, day)
+    val variant = SlotVariant("1.0", 1, 1, "a".repeat(64))
+    val slot = testTag(TagPurpose.MATCHED_SLOT, installId, SlotTable.matched(ruleId).objectKey(fingerprint, variant, "root/text", "present"), day)
+    update("""INSERT INTO matched_slot_sightings (rule_id, fingerprint, platform_app_version, hash_domain, filter_rev, layout, slot, value,
+            epoch, install_tag, trusted, last_day, first_received, received_day)
+            VALUES (?, ?, '1.0', 1, 1, repeat('a', 64), 'root/text', 'present', ?, ?, false, ?, ?, ?)""",
+        ruleId, fingerprint, slot.epoch, slot.tag, day, day, day)
+}

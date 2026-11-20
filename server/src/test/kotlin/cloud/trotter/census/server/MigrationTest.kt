@@ -200,7 +200,7 @@ class MigrationTest {
                 run("INSERT INTO health_daily (install_id, day, platform, platform_app_version, admitted, unknown, trips, rule_counts) VALUES (?, ?, 'doordash', '8.0', 1, 0, 0, '{}')", id, day)
             }
 
-            assertEquals(7, flyway().load().migrate().migrationsExecuted)  // V8, then V9 (#80) on the re-keyed rows, V10 (#81), V11 (#82), V12 (#64), V13 (#102), V14 (#104)
+            assertEquals(8, flyway().load().migrate().migrationsExecuted)  // V8, then V9 (#80) on the re-keyed rows, V10 (#81), V11 (#82), V12 (#64), V13 (#102), V14 (#104), V15 (#69)
             assertEquals(0, flyway().load().migrate().migrationsExecuted)
 
             fun strings(sql: String) = connection.createStatement().use { statement ->
@@ -272,7 +272,7 @@ class MigrationTest {
                 WHERE table_schema = '$schema' AND column_name = 'install_id' AND table_name IN ('token_sightings_v5', 'health_daily') ORDER BY table_name"""))
             assertEquals(before, connection.dumpRows(schema).toSet())
 
-            assertEquals(7, flyway(testKeying).load().migrate().migrationsExecuted)  // V8, then V9 (#80), V10 (#81), V11 (#82), V12 (#64), V13 (#102), V14 (#104)
+            assertEquals(8, flyway(testKeying).load().migrate().migrationsExecuted)  // V8, then V9 (#80), V10 (#81), V11 (#82), V12 (#64), V13 (#102), V14 (#104), V15 (#69)
             assertEquals(1L, connection.installRows("token_sightings_v5", install, today))
         }
     }
@@ -446,7 +446,7 @@ class MigrationTest {
         flyway(upgraded).target("13").load().migrate()
         DriverManager.getConnection(schemaUrl(upgraded), postgres.username, postgres.password).use { connection ->
             seed(connection, listOf(null, "[]"), "[]")
-            assertEquals(1, flyway(upgraded).load().migrate().migrationsExecuted)
+            assertEquals(1, flyway(upgraded).target("14").load().migrate().migrationsExecuted)
             assertEquals(
                 listOf("health_daily.shadow_daily", "health_daily.shadow_daily_truncated", "health_fleet_daily.shadow_daily",
                     "health_fleet_daily.shadow_daily_truncated_installs"),
@@ -472,6 +472,44 @@ class MigrationTest {
                 assertEquals(listOf("health_daily.shadow", "health_fleet_daily.shadow"), shadowColumns(connection, schema), schema)
                 assertEquals(listOf("13"), strings(connection, "SELECT max(version::int)::text FROM flyway_schema_history WHERE success"), schema)
             }
+        }
+    }
+
+    @Test
+    fun `V15 adds the matched tables on a populated V14 schema, and the shared sample names no install`() {
+        // #69 (S10): matched skeletons never touch the cluster tables; the slot table copies slot_sightings' checks.
+        val schema = "matched_upgrade"
+        fun flyway() = Database.flyway(postgres.jdbcUrl, postgres.username, postgres.password, testKeying)
+            .schemas(schema).defaultSchema(schema)
+        flyway().target("14").load().migrate()
+        DriverManager.getConnection(schemaUrl(schema), postgres.username, postgres.password).use { connection ->
+            fun strings(sql: String) = connection.createStatement().use { statement ->
+                statement.executeQuery(sql).use { rows -> buildList { while (rows.next()) add(rows.getString(1)) } }
+            }
+            connection.createStatement().use { it.execute("INSERT INTO clusters (fingerprint, platform, first_seen_day, last_seen_day) VALUES (repeat('a',64), 'doordash', '2026-11-19', '2026-11-19')") }
+            assertEquals(1, flyway().load().migrate().migrationsExecuted)
+            assertEquals(listOf("15"), strings("SELECT max(version::int)::text FROM flyway_schema_history WHERE success"))
+            assertEquals(listOf("1"), strings("SELECT count(*)::text FROM clusters"))
+            assertEquals(listOf("matched_samples", "matched_sightings", "matched_slot_sightings"), strings(
+                "SELECT table_name FROM information_schema.tables WHERE table_schema = '$schema' AND table_name LIKE 'matched%' ORDER BY 1"))
+            // The shared sample carries no install id and no epoch tag; the two sighting tables carry a tag and no id.
+            val columns = strings("SELECT table_name || '.' || column_name FROM information_schema.columns WHERE table_schema = '$schema' AND table_name LIKE 'matched%'").toSet()
+            assertEquals(emptySet<String>(), columns.filter { it.startsWith("matched_samples.") && "install" in it }.toSet())
+            assertEquals(setOf("matched_sightings.install_tag", "matched_slot_sightings.install_tag"), columns.filter { "install" in it }.toSet())
+            assertTrue("matched_slot_sightings.rule_id" in columns && "matched_slot_sightings.counts_from" in columns)
+            // No foreign key to clusters, and slot_sightings' value and slot checks came along.
+            assertEquals(emptyList<String>(), strings("""SELECT conname FROM pg_constraint WHERE contype = 'f'
+                AND connamespace = '$schema'::regnamespace AND conrelid::regclass::text LIKE 'matched%'"""))
+            val refused = runCatching {
+                connection.createStatement().use { it.execute("""INSERT INTO matched_slot_sightings (rule_id, fingerprint, platform_app_version, hash_domain,
+                    filter_rev, layout, slot, value, epoch, install_tag, trusted, last_day, first_received, received_day) VALUES ('doordash.screen.offer',
+                    repeat('a',64), '8.0', 1, 1, repeat('b',64), 'root/text', 'PLAIN TEXT', 1, repeat('c',64), false, '2026-11-19', '2026-11-19', '2026-11-19')""") }
+            }
+            assertTrue(refused.isFailure)
+            // A rule id outside the grammar is refused by the table itself.
+            assertTrue(runCatching { connection.createStatement().use { it.execute("""INSERT INTO matched_samples VALUES ('Doordash.screen', 'doordash',
+                repeat('a',64), '8.0', '2026-11-19', '{}', 1, 1, '2026-12-19')""") } }.isFailure)
+            assertEquals(0, flyway().load().migrate().migrationsExecuted)
         }
     }
 
@@ -522,12 +560,12 @@ class MigrationTest {
     }
 
     @Test
-    fun `empty database applies every migration and contains exactly twenty-seven application tables`() {
+    fun `empty database applies every migration and contains exactly thirty application tables`() {
         val flyway = Database.flyway(postgres.jdbcUrl, postgres.username, postgres.password, testKeying).load()
         // V1 schema, V2 classification, V3 tombstones, V4 notifications, V5 lifecycle, V6 keep less (#79), V7 keyed (#85),
         // V8 epoch pseudonyms (#86, which drops the three pre-V5 tables), V9 slot sightings (#80), V10 the contributor tier (#81), V11 the anchor check (#82),
-        // V12 health parse counts (#64), V13 health shadow counts (#102), V14 daily shadow levels (#104).
-        assertEquals(14, flyway.migrate().migrationsExecuted)
+        // V12 health parse counts (#64), V13 health shadow counts (#102), V14 daily shadow levels (#104), V15 matched skeletons (#69).
+        assertEquals(15, flyway.migrate().migrationsExecuted)
         val expected = setOf(
             "installs", "clusters", "cluster_samples", "trusted_envelopes", "health_daily", "health_fleet_daily", "ingest_ledger",
             "nonces", "withdrawals", "token_sightings_v5", "cluster_sightings_v5", "vocabulary_v5", "filter_floor", "ingest_pause",
@@ -537,6 +575,8 @@ class MigrationTest {
             "contributor_words", "quarantine_items",
             // #82
             "anchor_check_budget", "anchor_checks",
+            // #69
+            "matched_samples", "matched_sightings", "matched_slot_sightings",
         )
         DriverManager.getConnection(postgres.jdbcUrl, postgres.username, postgres.password).use { connection ->
             connection.createStatement().use { statement ->
@@ -591,7 +631,7 @@ class MigrationTest {
                     assertEquals(listOf("character", "64", "NO", null), columns["hash_keying.key_check"])
                     // #86: content rows carry an epoch and an epoch tag; no content table carries an install id.
                     for (table in listOf("token_sightings_v5", "cluster_sightings_v5", "health_daily", "slot_sightings",
-                        "slot_confirmations", "slot_roles", "slot_release", "quarantine_items")) {
+                        "slot_confirmations", "slot_roles", "slot_release", "quarantine_items", "matched_sightings", "matched_slot_sightings")) {
                         assertEquals(listOf("integer", null, "NO", null), columns["$table.epoch"], table)
                         assertEquals(listOf("character", "64", "NO", null), columns["$table.install_tag"], table)
                         assertEquals(null, columns["$table.install_id"], table)

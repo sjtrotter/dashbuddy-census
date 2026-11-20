@@ -12,6 +12,7 @@ import cloud.trotter.census.server.assertError
 import cloud.trotter.census.server.auth.hashSecret
 import cloud.trotter.census.server.enrol
 import cloud.trotter.census.server.healthFixture
+import cloud.trotter.census.server.matchedFixture
 import cloud.trotter.census.server.ingest.BudgetPolicy
 import cloud.trotter.census.server.ingest.HealthReport
 import cloud.trotter.census.server.jobs.PurgeJob
@@ -136,6 +137,10 @@ class PublicInstallsTest : LifecycleTestDatabase() {
                         assertEquals(HttpStatusCode.OK, client.signed(clock, install, secret, HttpMethod.Post, "/v1/health", health()).status)
                     }
                     assertEquals(HttpStatusCode.OK, client.signed(clock, id, key, HttpMethod.Post, "/v1/skeletons", batch("before", screen("Mine"))).status)
+                    // #69 (S7): both installs send a matched skeleton; only this install's matched rows go.
+                    for ((install, secret) in listOf(id to key, other to otherKey)) {
+                        assertEquals(HttpStatusCode.OK, client.signed(clock, install, secret, HttpMethod.Post, "/v1/skeletons", batch("matched", matchedFixture(day))).status)
+                    }
                     assertEquals(HttpStatusCode.OK, client.signed(clock, id, key, HttpMethod.Post, "/v1/nonce").status)
                     seedEnvelopeAndOldLedger(UUID.fromString(id))
                     assertEquals(2L, fleetRows().single()[0])
@@ -154,6 +159,9 @@ class PublicInstallsTest : LifecycleTestDatabase() {
                     // The fleet total it fed is recomputed without it; the other install is untouched.
                     assertEquals(1L, fleetRows().single()[0])
                     assertTrue(rowsFor("health_daily", other) > 0)
+                    for (table in listOf("matched_sightings", "matched_slot_sightings")) assertTrue(rowsFor(table, other) > 0, table)
+                    // The shared sample names no install and stays.
+                    assertEquals(1L, count("matched_samples"))
                     val tombstone = tombstone(UUID.fromString(id))
                     assertEquals(tombstone, erasedThrough(UUID.fromString(id)))
                     assertNull(sql { it.select("SELECT draft FROM clusters WHERE draft IS NOT NULL") { r -> r.getString(1) } })
@@ -177,6 +185,7 @@ class PublicInstallsTest : LifecycleTestDatabase() {
                     val withdrawn = client.signed(clock, id, key, HttpMethod.Delete, "/v1/installs/me")
                     assertEquals(HttpStatusCode.Accepted, withdrawn.status)
                     for (table in InstallStore.WITHDRAWAL_TABLES) assertEquals(0L, rowsFor(table, id), table)
+                    for (table in listOf("matched_sightings", "matched_slot_sightings")) assertTrue(rowsFor(table, other) > 0, table)
                     assertError(client.signed(clock, id, key, HttpMethod.Delete, "/v1/installs/me/data"), 401, "unauthorized")
                 }
                 // #79: no request, ingest or deletion log line carries any part of the install id.

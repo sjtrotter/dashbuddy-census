@@ -6,6 +6,7 @@ import cloud.trotter.census.server.db.ContributorStore
 import cloud.trotter.census.server.db.EnvelopeStore
 import cloud.trotter.census.server.db.HealthStore
 import cloud.trotter.census.server.db.InstallStore
+import cloud.trotter.census.server.db.MatchedOpsStore
 import cloud.trotter.census.server.db.OpsStore
 import cloud.trotter.census.server.db.PauseStore
 import cloud.trotter.census.server.db.QuarantineStore
@@ -152,7 +153,7 @@ fun Application.module(
         healthRoutes(db)
         policyRoutes(policy)
         val store = db?.let { InstallStore(it, clock) }
-        val skeletons = db?.let { SkeletonStore(it, clock, policy.slotConstancy.maxSlotsPerSkeleton) }
+        val skeletons = db?.let { SkeletonStore(it, clock, policy.slotConstancy.maxSlotsPerSkeleton, policy.retention) }
         val envelopes = db?.let { EnvelopeStore(it, clock) }
         val health = db?.let { HealthStore(it, clock, policy.retention.healthDailyDays) }
         val pause = db?.let { PauseStore(it, clock) }
@@ -161,7 +162,8 @@ fun Application.module(
         val contributors = db?.let { ContributorStore(it, clock, policy) }
         val quarantine = db?.let { database -> config.operatorPublicKey?.let { QuarantineStore(database, clock, policy, it) } }
         opsRoutes(config, db?.let { OpsStore(it, clock, policy) }, alarms, clock, policy, lifecycle = lifecycle, enrolStats = enrolStats, pause = pause,
-            contributors = contributors, quarantine = quarantine, anchorChecks = db?.let { AnchorCheckStore(it, clock, policy) })
+            contributors = contributors, quarantine = quarantine, anchorChecks = db?.let { AnchorCheckStore(it, clock, policy) },
+            matched = db?.let { MatchedOpsStore(it, clock, policy) })
         identityRoutes(store, clock, policy, alarms, enrolStats) {
             if (store != null && skeletons != null && pause != null) skeletonRoutes(store, skeletons, clock, policy, pause)
             if (contributors != null && pause != null) contributorRoutes(contributors, quarantine, config.hashKeying, clock, policy, pause)

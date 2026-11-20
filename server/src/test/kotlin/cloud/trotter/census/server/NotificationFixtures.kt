@@ -63,3 +63,24 @@ internal fun asV1(v2: JsonObject, version: String = "8.0"): JsonObject {
     }
     return Json.parseToJsonElement(text).jsonObject
 }
+
+/** #69: the rule a matched fixture names, a real DoorDash rule id (gig.log `dropoff.json5`). */
+internal const val MATCHED_RULE = "doordash.screen.delivery_summary_expanded"
+
+/**
+ * #69: a `uinode.matched.v1` item: [screenV2Fixture]'s body (the same layout, so the same fingerprint) tagged with
+ * [ruleId]. [rootId] gives the root a view id, which changes the layout.
+ */
+internal fun matchedFixture(
+    day: LocalDate = LocalDate.of(2026, 10, 2), ruleId: String = MATCHED_RULE, platform: String = "doordash",
+    version: String = "8.1", hash: String = "0123456789abcdef", rootId: String? = null, filterRev: Int = 1,
+): JsonObject {
+    val v2 = CensusSkeletonSchema.deserialize(screenV2Fixture(day, platform, version, hash).toString()) as UiSkeletonDto
+    val root = v2.root.copy(id = rootId)
+    val item = v2.copy(schemaId = SkeletonSchema.SCHEMA_ID_MATCHED, ruleId = ruleId, filterRev = filterRev, root = root,
+        fingerprint = requireNotNull(CensusFingerprint.of(root)))
+    return Json.parseToJsonElement(SkeletonSchema.serialize(item)).jsonObject
+}
+
+internal fun matchedAccepted(day: LocalDate, policy: Policy = notificationPolicy, ruleId: String = MATCHED_RULE, rootId: String? = null, filterRev: Int = 1, version: String = "8.1"): ItemVerdict.Accepted =
+    SkeletonValidator.validate(matchedFixture(day, ruleId, rootId = rootId, filterRev = filterRev, version = version), policy, day) as ItemVerdict.Accepted

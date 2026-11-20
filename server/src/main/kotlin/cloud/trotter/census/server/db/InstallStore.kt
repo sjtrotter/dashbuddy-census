@@ -561,6 +561,8 @@ class InstallStore(private val db: Database, private val clock: Clock) {
             "trusted_envelopes", "health_daily", "token_sightings_v5", "cluster_sightings_v5", "slot_sightings",
             // #81: the contributor tier's other tagged rows, then its grants (their audit rows cascade).
             "slot_confirmations", "slot_roles", "slot_release", "contributor_grants",
+            // #69: matched sightings; matched_samples names no install, like cluster_samples, and stays.
+            "matched_sightings", "matched_slot_sightings",
             "ingest_ledger", "nonces", "installs",
         )
 

@@ -11,4 +11,7 @@ regexes = [
   '''AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8''',
   # TotpTest / OpsRoutesTest: the RFC 6238 Appendix B test key `12345678901234567890` in base32 — a published vector, never a credential.
   '''GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ''',
+  # The fixtures' placeholder census word hash: the sixteen hex digits in order, the `CensusHash` shape (PublicInstallsTest's
+  # vocabulary-resolve body and the shared fixtures). A public, unsalted test hash, never a credential.
+  '''0123456789abcdef''',
 ]
