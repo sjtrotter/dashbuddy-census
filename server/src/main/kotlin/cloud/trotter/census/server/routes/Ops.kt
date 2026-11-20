@@ -68,6 +68,7 @@ fun Route.opsRoutes(
     contributors: cloud.trotter.census.server.db.ContributorStore? = null,
     quarantine: cloud.trotter.census.server.db.QuarantineStore? = null,
     anchorChecks: cloud.trotter.census.server.db.AnchorCheckStore? = null,
+    matched: cloud.trotter.census.server.db.MatchedOpsStore? = null,
 ) {
     route("/ops") {
         install(OpsAuth) {
@@ -116,7 +117,7 @@ fun Route.opsRoutes(
                 route("/{rest...}") { handle { call.respond(HttpStatusCode.ServiceUnavailable, ErrorResponse("db_unavailable")) } }
                 return@run
             }
-            dashboardRoute(store, alarms, clock, policy, config, lifecycle, contributors)
+            dashboardRoute(store, alarms, clock, policy, config, lifecycle, contributors, matched)
             if (contributors != null) opsContributorRoutes(contributors, quarantine, clock, policy, config)
             if (anchorChecks != null) opsAnchorCheckRoutes(anchorChecks, policy)
             get("/lifecycle") { call.respond(lifecycleView(config, policy, store, lifecycle)) }
@@ -130,6 +131,14 @@ fun Route.opsRoutes(
                 val status = call.request.queryParameters["status"]
                 if (version != null && !WireGrammars.platformAppVersion.matches(version) || status != null && status !in clusterStatuses) badRequest()
                 call.respond(store.clusters(version, status, call.bound("limit", 50, 200), platform = platform, kind = kind))
+            }
+            if (matched != null) {
+                // #69: the matched-skeleton rules and one rule's view, as JSON (the HTML pages are in dashboardRoute).
+                get("/rules") { call.respond(matched.rules()) }
+                get("/rules/{ruleId}") {
+                    val rule = matched.rule(call.ruleId() ?: badRequest())
+                    if (rule == null) call.respond(HttpStatusCode.NotFound, ErrorResponse("not_found")) else call.respond(rule)
+                }
             }
             get("/clusters/{fingerprint}") {
                 val row = store.cluster(call.fingerprint())
@@ -227,6 +236,10 @@ internal fun opsEnrol(stats: EnrolStats): JsonObject = buildJsonObject {
 }
 
 private fun badRequest(): Nothing = throw BadRequestException("Invalid operator request")
+/** #69: a well-formed rule id from the path, or null. Any platform's: the platform prefix is not checked here. */
+internal fun ApplicationCall.ruleId(): String? = parameters["ruleId"]?.takeIf {
+    it.length <= cloud.trotter.census.contract.WireTokenGrammars.MAX_RULE_ID_LENGTH && WireGrammars.ruleId.matches(it)
+}
 private fun ApplicationCall.fingerprint(): String = parameters["fingerprint"]?.takeIf { fingerprintPattern.matches(it) } ?: badRequest()
 private fun ApplicationCall.installId() = parameters["uuid"]?.let(InstallId::parse)?.toUuid() ?: badRequest()
 private fun ApplicationCall.bound(key: String, default: Int, maximum: Int): Int {

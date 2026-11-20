@@ -54,7 +54,13 @@ internal fun FlowContent.clusterFacts(cluster: OpsCluster, detail: Boolean = fal
         }
         fact(if (detail) "New with newest observed version" else "New with this version") { yesChip(cluster.newWithVersion, "accent") }
         fact("Label visibility") { chip(if (cluster.unblinded) "Visible" else "Redacted", "neutral") }
-        fact("Resolved rule") { cluster.resolvedRuleId?.let { code { +rule(it) } } ?: run { +"None" } }
+        fact("Resolved rule") {
+            cluster.resolvedRuleId?.let { id ->
+                code { +rule(id) }
+                // #69: the rule's matched samples, when it has any.
+                if (cluster.matchedRuleView && rule(id) == id) { +" · "; a(href = "/ops/rules/$id/view") { +"Matched samples" } }
+            } ?: run { +"None" }
+        }
         cluster.slotClasses?.let { counts ->
             fact("Slot classes") {
                 if (counts.isEmpty()) +"None counted" else counts.forEach { (slotClass, count) -> slotClassChip(slotClass, count) }

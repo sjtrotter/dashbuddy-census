@@ -72,6 +72,8 @@ data class OpsCluster(
     val slots: List<SlotVariantReading>? = null,
     /** #80: how many slots of each class the cluster's variants hold; on the paged cluster list only. */
     val slotClasses: Map<SlotClass, Int>? = null,
+    /** #69: the resolved rule has matched samples, so the detail page links to its rule view ([MatchedOpsStore]). */
+    @kotlinx.serialization.Transient val matchedRuleView: Boolean = false,
 )
 
 /** #80: slot counts per class over every variant's slots, unknown included, in [SlotClass] order. */
