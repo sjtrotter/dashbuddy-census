@@ -446,7 +446,7 @@ class MigrationTest {
         flyway(upgraded).target("13").load().migrate()
         DriverManager.getConnection(schemaUrl(upgraded), postgres.username, postgres.password).use { connection ->
             seed(connection, listOf(null, "[]"), "[]")
-            assertEquals(1, flyway(upgraded).load().migrate().migrationsExecuted)
+            assertEquals(1, flyway(upgraded).target("14").load().migrate().migrationsExecuted)
             assertEquals(
                 listOf("health_daily.shadow_daily", "health_daily.shadow_daily_truncated", "health_fleet_daily.shadow_daily",
                     "health_fleet_daily.shadow_daily_truncated_installs"),

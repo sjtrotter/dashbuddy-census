@@ -14,6 +14,7 @@ import cloud.trotter.census.contract.SkeletonKind
 import cloud.trotter.census.contract.SkeletonRejectionReason
 import cloud.trotter.census.contract.SkeletonSchema
 import cloud.trotter.census.contract.SkeletonVersion
+import cloud.trotter.census.contract.UiSkeletonDto
 import cloud.trotter.census.contract.WireTokenGrammars
 import cloud.trotter.census.contract.WireStrings
 import cloud.trotter.census.server.Policy
@@ -29,7 +30,10 @@ import java.time.LocalDate
 import java.time.format.DateTimeParseException
 
 sealed interface ItemVerdict {
-    data class Accepted(val item: CensusSkeletonDto, val canonicalJson: String, val bytes: Int, val tokens: List<Token>) : ItemVerdict
+    data class Accepted(val item: CensusSkeletonDto, val canonicalJson: String, val bytes: Int, val tokens: List<Token>) : ItemVerdict {
+        /** A matched skeleton (#69): stored only by `recordMatched`, never by a path that writes the cluster tables. */
+        val isMatched: Boolean get() = (item as? UiSkeletonDto)?.isMatched == true
+    }
     data class Rejected(val reason: String) : ItemVerdict
 }
 

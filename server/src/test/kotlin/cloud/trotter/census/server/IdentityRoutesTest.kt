@@ -20,6 +20,7 @@ import cloud.trotter.census.server.db.MutationOutcome
 import cloud.trotter.census.server.db.TokenObject
 import cloud.trotter.census.server.db.installRows
 import cloud.trotter.census.server.db.seedContributorRows
+import cloud.trotter.census.server.db.seedMatchedRows
 import cloud.trotter.census.server.db.testTag
 import cloud.trotter.census.server.db.update
 import cloud.trotter.census.server.ingest.BudgetPolicy
@@ -776,6 +777,8 @@ class IdentityRoutesTest {
             fingerprint, slot.epoch, slot.tag, day, day, day)
         // #81: the contributor tier's rows.
         connection.seedContributorRows(install, fingerprint, day)
+        // #69: the matched-skeleton rows.
+        connection.seedMatchedRows(install, fingerprint, day)
     }
 
     private fun tableCounts(id: String): Map<String, Int> = sql { connection ->

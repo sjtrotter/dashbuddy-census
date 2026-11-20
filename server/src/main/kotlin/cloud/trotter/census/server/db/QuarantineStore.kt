@@ -137,31 +137,34 @@ class QuarantineStore(private val db: Database, private val clock: Clock, privat
      * as an upload's would, with no sighting and no count behind it, and the item is deleted in the same transaction.
      * False when the item is gone or expired, or the copy's cluster exists with another kind.
      */
-    suspend fun approve(id: UUID, sanitized: ItemVerdict.Accepted, today: LocalDate): Boolean = query {
-        // Sol S7: the item, then its cluster: the order erasure takes too (quarantine items before the trusted envelopes
-        // whose deletion locks clusters, InstallStore.WITHDRAWAL_TABLES), so approval and erasure never deadlock.
-        if (select("SELECT 1 FROM quarantine_items WHERE id = ? AND expires_day > ? FOR UPDATE", id, today) { true } == null) return@query false
-        afterItemLock?.invoke()
-        val item = sanitized.item
-        val observed = LifecycleDeadline.observation(LocalDate.parse(item.day), today)
-        val fingerprint = item.fingerprint
-        select(
-            """INSERT INTO clusters (fingerprint, platform, kind, first_seen_day, last_seen_day) VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT (fingerprint) DO UPDATE SET last_seen_day = GREATEST(clusters.last_seen_day, EXCLUDED.last_seen_day),
-                    first_seen_day = LEAST(clusters.first_seen_day, EXCLUDED.first_seen_day)
-                WHERE clusters.kind = EXCLUDED.kind RETURNING 1""",
-            fingerprint, item.platform, item.kind.wire, observed, observed,
-        ) { true } ?: return@query false
-        val deadline = select("SELECT last_seen_day, resolved_day FROM clusters WHERE fingerprint = ?", fingerprint) {
-            LifecycleDeadline.sample(it.getObject(1, LocalDate::class.java), it.getObject(2, LocalDate::class.java))
-        }!!
-        val version = item.platformAppVersion ?: "unknown"
-        if (deadline > today) update(
-            """INSERT INTO cluster_samples (fingerprint, platform_app_version, received_day, skeleton, hash_domain, filter_rev, purge_after)
-                SELECT ?, ?, ?, ?::jsonb, ?, ?, ? WHERE (SELECT count(*) FROM cluster_samples
-                WHERE fingerprint = ? AND platform_app_version = ?) < 5 ON CONFLICT DO NOTHING""",
-            fingerprint, version, today, sanitized.canonicalJson, item.hashDomain, item.filterRev, deadline, fingerprint, version,
-        )
-        update("DELETE FROM quarantine_items WHERE id = ?", id) == 1
+    suspend fun approve(id: UUID, sanitized: ItemVerdict.Accepted, today: LocalDate): Boolean {
+        require(!sanitized.isMatched) { "a matched skeleton is never a cluster sample" }
+        return query {
+            // Sol S7: the item, then its cluster: the order erasure takes too (quarantine items before the trusted envelopes
+            // whose deletion locks clusters, InstallStore.WITHDRAWAL_TABLES), so approval and erasure never deadlock.
+            if (select("SELECT 1 FROM quarantine_items WHERE id = ? AND expires_day > ? FOR UPDATE", id, today) { true } == null) return@query false
+            afterItemLock?.invoke()
+            val item = sanitized.item
+            val observed = LifecycleDeadline.observation(LocalDate.parse(item.day), today)
+            val fingerprint = item.fingerprint
+            select(
+                """INSERT INTO clusters (fingerprint, platform, kind, first_seen_day, last_seen_day) VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT (fingerprint) DO UPDATE SET last_seen_day = GREATEST(clusters.last_seen_day, EXCLUDED.last_seen_day),
+                        first_seen_day = LEAST(clusters.first_seen_day, EXCLUDED.first_seen_day)
+                    WHERE clusters.kind = EXCLUDED.kind RETURNING 1""",
+                fingerprint, item.platform, item.kind.wire, observed, observed,
+            ) { true } ?: return@query false
+            val deadline = select("SELECT last_seen_day, resolved_day FROM clusters WHERE fingerprint = ?", fingerprint) {
+                LifecycleDeadline.sample(it.getObject(1, LocalDate::class.java), it.getObject(2, LocalDate::class.java))
+            }!!
+            val version = item.platformAppVersion ?: "unknown"
+            if (deadline > today) update(
+                """INSERT INTO cluster_samples (fingerprint, platform_app_version, received_day, skeleton, hash_domain, filter_rev, purge_after)
+                    SELECT ?, ?, ?, ?::jsonb, ?, ?, ? WHERE (SELECT count(*) FROM cluster_samples
+                    WHERE fingerprint = ? AND platform_app_version = ?) < 5 ON CONFLICT DO NOTHING""",
+                fingerprint, version, today, sanitized.canonicalJson, item.hashDomain, item.filterRev, deadline, fingerprint, version,
+            )
+            update("DELETE FROM quarantine_items WHERE id = ?", id) == 1
+        }
     }
 }

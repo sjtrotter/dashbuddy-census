@@ -185,6 +185,8 @@ internal class QuarantineArtifact(val words: List<Triple<SlotScope, String, Stri
                 return null
             }
             val accepted = SkeletonValidator.validate(body.skeleton, policy, today) as? ItemVerdict.Accepted ?: return null
+            // #69: a matched skeleton is never quarantined; approval would make it a cluster sample.
+            if (accepted.isMatched) return null
             val item = accepted.item
             val fingerprint = keying.storedKey(item.kind.wire, item.fingerprint)
             val scope = SlotScope(fingerprint, SlotVariant(item.platformAppVersion ?: "unknown", item.hashDomain, item.filterRev, SlotWalk.layout(item)))
