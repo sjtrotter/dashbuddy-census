@@ -8,6 +8,7 @@ import cloud.trotter.census.contract.UiSkeletonNodeDto
 import cloud.trotter.census.server.Database
 import cloud.trotter.census.server.ingest.ItemVerdict
 import cloud.trotter.census.server.ingest.SkeletonValidator
+import cloud.trotter.census.server.matchedAccepted
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -75,6 +76,8 @@ class TaggedDumpOrderTest : LifecycleTestDatabase() {
             }
             // Each upload is its own screen (a different width), so all its rows are new: a presence and a value per slot.
             assertEquals(listOf(40, 42, 44, 46), uploads.map { it.size })
+            // #69: the matched tables are tagged too, and the script picks them by their install_tag column.
+            for (id in listOf(a, b)) observe(db, id, listOf(matchedAccepted(day, policy)))
 
             val raw = postgres.execInContainer("pg_dump", "-U", postgres.username, "-n", "public", postgres.databaseName)
             assertEquals(0, raw.exitCode, raw.stderr)
@@ -85,7 +88,10 @@ class TaggedDumpOrderTest : LifecycleTestDatabase() {
             val slots = block(ordered, "slot_sightings")
             assertEquals(slots.sorted(), slots)
             assertFalse(uploads.any { contiguous(slots, it) })
-            for (table in listOf("token_sightings_v5", "cluster_sightings_v5")) block(ordered, table).let { assertEquals(it.sorted(), it, table) }
+            for (table in listOf("token_sightings_v5", "cluster_sightings_v5", "matched_sightings", "matched_slot_sightings")) {
+                block(ordered, table).let { assertEquals(it.sorted(), it, table) }
+            }
+            assertTrue(block(ordered, "matched_slot_sightings").size > 2)
             // Only row order changed.
             assertEquals(raw.stdout.lines().sorted(), ordered.lines().sorted())
 
@@ -101,7 +107,8 @@ class TaggedDumpOrderTest : LifecycleTestDatabase() {
                 "-v", "ON_ERROR_STOP=1", "-q", "-f", "/tmp/$database.sql")
             assertEquals(0, restore.exitCode, restore.stderr)
             fun content(url: String) = DriverManager.getConnection(url, postgres.username, postgres.password).use { connection ->
-                listOf("slot_sightings", "token_sightings_v5", "cluster_sightings_v5", "clusters", "installs").associateWith { table ->
+                listOf("slot_sightings", "token_sightings_v5", "cluster_sightings_v5", "clusters", "installs",
+                    "matched_samples", "matched_sightings", "matched_slot_sightings").associateWith { table ->
                     connection.createStatement().use { statement ->
                         statement.executeQuery("SELECT row_to_json(t)::text FROM $table t").use { rows ->
                             buildList { while (rows.next()) add(rows.getString(1)) }.sorted()
@@ -112,6 +119,7 @@ class TaggedDumpOrderTest : LifecycleTestDatabase() {
             val restored = content(postgres.jdbcUrl.replace("/${postgres.databaseName}?", "/$database?"))
             assertEquals(content(postgres.jdbcUrl), restored)
             assertEquals(172, restored.getValue("slot_sightings").size)
+            assertEquals(2, restored.getValue("matched_sightings").size)
         }
     }
 }

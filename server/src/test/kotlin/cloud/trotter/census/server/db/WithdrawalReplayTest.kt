@@ -48,7 +48,7 @@ class WithdrawalReplayTest {
 
     @BeforeEach
     fun clear() {
-        sql { it.update("TRUNCATE installs, clusters, withdrawals, health_daily, token_sightings_v5, epoch_keys, slot_release_days, quarantine_items CASCADE") }
+        sql { it.update("TRUNCATE installs, clusters, withdrawals, health_daily, token_sightings_v5, epoch_keys, slot_release_days, quarantine_items, matched_sightings, matched_slot_sightings CASCADE") }
     }
 
     @Test
@@ -271,6 +271,7 @@ class WithdrawalReplayTest {
         connection.update("INSERT INTO slot_sightings (fingerprint, platform_app_version, hash_domain, filter_rev, layout, slot, value, epoch, install_tag, trusted, last_day, first_received, received_day) VALUES (?, '1.0', 1, 1, repeat('a', 64), 'root/text', 'present', ?, ?, false, ?, ?, ?)",
             fingerprint, slot.epoch, slot.tag, day, day, day)
         connection.seedContributorRows(id, fingerprint, day)
+        connection.seedMatchedRows(id, fingerprint, day)
         connection.update("INSERT INTO ingest_ledger (install_id, day) VALUES (?, ?)", id, day)
         connection.update("INSERT INTO nonces (nonce, install_id, issued_at) VALUES (?, ?, ?)", UUID.randomUUID().toString().replace("-", ""), id, t0.atOffset(ZoneOffset.UTC))
     }
