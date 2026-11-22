@@ -1,5 +1,6 @@
 package cloud.trotter.census.server
 
+import cloud.trotter.census.contract.CensusPlatforms
 import cloud.trotter.census.contract.SkeletonSchema
 import cloud.trotter.census.contract.SkeletonVersion
 import kotlinx.serialization.Serializable
@@ -23,7 +24,8 @@ data class Policy(
     val maxBatchBytes: Int = 1_048_576,
     // Notification wire support is opt-in until the separate ADR lifecycle prerequisite is repaired.
     val acceptedSchemaIds: List<String> = acceptedSchemaIds(notificationsEnabled = false),
-    val acceptedPlatforms: List<String> = listOf("doordash", "uber", "_unknown"),
+    // gig.log#1709: the contract owns the platform list the app reads; a new platform is one contract edit.
+    val acceptedPlatforms: List<String> = CensusPlatforms.ALL.toList(),
     val acceptedTextKeys: List<String> = listOf("text", "desc", "state", "pane", "role", "hint", "tooltip", "error", "clickLabel", "uid"),
     val acceptedHashDomains: List<Int> = listOf(1),
     val retention: Retention = Retention(),
