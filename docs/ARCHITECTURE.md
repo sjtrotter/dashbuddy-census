@@ -20,7 +20,7 @@ Census validates environment configuration (including the required hash pepper),
 
 ## Contract seam
 
-`../DashBuddy/census-contract` is an Apache-2.0 Gradle included build with coordinates `cloud.trotter.census:contract:0.0.0-local` and package `cloud.trotter.census.contract`. `censusContractPath` overrides its location. A reference to `CensusHash` proves dependency substitution at compile time. DTOs, fingerprinting, hashing, and grammars stay in that build; no crypto dependency or duplicate wire implementation is introduced here. The included contract owns hash-domain, DTO and fingerprint constants; both workflows retain pin `bcda0027e01efd25255053816ee88afccd1272b3` (the clicked skeletons, #87).
+`../DashBuddy/census-contract` is an Apache-2.0 Gradle included build with coordinates `cloud.trotter.census:contract:0.0.0-local` and package `cloud.trotter.census.contract`. `censusContractPath` overrides its location. A reference to `CensusHash` proves dependency substitution at compile time. DTOs, fingerprinting, hashing, and grammars stay in that build; no crypto dependency or duplicate wire implementation is introduced here. The included contract owns hash-domain, DTO and fingerprint constants; both workflows retain pin `7008ff62fffb73c2b13e3c89b70e5e95e6f07045` (the contract's platform list, gig.log#1709; the clicked skeletons came with #87).
 
 ## Storage and deployment boundary
 
