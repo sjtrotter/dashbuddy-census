@@ -1,6 +1,7 @@
 package cloud.trotter.census.server.ingest
 
 import cloud.trotter.census.contract.CensusFingerprint
+import cloud.trotter.census.contract.CensusPlatforms
 import cloud.trotter.census.contract.SkeletonSchema
 import cloud.trotter.census.contract.UiSkeletonDto
 import cloud.trotter.census.server.Policy
@@ -149,6 +150,9 @@ class SkeletonValidatorTest {
         for (platform in policy.acceptedPlatforms) {
             assertTrue(SkeletonValidator.validate(item("platform", JsonPrimitive(platform)), policy, today) is ItemVerdict.Accepted)
         }
+        // gig.log#1709: the default policy accepts exactly the contract's platforms, Instacart included.
+        assertEquals(CensusPlatforms.ALL, Policy().acceptedPlatforms)
+        assertTrue(SkeletonValidator.validate(item("platform", JsonPrimitive(CensusPlatforms.INSTACART)), Policy(), today) is ItemVerdict.Accepted)
         assertRejected("bad_platform", skeleton, policy.copy(acceptedPlatforms = emptyList()))
         for (key in policy.acceptedTextKeys) {
             val candidate = node("text", JsonObject(mapOf(key to JsonObject(mapOf("kind" to JsonPrimitive("digits"))))))

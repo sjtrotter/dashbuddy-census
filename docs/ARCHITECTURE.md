@@ -20,7 +20,7 @@ Census validates environment configuration (including the required hash pepper),
 
 ## Contract seam
 
-`../DashBuddy/census-contract` is an Apache-2.0 Gradle included build with coordinates `cloud.trotter.census:contract:0.0.0-local` and package `cloud.trotter.census.contract`. `censusContractPath` overrides its location. A reference to `CensusHash` proves dependency substitution at compile time. DTOs, fingerprinting, hashing, and grammars stay in that build; no crypto dependency or duplicate wire implementation is introduced here. The included contract owns hash-domain, DTO and fingerprint constants; both workflows retain pin `bcda0027e01efd25255053816ee88afccd1272b3` (the clicked skeletons, #87).
+`../DashBuddy/census-contract` is an Apache-2.0 Gradle included build with coordinates `cloud.trotter.census:contract:0.0.0-local` and package `cloud.trotter.census.contract`. `censusContractPath` overrides its location. A reference to `CensusHash` proves dependency substitution at compile time. DTOs, fingerprinting, hashing, and grammars stay in that build; no crypto dependency or duplicate wire implementation is introduced here. The included contract owns hash-domain, DTO and fingerprint constants; both workflows retain pin `7008ff62fffb73c2b13e3c89b70e5e95e6f07045` (the contract's platform list, gig.log#1709; the clicked skeletons came with #87).
 
 ## Storage and deployment boundary
 
@@ -112,7 +112,7 @@ GitHub Actions assumes a ref-restricted OIDC role to deploy through SSM. Account
 
 ## Notification storage and operator boundary — #1189 slice 2
 
-Both workflows pin the included DashBuddy contract to reviewed commit `bcda0027e01efd25255053816ee88afccd1272b3` (the clicked skeletons, #87; the matched skeletons came with #69, the v2 skeletons came with #78). The server uses its DTOs, dispatcher, fingerprint and rejection vocabulary directly. Conformance reads the pinned JSONL corpus, notification vectors and manifest (counts and SHA-256), rather than fixed row counts. The synthetic metadata identity vector remains valid at the contract layer but is rejected by the unchanged server release-tag policy as `bad_version`.
+Both workflows pin the included DashBuddy contract to reviewed commit `7008ff62fffb73c2b13e3c89b70e5e95e6f07045` (the contract's platform list, gig.log#1709; the clicked skeletons came with #87; the matched skeletons came with #69, the v2 skeletons came with #78). The server uses its DTOs, dispatcher, fingerprint and rejection vocabulary directly. Conformance reads the pinned JSONL corpus, notification vectors and manifest (counts and SHA-256), rather than fixed row counts. The synthetic metadata identity vector remains valid at the contract layer but is rejected by the unchanged server release-tag policy as `bad_version`.
 
 V4 adds checked, non-null `clusters.kind`, backfilling existing rows to `screen`; V1–V3 are unchanged. Ingest persists the submitted contract kind without updating an existing cluster's kind and refuses conflicting kinds transactionally. Canonical samples, cluster sightings, token sightings and shared quota accounting commit in one transaction. Samples are capped at five per `(fingerprint, platform_app_version)`, with at most one per receipt day. V5 tokens used `(hash_domain, token_hash, filter_rev, install_id)`; since V8 (#86) the key is `(hash_domain, token_hash, filter_rev, epoch, install_tag)`, and equal chrome tokens still count an install once per epoch across screen and notification surfaces.
 
